@@ -1,0 +1,20 @@
+node_modules/
+dist/
+coverage/
+*.tsbuildinfo
+
+.env
+.env.*
+!.env.example
+
+# per-tenant on-disk state — never committed
+state/*
+!state/.gitkeep
+
+# real signing keys never enter the repo; fixtures/keys holds throwaways only
+*.pem
+*.key
+!fixtures/keys/*.pub
+
+.DS_Store
+*.log

@@ -1,0 +1,27 @@
+[project]
+name = "amh-agents"
+version = "0.1.0"
+description = "AMH Python agent/LLM layer: deep-agent harness, coder agent, memory/RAG, self-improvement, DBOS durable workflows."
+requires-python = ">=3.12"
+dependencies = [
+    "dbos>=1.0.0",
+    "pyyaml>=6.0",
+    "jsonschema>=4.23",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.setuptools]
+# Flat layout: each subsystem is its own top-level importable package,
+# matching the monorepo layout in docs/AMH-SPECIFICATION.md Artifact A.
+packages = ["harness", "coder", "context", "memory", "kb", "selfimprove", "workflows"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

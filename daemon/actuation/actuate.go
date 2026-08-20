@@ -21,8 +21,12 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	oteltrace "go.opentelemetry.io/otel/trace"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 )
 
 // Actuator is the minimal shape a connector must satisfy to be driven by
@@ -52,6 +56,26 @@ type deviceAction struct {
 // inverse, no approved SafetyCase, and no approval ticket was supplied —
 // there is no legal way to execute it.
 var ErrNoAutonomyPath = errors.New("actuation: no verified inverse, no approved SafetyCase, and no approval ticket")
+
+// ExecuteTraced wraps Execute with a §13 tool-call span (§13,
+// gen_ai.operation.name=execute_tool), recording the outcome (success,
+// or the error) as span status — the daemon-side counterpart to the
+// Python agent layer's tool_call_span around the amh-actuate CLI call.
+// Execute itself stays untouched and independently testable; this is an
+// additive wrapper, not a rewrite of the tested autonomy-path logic.
+func ExecuteTraced(ctx context.Context, tp oteltrace.TracerProvider, db *sql.DB, act Actuator, gate *interlocks.Gate, deviceActionID string, cmd Command, ticket *interlocks.Ticket) (string, error) {
+	ctx, span := observability.ToolCallSpan(ctx, tp, "device_action:"+deviceActionID)
+	defer span.End()
+
+	result, err := Execute(ctx, db, act, gate, deviceActionID, cmd, ticket)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		return "", err
+	}
+	span.SetAttributes(attribute.String("amh.actuation.result", result))
+	return result, nil
+}
 
 // Execute runs one device actuation, choosing its autonomy path in the
 // same order as Artifact F:

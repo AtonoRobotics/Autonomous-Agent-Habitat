@@ -17,6 +17,8 @@ import subprocess
 
 from dbos import DBOS
 
+from context.observability import tool_call_span
+
 
 class ActuationError(Exception):
     pass
@@ -56,12 +58,16 @@ def actuate_device(
     if insecure_skip_host_key_verify:
         args += ["--insecure-skip-host-key-verify"]
 
-    proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
-    try:
-        payload = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        raise ActuationError(f"amh-actuate produced non-JSON output: {proc.stdout!r} {proc.stderr!r}")
+    with tool_call_span(f"device_action:{device_action_id}", **{"amh.device.host": host}) as span:
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            span.set_attribute("error.type", "non_json_output")
+            raise ActuationError(f"amh-actuate produced non-JSON output: {proc.stdout!r} {proc.stderr!r}")
 
-    if payload.get("error"):
-        raise ActuationError(payload["error"])
-    return payload["result"]
+        if payload.get("error"):
+            span.set_attribute("error.type", "actuation_error")
+            span.set_attribute("error.message", payload["error"])
+            raise ActuationError(payload["error"])
+        return payload["result"]

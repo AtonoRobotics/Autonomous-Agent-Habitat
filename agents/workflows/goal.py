@@ -19,6 +19,7 @@ from typing import Any
 
 from dbos import DBOS
 
+from context.observability import agent_run_span
 from . import ontology
 
 
@@ -51,17 +52,18 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str) ->
 def run_subagent(task_id: str, objective: str, db_path: str) -> dict[str, Any]:
     """Runs as an isolated DBOS child workflow — crash-recoverable
     independently of the parent (§14.2's subagent isolation contract)."""
-    run_id = ontology.create_run(db_path, task_id)
-    ontology.set_task_status(db_path, task_id, "active")
-    try:
-        result = do_subagent_work(task_id, objective, db_path, run_id)
-        ontology.set_task_status(db_path, task_id, "done")
-        ontology.end_run(db_path, run_id, "ok")
-        return result
-    except Exception:
-        ontology.set_task_status(db_path, task_id, "failed")
-        ontology.end_run(db_path, run_id, "error")
-        raise
+    with agent_run_span(agent_id=task_id):
+        run_id = ontology.create_run(db_path, task_id)
+        ontology.set_task_status(db_path, task_id, "active")
+        try:
+            result = do_subagent_work(task_id, objective, db_path, run_id)
+            ontology.set_task_status(db_path, task_id, "done")
+            ontology.end_run(db_path, run_id, "ok")
+            return result
+        except Exception:
+            ontology.set_task_status(db_path, task_id, "failed")
+            ontology.end_run(db_path, run_id, "error")
+            raise
 
 
 @DBOS.step()
@@ -81,12 +83,13 @@ def pursue_goal(goal_id: str, goal_text: str, db_path: str) -> str:
     restarting it (with the same DBOS system database) resumes exactly
     where it left off — decompose_goal and any already-completed
     run_subagent children are not re-run."""
-    tasks = decompose_goal(goal_id, goal_text, db_path)
+    with agent_run_span(agent_id=goal_id):
+        tasks = decompose_goal(goal_id, goal_text, db_path)
 
-    handles = [
-        DBOS.start_workflow(run_subagent, t["task_id"], t["objective"], db_path)
-        for t in tasks
-    ]
-    gathered = [h.get_result() for h in handles]
+        handles = [
+            DBOS.start_workflow(run_subagent, t["task_id"], t["objective"], db_path)
+            for t in tasks
+        ]
+        gathered = [h.get_result() for h in handles]
 
-    return synthesize(goal_id, gathered, db_path)
+        return synthesize(goal_id, gathered, db_path)

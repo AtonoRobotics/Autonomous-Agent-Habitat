@@ -31,6 +31,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/actuation"
 	sshconn "github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors/ssh"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
 )
 
@@ -96,8 +97,15 @@ func run(dbPath, migrationsDir, deviceActionID, host string, port int, user, for
 		ticket = &interlocks.Ticket{ID: ticketID}
 	}
 
+	// No exporter configured: this one-shot CLI process records a span but
+	// has nowhere to ship it — a real daemon process would pass a
+	// provider wired to OTEL_EXPORTER_OTLP_ENDPOINT (see .env.example).
+	// ExecuteTraced is still exercised for real here, not just in tests.
+	tp := observability.Init(nil)
+	defer tp.Shutdown(context.Background())
+
 	ctx := context.Background()
-	result, err := actuation.Execute(ctx, db, conn, gate, deviceActionID, actuation.Command{
+	result, err := actuation.ExecuteTraced(ctx, tp, db, conn, gate, deviceActionID, actuation.Command{
 		Forward:   forward,
 		ReadState: readState,
 	}, ticket)

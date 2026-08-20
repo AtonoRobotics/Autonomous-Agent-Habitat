@@ -1,0 +1,186 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "amh/ontology/v1",
+  "title": "AMH Ontology",
+  "description": "Typed property-graph entity definitions. See docs/AMH-SPECIFICATION.md Artifact C and §6.",
+  "$defs": {
+    "Agent": {
+      "type": "object",
+      "required": ["id", "kind", "state"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "parent_id": { "type": ["string", "null"] },
+        "state": { "type": "string", "enum": ["spawned", "running", "paused", "hibernated", "terminated"] },
+        "budget_usd": { "type": "number", "default": 0 }
+      }
+    },
+    "Goal": {
+      "type": "object",
+      "required": ["id", "text", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "priority": { "type": "integer", "default": 0 },
+        "owner": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["open", "active", "done", "failed"] }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "required": ["id", "goal_id", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "goal_id": { "type": "string" },
+        "assignee": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "approval_required": { "type": "boolean", "default": false }
+      }
+    },
+    "Skill": {
+      "type": "object",
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "name": { "type": "string" },
+        "code_ref": { "type": "string" },
+        "eval_score": { "type": ["number", "null"] }
+      }
+    },
+    "Tool": {
+      "type": "object",
+      "required": ["id", "name", "input_schema"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string" },
+        "input_schema": { "type": "object" },
+        "connector_id": { "type": ["string", "null"] }
+      }
+    },
+    "Memory": {
+      "type": "object",
+      "required": ["id", "tier", "payload", "valid_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "tier": { "type": "string", "enum": ["working", "episodic", "semantic", "procedural", "entity"] },
+        "payload": {},
+        "valid_at": { "type": "string", "format": "date-time" },
+        "invalid_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "required": ["id", "task_id", "uri"],
+      "properties": {
+        "id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "uri": { "type": "string" },
+        "hash": { "type": ["string", "null"] }
+      }
+    },
+    "Device": {
+      "type": "object",
+      "required": ["id", "kind", "connector_id"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string" },
+        "connector_id": { "type": "string" }
+      }
+    },
+    "DeviceAction": {
+      "type": "object",
+      "description": "Reversibility is per-action, not per-device (§12, §14.6).",
+      "required": ["id", "device_id", "name", "reversible", "autonomy_stage", "autonomy_policy"],
+      "properties": {
+        "id": { "type": "string" },
+        "device_id": { "type": "string" },
+        "name": { "type": "string" },
+        "reversible": { "type": "boolean" },
+        "inverse_template": { "type": ["object", "null"] },
+        "verified_at": { "type": ["string", "null"], "format": "date-time" },
+        "autonomy_stage": { "type": "string", "enum": ["unverified", "supervised", "earned"] },
+        "autonomy_policy": { "type": "string", "enum": ["immediate", "graduated", "always_gated"] }
+      }
+    },
+    "SafetyCase": {
+      "type": "object",
+      "required": ["id", "subject_id", "subject_type", "risk_class", "independent_review"],
+      "properties": {
+        "id": { "type": "string" },
+        "subject_id": { "type": "string" },
+        "subject_type": { "type": "string", "enum": ["device_action", "capability"] },
+        "risk_class": { "type": "string", "enum": ["low", "moderate", "high", "irreversible_high_consequence"] },
+        "guardrails": { "type": ["object", "null"] },
+        "supervised_track_record": { "type": ["object", "null"] },
+        "formal_verification": { "type": ["object", "null"] },
+        "independent_review": {
+          "type": "boolean",
+          "description": "MUST be true for risk_class != 'low'"
+        },
+        "approved_at": { "type": ["string", "null"], "format": "date-time" },
+        "revoked_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "Location": {
+      "type": "object",
+      "required": ["id", "kind", "coordinate_frame"],
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": ["string", "null"] },
+        "kind": { "type": "string", "enum": ["point", "region", "hierarchy"] },
+        "coordinate_frame": { "type": "string" },
+        "x": { "type": ["number", "null"] },
+        "y": { "type": ["number", "null"] },
+        "z": { "type": ["number", "null"] },
+        "geometry": { "type": ["object", "null"] }
+      }
+    },
+    "Connector": {
+      "type": "object",
+      "required": ["id", "type", "auth"],
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string", "enum": ["rest", "graphql", "webhook", "ssh", "winrm", "mqtt", "opcua", "mcp"] },
+        "auth": { "type": "string", "enum": ["oauth2", "apikey", "mtls", "none"] }
+      }
+    },
+    "Run": {
+      "type": "object",
+      "required": ["id", "started", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "task_id": { "type": ["string", "null"] },
+        "started": { "type": "string", "format": "date-time" },
+        "ended": { "type": ["string", "null"], "format": "date-time" },
+        "status": { "type": "string" },
+        "tokens_in": { "type": "integer", "default": 0 },
+        "tokens_out": { "type": "integer", "default": 0 },
+        "cost_usd": { "type": "number", "default": 0 }
+      }
+    },
+    "Event": {
+      "type": "object",
+      "required": ["id", "run_id", "type", "ts"],
+      "properties": {
+        "id": { "type": "string" },
+        "run_id": { "type": "string" },
+        "type": { "type": "string" },
+        "ts": { "type": "string", "format": "date-time" },
+        "payload": {}
+      }
+    },
+    "ApprovalGate": {
+      "type": "object",
+      "required": ["id", "action", "risk"],
+      "properties": {
+        "id": { "type": "string" },
+        "action": { "type": "object" },
+        "risk": { "type": "string" },
+        "approved_by": { "type": ["string", "null"] },
+        "approved_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  }
+}

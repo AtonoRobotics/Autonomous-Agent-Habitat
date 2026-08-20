@@ -1,0 +1,24 @@
+# AMH agent manifest — see docs/AMH-SPECIFICATION.md Artifact G.
+apiVersion: amh/v1
+kind: Agent
+metadata:
+  name: greenhouse-lead
+  version: 0.1.0
+spec:
+  model: claude-sonnet-4-6
+  harness: deep-agent
+  planning:
+    write_todos: true   # opt-in upstream (DeepAgents v0.7); on by default in AMH
+  tools: [ssh.exec, memory.recall]
+  subagents:
+    max_concurrent: 1   # V0: single sub-agent
+    isolation: strict
+    return: result_only
+    share_trace_to_manager: true
+  context:
+    window_budget: 180000
+    compact_at: 0.70
+    keep_recent_turns_raw: 3
+    tool_result_cap: 25000
+  approval:
+    irreversible_actions: require

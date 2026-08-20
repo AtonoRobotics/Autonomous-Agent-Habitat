@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "amh/envelope/v1",
+  "title": "AMH Inter-Agent Message Envelope",
+  "description": "A2A 1.0-derived envelope for agent-to-agent coordination over the internal bus. See docs/AMH-SPECIFICATION.md Artifact D.",
+  "type": "object",
+  "required": ["msg_id", "sender", "recipient", "intent", "created_at"],
+  "properties": {
+    "a2a_baseline": { "type": "string", "const": "1.0" },
+    "msg_id": { "type": "string", "format": "uuid" },
+    "trace_id": { "type": "string" },
+    "sender": {
+      "type": "object",
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": { "type": "string" },
+        "role": { "type": "string" }
+      }
+    },
+    "recipient": {
+      "type": "object",
+      "required": ["agent_id"],
+      "properties": {
+        "agent_id": { "type": "string" }
+      }
+    },
+    "intent": {
+      "type": "string",
+      "enum": ["propose", "counter-propose", "query", "inform", "accept", "reject", "commit", "delegate", "result", "error"]
+    },
+    "task": {
+      "type": "object",
+      "properties": {
+        "task_id": { "type": "string" },
+        "objective": { "type": "string" },
+        "boundaries": { "type": "string" },
+        "output_schema": { "type": "object" },
+        "deadline": { "type": "string", "format": "date-time" }
+      }
+    },
+    "parts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type", "content"],
+        "properties": {
+          "type": { "type": "string", "enum": ["text", "json", "file", "artifact_ref"] },
+          "content": {}
+        }
+      }
+    },
+    "context_ref": {
+      "type": ["string", "null"],
+      "description": "vfs:// handle, never inline payload — enforces sub-agent isolation at the protocol level"
+    },
+    "trace_ref": {
+      "type": ["string", "null"],
+      "description": "vfs:// handle to the sender's full execution trace, pulled by a manager during synthesis"
+    },
+    "reply_to": { "type": ["string", "null"] },
+    "ttl_ms": { "type": "integer", "default": 30000 },
+    "created_at": { "type": "string", "format": "date-time" }
+  }
+}

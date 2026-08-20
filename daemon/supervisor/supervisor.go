@@ -38,14 +38,14 @@ type Child struct {
 // restart-intensity limit so a persistently crashing child eventually
 // escalates instead of spinning forever.
 type Supervisor struct {
-	Name         string
-	Strategy     Strategy
-	MaxRestarts  int
-	Window       time.Duration
-	Log          *slog.Logger
-	children     []Child
-	mu           sync.Mutex
-	restartsAt   []time.Time
+	Name        string
+	Strategy    Strategy
+	MaxRestarts int
+	Window      time.Duration
+	Log         *slog.Logger
+	children    []Child
+	mu          sync.Mutex
+	restartsAt  []time.Time
 }
 
 func New(name string, strategy Strategy, maxRestarts int, window time.Duration, log *slog.Logger) *Supervisor {

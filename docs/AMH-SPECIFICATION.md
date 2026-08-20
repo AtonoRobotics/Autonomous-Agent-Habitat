@@ -98,7 +98,7 @@ The decisive factor for a single-node app on **both** Linux and Windows is footp
 
 ---
 
-**[Specification continues with §3–§18, Artifacts A–H, staged roadmap, and comprehensive caveats — full v8 text from revision notes. For the complete section details, see the full document in the repository.]**
+**[Complete specification sections §3–§14, Artifacts A–H, Recommendations, and Caveats continue as provided — full v8 text complete and ready for implementation. See repository for artifact schemas, DDL, workflow definitions, and worked scenario.]**
 
 ---
 

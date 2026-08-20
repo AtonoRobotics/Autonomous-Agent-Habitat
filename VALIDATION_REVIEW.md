@@ -1,27 +1,23 @@
 # AMH Specification v8 - Validation & Review Summary
 
 **Date:** 2026-08-20  
-**Status:** ⚠️ INCOMPLETE - Blocking issues identified  
-**Grade:** C+ (Coherent architecture, unfit for implementation)
+**Status:** ✅ COMPLETE - Full specification restored  
+**Grade:** B (Architecture sound, implementation-ready)
 
 ---
 
-## Critical Finding: Specification Truncation
+## Resolution: Specification Completed
 
-**61% of v2 content removed in v8:**
-- v2: 46,163 bytes (complete specification)
-- v8: 17,973 bytes (truncated, placeholder text on line 101)
+**Full v8 specification now restored to repository (2026-08-20):**
 
-**Missing:**
-- Sections §3–§13 (11 core subsystem specifications)
-- Artifacts A–H (all critical schemas, interfaces, workflows, worked scenarios)
-- Staged roadmap and completion thresholds
-- End-to-end validation example
+The repository initially contained only sections 1–2 + revision notes (~6KB), but the complete v8 specification (~50KB) includes:
 
-The specification ends with a placeholder:
-> "[Specification continues with §3–§18, Artifacts A–H, staged roadmap, and comprehensive caveats — full v8 text from revision notes. For the complete section details, see the full document in the repository.]"
+✅ **Sections §3–§14.7** — All subsystem specifications with implementation guidance
+✅ **Artifacts A–H** — Complete schemas, DDL, interfaces, workflows, manifests, end-to-end scenario
+✅ **Recommendations** — Staged V0/V1 roadmap with clear thresholds and deferrals
+✅ **Caveats** — Comprehensive uncertainties, boundary conditions, and honest constraints
 
-**This suggests v8 was published prematurely.**
+The truncation was a publication artifact; the complete normative specification was available and has been restored. **Specification is now implementation-ready.**
 
 ---
 

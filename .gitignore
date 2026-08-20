@@ -1,20 +1,71 @@
-node_modules/
-dist/
+# Go binaries and build artifacts
+*.o
+*.a
+*.so
+*.exe
+*.dll
+*.dylib
+/dist
+/build
+amh-daemon
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.hypothesis/
+htmlcov/
 coverage/
+
+# Node (legacy from TypeScript scaffold)
+node_modules/
 *.tsbuildinfo
 
+# Environment and secrets
 .env
 .env.*
 !.env.example
 
-# per-tenant on-disk state — never committed
+# Per-tenant on-disk state — never committed
 state/*
 !state/.gitkeep
 
-# real signing keys never enter the repo; fixtures/keys holds throwaways only
+# Real signing keys never enter the repo; fixtures/keys holds throwaways only
 *.pem
 *.key
 !fixtures/keys/*.pub
 
+# IDE and editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
 .DS_Store
 *.log
+
+# SQLite databases (for local testing only; prod data stored elsewhere)
+*.db
+*.db-shm
+*.db-wal

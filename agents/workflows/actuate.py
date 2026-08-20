@@ -1,19 +1,25 @@
-"""Device actuation step: bridges a DBOS workflow to the Go daemon's
-device-actuation kernel (daemon/actuation), which owns reversibility
-gating, the ApprovalGate, and connector I/O (§12, §14.6, Artifact F).
+"""Device actuation step: calls the Go daemon's persistent actuation API
+(daemon/api), which owns reversibility gating, the ApprovalGate, and
+connector I/O (§12, §14.6, Artifact F).
 
-V0 bridge: subprocess call to the amh-actuate CLI (daemon/cmd/amh-actuate),
-not a network RPC — see that command's doc comment for why. Wrapped as a
-@DBOS.step() so a crash between "actuation happened" and "workflow
-recorded it happened" cannot occur silently: the step either completes
-(and DBOS durably records that) or the workflow sees the failure and can
-retry/escalate, exactly as any other step.
+Bridge note: this replaces an earlier subprocess-per-call design (spawning
+the amh-actuate CLI, which re-dialed SSH from scratch every actuation).
+The daemon now runs a persistent HTTP endpoint backed by a real connector
+registry (daemon/connectors), so this step is a single HTTP round-trip
+against a long-lived process — the architectural property the CLI
+approach was always meant to be a stand-in for. Spec fidelity note:
+Artifact A names contracts/proto (gRPC) for this bridge; see
+daemon/api/api.go's doc comment for why this is JSON-over-HTTP instead.
+
+Uses only the standard library (urllib) — no new HTTP client dependency
+for what is, for now, a single low-frequency call per actuation.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
+import urllib.error
+import urllib.request
 
 from dbos import DBOS
 
@@ -26,45 +32,40 @@ class ActuationError(Exception):
 
 @DBOS.step()
 def actuate_device(
-    amh_actuate_bin: str,
-    db_path: str,
-    migrations_dir: str,
+    daemon_api_base_url: str,
     device_action_id: str,
-    host: str,
-    port: int,
     forward: str,
     read_state: str = "",
     ticket_id: str = "",
-    insecure_skip_host_key_verify: bool = False,
 ) -> str:
-    """Runs amh-actuate for one device action and returns its result
-    string. Raises ActuationError (with the CLI's structured error
-    message) on any failure — including the fail-closed cases enforced by
-    daemon/actuation.Execute (no verified inverse + no approved SafetyCase
-    + no approved ticket)."""
-    args = [
-        amh_actuate_bin,
-        "--db", db_path,
-        "--migrations", migrations_dir,
-        "--device-action-id", device_action_id,
-        "--host", host,
-        "--port", str(port),
-        "--forward", forward,
-    ]
+    """POSTs to the daemon's /v1/device-actions/{id}/actuate and returns
+    its result string. Raises ActuationError (with the daemon's structured
+    error message) on any failure — including the fail-closed cases
+    enforced by daemon/actuation.Execute (no verified inverse + no
+    approved SafetyCase + no approved ticket, surfaced as HTTP 403)."""
+    body: dict[str, str] = {"forward": forward}
     if read_state:
-        args += ["--read-state", read_state]
+        body["read_state"] = read_state
     if ticket_id:
-        args += ["--ticket-id", ticket_id]
-    if insecure_skip_host_key_verify:
-        args += ["--insecure-skip-host-key-verify"]
+        body["ticket_id"] = ticket_id
 
-    with tool_call_span(f"device_action:{device_action_id}", **{"amh.device.host": host}) as span:
-        proc = subprocess.run(args, capture_output=True, text=True, timeout=30)
+    url = f"{daemon_api_base_url}/v1/device-actions/{device_action_id}/actuate"
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+
+    with tool_call_span(f"device_action:{device_action_id}", **{"amh.api.url": url}) as span:
         try:
-            payload = json.loads(proc.stdout)
-        except json.JSONDecodeError:
-            span.set_attribute("error.type", "non_json_output")
-            raise ActuationError(f"amh-actuate produced non-JSON output: {proc.stdout!r} {proc.stderr!r}")
+            with urllib.request.urlopen(request, timeout=30) as response:
+                payload = json.loads(response.read())
+        except urllib.error.HTTPError as e:
+            payload = json.loads(e.read())
+        except urllib.error.URLError as e:
+            span.set_attribute("error.type", "connection_error")
+            raise ActuationError(f"could not reach daemon API at {url}: {e}") from e
 
         if payload.get("error"):
             span.set_attribute("error.type", "actuation_error")

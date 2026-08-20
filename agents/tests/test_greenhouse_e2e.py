@@ -1,17 +1,20 @@
 """End-to-end test for the V0 walking-skeleton scenario (Artifact H, steps
 1-4), across real process boundaries: a Python DBOS workflow orchestrates
 decomposition, isolated sub-agent execution, and context compaction, then
-drives a genuine SSH actuation against a Go-built device simulator via the
-amh-actuate CLI bridge — the same actuation kernel already unit-tested in
-daemon/actuation/actuate_test.go, now exercised from the other side of the
-process boundary it will eventually cross over a real RPC bridge.
+drives a genuine SSH actuation through the Go daemon's persistent
+actuation API (daemon/api) against a Go-built device simulator — the same
+actuation kernel already unit-tested in daemon/actuation/actuate_test.go
+and daemon/api/api_test.go, now exercised from the Python side of the
+process boundary it actually runs across in a real deployment (daemon and
+device stay up independently of the Python agent process).
 
-Requires a working Go toolchain (go build) and node/npx are NOT needed
-here — only go. Skipped if `go` is unavailable.
+Requires a working Go toolchain (go build). Skipped if `go` is
+unavailable.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sqlite3
@@ -19,7 +22,10 @@ import subprocess
 import sys
 import textwrap
 import time
+import urllib.error
+import urllib.request
 import uuid
+from base64 import b64encode
 
 import pytest
 
@@ -31,12 +37,12 @@ pytestmark = pytest.mark.skipif(shutil.which("go") is None, reason="go toolchain
 
 @pytest.fixture(scope="module")
 def go_binaries(tmp_path_factory):
-    """Builds amh-fake-device and amh-actuate once per test module."""
+    """Builds amh-fake-device and amh-daemon once per test module."""
     bin_dir = tmp_path_factory.mktemp("bin")
     env = dict(os.environ, GOTOOLCHAIN="local")
     for name, pkg in [
         ("amh-fake-device", "./daemon/cmd/amh-fake-device"),
-        ("amh-actuate", "./daemon/cmd/amh-actuate"),
+        ("amh-daemon", "./daemon/cmd/amh-daemon"),
     ]:
         out = str(bin_dir / name)
         subprocess.run(
@@ -45,13 +51,13 @@ def go_binaries(tmp_path_factory):
         )
     return {
         "fake_device": str(bin_dir / "amh-fake-device"),
-        "actuate": str(bin_dir / "amh-actuate"),
+        "daemon": str(bin_dir / "amh-daemon"),
     }
 
 
 @pytest.fixture()
 def fake_device(go_binaries):
-    """Starts the SSH device simulator, yields (host, port), tears it down."""
+    """Starts the SSH device simulator, yields (host, port, host_key_authorized_key)."""
     proc = subprocess.Popen(
         [go_binaries["fake_device"], "--initial-open-pct", "40"],
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -61,14 +67,67 @@ def fake_device(go_binaries):
         assert listen_line.startswith("LISTEN "), f"unexpected fake-device output: {listen_line!r}"
         addr = listen_line.strip().split(" ", 1)[1]
         host, port = addr.rsplit(":", 1)
+
+        hostkey_line = proc.stdout.readline()
+        assert hostkey_line.startswith("HOSTKEY "), f"unexpected fake-device output: {hostkey_line!r}"
+        host_key_authorized_key = hostkey_line.strip().split(" ", 1)[1]
+
         assert proc.stdout.readline().strip() == "READY"
-        yield host, int(port)
+        yield host, int(port), host_key_authorized_key
     finally:
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+def _find_free_port() -> int:
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture()
+def daemon(go_binaries, db_path):
+    """Starts amh-daemon pointed at db_path, waits for /healthz, tears down."""
+    api_port = _find_free_port()
+    health_port = _find_free_port()
+    env = dict(
+        os.environ,
+        DATABASE_URL=f"sqlite:{db_path}",
+        AMH_MIGRATIONS_DIR=MIGRATIONS_DIR,
+        AMH_DAEMON_PORT=str(health_port),
+        AMH_API_PORT=str(api_port),
+        HABITAT_ROUTINE_TICK_MS="60000",
+    )
+    proc = subprocess.Popen([go_binaries["daemon"]], cwd=REPO_ROOT, env=env,
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    base_url = f"http://127.0.0.1:{api_port}"
+    try:
+        _wait_for_health(health_port)
+        yield base_url
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+
+
+def _wait_for_health(port: int, timeout: float = 10.0) -> None:
+    deadline = time.time() + timeout
+    last_error = None
+    while time.time() < deadline:
+        try:
+            urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=1)
+            return
+        except (urllib.error.URLError, ConnectionError) as e:
+            last_error = e
+            time.sleep(0.1)
+    raise TimeoutError(f"daemon did not become healthy within {timeout}s: {last_error}")
 
 
 @pytest.fixture()
@@ -80,9 +139,40 @@ def db_path(tmp_path):
     return path
 
 
-def seed_vent(db_path: str) -> None:
+def write_ephemeral_client_key(tmp_path) -> str:
+    """Generates a throwaway RSA key and writes it as a PEM file — the
+    fake device accepts any client key, so identity doesn't matter here,
+    only that the daemon's connector config points at a real, readable
+    private key file, matching how a real deployment's secret would be
+    referenced by path rather than embedded in the database."""
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.TraditionalOpenSSL,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+    path = str(tmp_path / "client_key.pem")
+    with open(path, "wb") as f:
+        f.write(pem)
+    return path
+
+
+def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, tmp_path) -> None:
+    config = {
+        "host": host,
+        "port": port,
+        "user": "amh",
+        "private_key_path": write_ephemeral_client_key(tmp_path),
+        "host_key_authorized_key": host_key_authorized_key,
+    }
     conn = sqlite3.connect(db_path)
-    conn.execute("INSERT INTO connector (id, type, auth) VALUES ('greenhouse-vent', 'ssh', 'none')")
+    conn.execute(
+        "INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)",
+        (json.dumps(config),),
+    )
     conn.execute("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')")
     conn.execute(
         """INSERT INTO device_action (id, device_id, name, reversible, inverse_template, verified_at)
@@ -94,14 +184,14 @@ def seed_vent(db_path: str) -> None:
     conn.close()
 
 
-def test_greenhouse_scenario_steps_1_to_4_end_to_end(go_binaries, fake_device, db_path):
+def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_path, tmp_path):
     from dbos import DBOS
 
     from workflows.greenhouse import run_greenhouse_scenario
     from workflows.runtime import init_dbos
 
-    host, port = fake_device
-    seed_vent(db_path)
+    host, port, host_key_authorized_key = fake_device
+    seed_vent(db_path, host, port, host_key_authorized_key, tmp_path)
 
     init_dbos("amh-greenhouse-e2e", db_path)
     DBOS.launch()
@@ -111,10 +201,8 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(go_binaries, fake_device, d
             goal_id,
             "monitor greenhouse temperature; open vent on threshold",
             db_path,
-            MIGRATIONS_DIR,
-            go_binaries["actuate"],
+            daemon,
             "vent-actuator.set_open_pct",
-            host, port,
             forward="vent-ctl set-open-pct 60",
             read_state="vent-ctl get-open-pct",
         )
@@ -129,7 +217,7 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(go_binaries, fake_device, d
     assert result["compaction"]["compacted"] is True
     assert result["compaction"]["turns_compacted"] > 0
 
-    # Step 4: real autonomous actuation, no ApprovalGate needed
+    # Step 4: real autonomous actuation through the daemon's API, no ApprovalGate needed
     assert result["actuation_result"] == "ok"
 
     conn = sqlite3.connect(db_path)
@@ -149,17 +237,18 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(go_binaries, fake_device, d
     conn.close()
 
 
-def test_greenhouse_scenario_survives_process_restart(go_binaries, fake_device, db_path):
+def test_greenhouse_scenario_survives_process_restart(fake_device, daemon, db_path, tmp_path):
     """Starts run_greenhouse_scenario asynchronously, crashes the Python
     process with os._exit before it reaches step 4, then a second,
     independent Python process resumes via DBOS.launch() alone (never
     re-invoking the workflow function) and completes it — including
-    running the real SSH actuation against the still-running fake device.
-    The device process survives the Python-side crash exactly as a real
-    physical device would survive the daemon restarting.
+    running the real SSH actuation through the daemon's API against the
+    still-running fake device. Both the daemon and the device survive the
+    Python-side crash exactly as they would survive the agent process
+    restarting in a real deployment.
     """
-    host, port = fake_device
-    seed_vent(db_path)
+    host, port, host_key_authorized_key = fake_device
+    seed_vent(db_path, host, port, host_key_authorized_key, tmp_path)
 
     goal_id = str(uuid.uuid4())
     workflow_id = f"greenhouse-{goal_id}"
@@ -177,12 +266,12 @@ def test_greenhouse_scenario_survives_process_restart(go_binaries, fake_device, 
         with SetWorkflowID({workflow_id!r}):
             DBOS.start_workflow(
                 run_greenhouse_scenario,
-                {goal_id!r}, {goal_text!r}, {db_path!r}, {MIGRATIONS_DIR!r},
-                {go_binaries["actuate"]!r}, "vent-actuator.set_open_pct",
-                {host!r}, {port!r}, "vent-ctl set-open-pct 60", "vent-ctl get-open-pct",
+                {goal_id!r}, {goal_text!r}, {db_path!r}, {daemon!r},
+                "vent-actuator.set_open_pct",
+                "vent-ctl set-open-pct 60", "vent-ctl get-open-pct",
             )
         import os
-        os._exit(1)  # crash before get_result() — simulates the daemon dying mid-flight
+        os._exit(1)  # crash before get_result() — simulates the agent process dying mid-flight
     """)
     start_result = subprocess.run(
         [sys.executable, "-c", start_script],

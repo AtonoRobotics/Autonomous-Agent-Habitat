@@ -55,7 +55,14 @@ func main() {
 	state := &ventState{openPct: *initialOpenPct}
 
 	// Machine-parseable startup lines for the orchestrating test/script.
+	// HOSTKEY is in authorized_keys format so a caller can pin it directly
+	// into connector.config.host_key_authorized_key for real host-key
+	// verification — this fixture accepts any client key, but callers
+	// should still exercise real host-key pinning against it, not just
+	// InsecureIgnoreHostKey, since that's the security-relevant behavior
+	// a real connector actually depends on.
 	fmt.Printf("LISTEN %s\n", listener.Addr().String())
+	fmt.Printf("HOSTKEY %s", string(ssh.MarshalAuthorizedKey(hostSigner.PublicKey())))
 	fmt.Println("READY")
 	os.Stdout.Sync()
 

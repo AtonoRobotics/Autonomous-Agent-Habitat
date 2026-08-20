@@ -20,6 +20,7 @@ dependencies = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "cryptography" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
 ]
@@ -35,6 +36,7 @@ requires-dist = [
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "cryptography", specifier = ">=50.0.0" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-asyncio", specifier = ">=1.4.0" },
 ]

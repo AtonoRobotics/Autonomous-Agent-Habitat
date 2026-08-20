@@ -13,7 +13,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/api"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/scheduler"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/supervisor"
@@ -31,6 +33,7 @@ func main() {
 	migrationsDir := getenv("AMH_MIGRATIONS_DIR", "./store/migrations")
 	host := getenv("AMH_DAEMON_HOST", "127.0.0.1")
 	port := getenv("AMH_DAEMON_PORT", "8080")
+	apiPort := getenv("AMH_API_PORT", "8090")
 	tickMs, err := strconv.Atoi(getenv("HABITAT_ROUTINE_TICK_MS", "60000"))
 	if err != nil {
 		log.Error("invalid HABITAT_ROUTINE_TICK_MS", "error", err)
@@ -52,9 +55,19 @@ func main() {
 
 	healthSrv := health.New(host+":"+port, db, log)
 
+	// No exporter wired yet: spans are recorded but not shipped anywhere
+	// until an OTLP exporter is added (OTEL_EXPORTER_OTLP_ENDPOINT is
+	// already reserved for this in .env.example). Recording without
+	// exporting is a valid V0 default — see daemon/observability's doc.
+	tp := observability.Init(nil)
+	defer tp.Shutdown(context.Background())
+
+	apiSrv := api.New(host+":"+apiPort, db, tp, log)
+
 	sup := supervisor.New("amh-daemon", supervisor.OneForOne, 5, time.Minute, log)
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})
 	sup.Add(supervisor.Child{Name: "health", Run: healthSrv.Run})
+	sup.Add(supervisor.Child{Name: "api", Run: apiSrv.Run})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

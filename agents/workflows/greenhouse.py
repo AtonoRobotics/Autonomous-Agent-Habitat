@@ -7,7 +7,8 @@ Artifact H: "Keep the greenhouse healthy overnight; if temperature exceeds
   3. Context compaction under sustained polling (context.budget/compactor)
   4. Autonomous reversible device actuation, no ApprovalGate — the vent
      action has a verified inverse (actuate.actuate_device, bridging to
-     the Go daemon's actuation kernel over SSH)
+     the Go daemon's persistent actuation API — daemon/api — which owns
+     the real SSH connector)
 
 Step 3 is deliberately not itself a DBOS step: BudgetManager/Compactor are
 in-process context-window bookkeeping, not durable state — there is
@@ -50,17 +51,14 @@ def run_greenhouse_scenario(
     goal_id: str,
     goal_text: str,
     db_path: str,
-    migrations_dir: str,
-    amh_actuate_bin: str,
+    daemon_api_base_url: str,
     device_action_id: str,
-    device_host: str,
-    device_port: int,
     forward: str,
     read_state: str,
 ) -> dict[str, Any]:
     """Top-level durable workflow for the full V0 scenario. Crash-safe: if
     the process dies after step 4's actuation is durably recorded (either
-    by amh-actuate's own SQLite commit, or by DBOS's step-completion
+    by the daemon's own SQLite commit, or by DBOS's step-completion
     record) but before this function returns, resuming replays only the
     remaining steps — see test_greenhouse_e2e.py's restart-survival test.
     """
@@ -76,15 +74,10 @@ def run_greenhouse_scenario(
 
     # Step 4: autonomous reversible actuation — no ApprovalGate, verified inverse
     actuation_result = actuate_device(
-        amh_actuate_bin,
-        db_path,
-        migrations_dir,
+        daemon_api_base_url,
         device_action_id,
-        device_host,
-        device_port,
         forward,
         read_state,
-        insecure_skip_host_key_verify=True,
     )
 
     return {

@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amh.dev/schemas/v1/extension-manifest.schema.json",
+  "title": "AMH Extension Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": { "const": "amh/v1" },
+    "kind": { "const": "Extension" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "version", "publisher"],
+      "properties": {
+        "id": { "$ref": "#/$defs/namespacedId" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "version": { "$ref": "#/$defs/semver" },
+        "publisher": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "description": { "type": "string", "maxLength": 2048 }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entrypoint", "isolation", "provides", "requires", "actions", "compatibility"],
+      "properties": {
+        "entrypoint": { "type": "string", "minLength": 1, "maxLength": 512 },
+        "isolation": { "enum": ["process", "wasm", "container", "in_process"] },
+        "provides": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/capability" },
+          "uniqueItems": true
+        },
+        "requires": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requirement" },
+          "uniqueItems": true
+        },
+        "actions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/actionType" },
+          "uniqueItems": true
+        },
+        "schemas": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri-reference" },
+          "uniqueItems": true,
+          "default": []
+        },
+        "migrations": {
+          "type": "array",
+          "items": { "type": "string", "format": "uri-reference" },
+          "uniqueItems": true,
+          "default": []
+        },
+        "compatibility": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["amhCore"],
+          "properties": {
+            "amhCore": { "type": "string", "minLength": 1 },
+            "platforms": {
+              "type": "array",
+              "items": { "enum": ["linux_amd64", "linux_arm64", "windows_amd64", "windows_arm64"] },
+              "uniqueItems": true
+            }
+          }
+        },
+        "signature": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["algorithm", "keyId", "digest", "value"],
+          "properties": {
+            "algorithm": { "enum": ["ed25519"] },
+            "keyId": { "type": "string", "minLength": 1 },
+            "digest": { "$ref": "#/$defs/sha256" },
+            "value": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "namespacedId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*/[a-z0-9][a-z0-9._-]*$",
+      "maxLength": 192
+    },
+    "semver": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?(?:\\+[0-9A-Za-z.-]+)?$"
+    },
+    "sha256": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "capability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "contract"],
+      "properties": {
+        "id": { "$ref": "#/$defs/namespacedId" },
+        "version": { "$ref": "#/$defs/semver" },
+        "contract": { "type": "string", "format": "uri-reference" }
+      }
+    },
+    "requirement": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["capability", "versionRange", "optional"],
+      "properties": {
+        "capability": { "$ref": "#/$defs/namespacedId" },
+        "versionRange": { "type": "string", "minLength": 1 },
+        "optional": { "type": "boolean" }
+      }
+    },
+    "actionType": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "schemaVersion", "inputSchema", "outputSchema", "reconciliation"],
+      "properties": {
+        "id": { "$ref": "#/$defs/namespacedId" },
+        "schemaVersion": { "$ref": "#/$defs/semver" },
+        "inputSchema": { "type": "string", "format": "uri-reference" },
+        "outputSchema": { "type": "string", "format": "uri-reference" },
+        "reconciliation": { "enum": ["required", "supported", "not_supported"] }
+      }
+    }
+  }
+}

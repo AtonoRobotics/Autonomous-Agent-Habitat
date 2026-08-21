@@ -33,6 +33,7 @@ class ActuationError(Exception):
 @DBOS.step()
 def actuate_device(
     daemon_api_base_url: str,
+    agent_token: str,
     device_action_id: str,
     forward: str,
     read_state: str = "",
@@ -42,7 +43,13 @@ def actuate_device(
     its result string. Raises ActuationError (with the daemon's structured
     error message) on any failure — including the fail-closed cases
     enforced by daemon/actuation.Execute (no verified inverse + no
-    approved SafetyCase + no approved ticket, surfaced as HTTP 403)."""
+    approved SafetyCase + no approved ticket, surfaced as HTTP 403).
+
+    agent_token authenticates as daemon/authn's agent role — sufficient
+    to actuate and to create/check approval tickets, but the daemon
+    mechanically refuses this role on the approve endpoint (see
+    approval.py's module docstring: there is no approve() function here,
+    on purpose, and no token this module holds could use one anyway)."""
     body: dict[str, str] = {"forward": forward}
     if read_state:
         body["read_state"] = read_state
@@ -53,7 +60,7 @@ def actuate_device(
     request = urllib.request.Request(
         url,
         data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {agent_token}"},
         method="POST",
     )
 

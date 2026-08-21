@@ -2,6 +2,10 @@
 // calls to trigger device actuation — the persistent replacement for the
 // amh-actuate CLI's per-call subprocess+SSH-dial pattern.
 //
+// Every route requires a bearer token (daemon/authn) — there is no
+// unauthenticated mode. Which role a route accepts is the whole
+// authorization policy for this package; see Handler's doc comment.
+//
 // Spec fidelity note: docs/AMH-SPECIFICATION.md Artifact A names
 // contracts/proto (gRPC) as the daemon<->agent bridge. This is a
 // deliberate substitute: protoc and the Go/Python gRPC plugin toolchain
@@ -27,6 +31,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/actuation"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
 )
@@ -71,12 +76,16 @@ type Server struct {
 	Registry *connectors.Registry
 	Gate     *interlocks.Gate
 	Tracer   trace.TracerProvider
+	Auth     *authn.Authenticator
 	Log      *slog.Logger
 
 	srv *http.Server
 }
 
-func New(addr string, db *sql.DB, tp trace.TracerProvider, log *slog.Logger) *Server {
+// New wires the API's dependencies. auth is required — there is no
+// unauthenticated mode; see amh-daemon's main.go, which refuses to start
+// this server at all if its two role tokens aren't both configured.
+func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -86,6 +95,7 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, log *slog.Logger) *Se
 		Registry: connectors.NewRegistry(db),
 		Gate:     interlocks.New(db),
 		Tracer:   tp,
+		Auth:     auth,
 		Log:      log,
 	}
 }
@@ -93,12 +103,23 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, log *slog.Logger) *Se
 // Handler builds the API's http.Handler — split out from Run so tests can
 // exercise it directly via httptest without going through the
 // supervisor.Child lifecycle.
+//
+// Route-by-route role requirements are the entire authorization policy —
+// read them here, not scattered across handler bodies:
+//   - actuate, create-ticket, status: agent OR operator (routine agent work)
+//   - approve: operator ONLY. An agent token is mechanically refused
+//     (403) here — see daemon/authn's doc comment for why this is the
+//     one property the whole package exists to enforce.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/device-actions/{deviceActionID}/actuate", s.handleActuate)
-	mux.HandleFunc("POST /v1/approval-gates", s.handleCreateTicket)
-	mux.HandleFunc("POST /v1/approval-gates/{ticketID}/approve", s.handleApprove)
-	mux.HandleFunc("GET /v1/approval-gates/{ticketID}", s.handleTicketStatus)
+	mux.HandleFunc("POST /v1/device-actions/{deviceActionID}/actuate",
+		s.Auth.RequireRole(s.handleActuate, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/approval-gates",
+		s.Auth.RequireRole(s.handleCreateTicket, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/approval-gates/{ticketID}/approve",
+		s.Auth.RequireRole(s.handleApprove, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/approval-gates/{ticketID}",
+		s.Auth.RequireRole(s.handleTicketStatus, authn.RoleAgent, authn.RoleOperator))
 	return mux
 }
 
@@ -193,13 +214,17 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, createTicketResponse{TicketID: ticket.ID})
 }
 
-// handleApprove is the ONLY endpoint that can satisfy a ticket. It is
-// deliberately dumb about who's allowed to call it — approved_by is
-// recorded, not authenticated, here — because V0 has no operator-identity
-// system yet (see caveat in docs/AMH-SPECIFICATION.md re: SafetyCase's
-// independent_review role being deployment-specific). A real deployment
-// puts an authn/authz layer in front of this endpoint; this package's job
-// is the reversibility/approval bookkeeping, not identity.
+// handleApprove is the ONLY endpoint that can satisfy a ticket, and the
+// only route gated to authn.RoleOperator alone (see Handler's routing
+// table) — an agent-role bearer token is refused with 403 before this
+// function body ever runs. approved_by is still a free-text field, not a
+// second identity check: it records WHICH operator approved (for audit),
+// while the bearer token is what proves the caller IS an operator at
+// all. V0 has one static operator token, not a multi-operator identity
+// system (see caveat in docs/AMH-SPECIFICATION.md re: SafetyCase's
+// independent_review role being deployment-specific) — approved_by lets
+// that distinction exist in the audit trail even though this package
+// can't yet verify it cryptographically.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	ticketID := r.PathValue("ticketID")
 

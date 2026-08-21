@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/api"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/scheduler"
@@ -62,7 +63,23 @@ func main() {
 	tp := observability.Init(nil)
 	defer tp.Shutdown(context.Background())
 
-	apiSrv := api.New(host+":"+apiPort, db, tp, log)
+	// Fail closed: the API server enforces two distinct role tokens (§12,
+	// §14.7's anti-reward-hacking discipline — an agent must not be able
+	// to approve its own ApprovalGate ticket), and there is no
+	// unauthenticated fallback mode. If either token is unset, refuse to
+	// start rather than run the actuation/approval API open to anyone who
+	// can reach the port. See daemon/authn's doc comment and
+	// .env.example for how to configure these.
+	agentToken := os.Getenv("AMH_API_AGENT_TOKEN")
+	operatorToken := os.Getenv("AMH_API_OPERATOR_TOKEN")
+	auth, err := authn.New(agentToken, operatorToken)
+	if err != nil {
+		log.Error("refusing to start: API auth is not configured", "error", err,
+			"hint", "set AMH_API_AGENT_TOKEN and AMH_API_OPERATOR_TOKEN to two distinct secrets")
+		os.Exit(1)
+	}
+
+	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log)
 
 	sup := supervisor.New("amh-daemon", supervisor.OneForOne, 5, time.Minute, log)
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})

@@ -71,7 +71,8 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_pat
             goal_id,
             "monitor greenhouse temperature; open vent on threshold",
             db_path,
-            daemon,
+            daemon.base_url,
+            daemon.agent_token,
             "vent-actuator.set_open_pct",
             forward="vent-ctl set-open-pct 60",
             read_state="vent-ctl get-open-pct",
@@ -136,7 +137,7 @@ def test_greenhouse_scenario_survives_process_restart(fake_device, daemon, db_pa
         with SetWorkflowID({workflow_id!r}):
             DBOS.start_workflow(
                 run_greenhouse_scenario,
-                {goal_id!r}, {goal_text!r}, {db_path!r}, {daemon!r},
+                {goal_id!r}, {goal_text!r}, {db_path!r}, {daemon.base_url!r}, {daemon.agent_token!r},
                 "vent-actuator.set_open_pct",
                 "vent-ctl set-open-pct 60", "vent-ctl get-open-pct",
             )

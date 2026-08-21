@@ -53,6 +53,7 @@ def run_greenhouse_scenario(
     goal_text: str,
     db_path: str,
     daemon_api_base_url: str,
+    agent_token: str,
     device_action_id: str,
     forward: str,
     read_state: str,
@@ -77,6 +78,7 @@ def run_greenhouse_scenario(
         # Step 4: autonomous reversible actuation — no ApprovalGate, verified inverse
         actuation_result = actuate_device(
             daemon_api_base_url,
+            agent_token,
             device_action_id,
             forward,
             read_state,

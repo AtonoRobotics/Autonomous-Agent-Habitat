@@ -4,9 +4,10 @@ daemon and a real SSH device — the residue §12/v6 scopes the ApprovalGate
 to: an action with no verified inverse and no approved SafetyCase.
 
 Complements test_greenhouse_e2e.py, which only exercises the autonomous
-(verified-inverse) path; this test is what proves the fail-closed gate
-and its HTTP-driven approval flow actually work end-to-end, not just at
-the Go layer (already covered by daemon/api/approval_test.go).
+(verified-inverse) path; this test is what proves the fail-closed gate,
+its HTTP-driven approval flow, and the agent/operator token split (daemon
+/authn) actually work end-to-end from the Python side — not just at the
+Go layer (already covered by daemon/api/approval_test.go).
 
 Requires a working Go toolchain (go build). Skipped if `go` is
 unavailable.
@@ -52,6 +53,27 @@ def seed_nutrient_doser(db_path: str, host: str, port: int, host_key_authorized_
     conn.close()
 
 
+def _approve_as(daemon, ticket_id: str, token: str, approved_by: str = "operator:jane"):
+    """Simulates an operator hitting the daemon's approve endpoint
+    directly with a given bearer token. Deliberately not routed through
+    workflows.approval, which has no approve() function to call at all —
+    see that module's docstring and test_workflows_approval_has_no_*
+    below."""
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"{daemon.base_url}/v1/approval-gates/{ticket_id}/approve",
+        data=json.dumps({"approved_by": approved_by}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
+        method="POST",
+    )
+    try:
+        return urllib.request.urlopen(req, timeout=10)
+    except urllib.error.HTTPError as e:
+        return e  # HTTPError is also a valid response-like object (has .status/.code)
+
+
 def test_irreversible_action_requires_approval_over_http(fake_device, daemon, db_path, tmp_path):
     from workflows.actuate import ActuationError, actuate_device
     from workflows.approval import is_approved, request_approval
@@ -61,40 +83,36 @@ def test_irreversible_action_requires_approval_over_http(fake_device, daemon, db
 
     # No ticket at all: fails closed with the daemon's fail-closed error.
     with pytest.raises(ActuationError):
-        actuate_device(daemon, "nutrient-doser.dispense_ml", "dose 5ml")
+        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml")
 
-    # Request approval — a real ticket, created via the daemon's API.
+    # Request approval — a real ticket, created via the daemon's API,
+    # using only the agent token.
     ticket_id = request_approval(
-        daemon,
+        daemon.base_url,
+        daemon.agent_token,
         action={"device_action_id": "nutrient-doser.dispense_ml", "reason": "scheduled feeding"},
         risk="irreversible",
     )
     assert ticket_id
 
     # Unapproved ticket: still fails closed.
-    assert is_approved(daemon, ticket_id) is False
+    assert is_approved(daemon.base_url, daemon.agent_token, ticket_id) is False
     with pytest.raises(ActuationError):
-        actuate_device(daemon, "nutrient-doser.dispense_ml", "dose 5ml", ticket_id=ticket_id)
+        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml", ticket_id=ticket_id)
 
-    # Approve — simulating an operator hitting the daemon's approve
-    # endpoint directly (this is deliberately not done through
-    # workflows.approval, which has no "approve" function: approval is an
-    # agent-external act, never something the requesting agent's own code
-    # path performs — see approval.py's module docstring).
-    import urllib.request
+    # The agent CANNOT approve its own ticket — the daemon refuses the
+    # agent token on this endpoint regardless of what approved_by claims.
+    self_approve = _approve_as(daemon, ticket_id, daemon.agent_token, approved_by="totally-not-the-agent-itself")
+    assert getattr(self_approve, "status", getattr(self_approve, "code", None)) == 403
+    assert is_approved(daemon.base_url, daemon.agent_token, ticket_id) is False
 
-    approve_req = urllib.request.Request(
-        f"{daemon}/v1/approval-gates/{ticket_id}/approve",
-        data=json.dumps({"approved_by": "operator:jane"}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(approve_req, timeout=10) as resp:
-        assert resp.status == 200
+    # Only the operator token actually approves it.
+    operator_approve = _approve_as(daemon, ticket_id, daemon.operator_token)
+    assert operator_approve.status == 200
 
     # Now it proceeds.
-    assert is_approved(daemon, ticket_id) is True
-    result = actuate_device(daemon, "nutrient-doser.dispense_ml", "dose 5ml", ticket_id=ticket_id)
+    assert is_approved(daemon.base_url, daemon.agent_token, ticket_id) is True
+    result = actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml", ticket_id=ticket_id)
     assert result == "ok"
 
     # An irreversible action's effect must record no inverse — nothing to
@@ -114,9 +132,24 @@ def test_workflows_approval_has_no_self_approve_function():
     point is that approval is agent-external (§14.7's anti-reward-hacking
     discipline — the same DGM cautionary case §10 cites). This asserts the
     Python client module offers no function that could let a workflow
-    grant its own request."""
+    grant its own request, AND that none of its public functions even
+    accept an operator-token-shaped parameter — the module should be
+    structurally incapable of holding that credential, not just
+    conventionally discouraged from using it."""
+    import inspect
+
     import workflows.approval as approval_module
 
     public_names = {n for n in dir(approval_module) if not n.startswith("_")}
     assert "approve" not in public_names
     assert not any("approve" in n.lower() and "is_approved" not in n.lower() for n in public_names)
+
+    for name in public_names:
+        obj = getattr(approval_module, name)
+        if not inspect.isfunction(obj):
+            continue
+        params = set(inspect.signature(obj).parameters)
+        assert not any("operator" in p.lower() for p in params), (
+            f"workflows.approval.{name} accepts a parameter that looks like an operator "
+            "credential — this module must never be able to hold or send one"
+        )

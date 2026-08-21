@@ -11,11 +11,25 @@ import subprocess
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MIGRATIONS_DIR = os.path.join(REPO_ROOT, "store", "migrations")
+
+# Fixed test-only tokens — never real secrets, just distinct strings that
+# let tests assert agent-vs-operator behavior deterministically. Mirrors
+# daemon/api's own test constants (testAgentToken/testOperatorToken).
+TEST_AGENT_TOKEN = "test-agent-token"
+TEST_OPERATOR_TOKEN = "test-operator-token"
+
+
+@dataclass(frozen=True)
+class DaemonHandle:
+    base_url: str
+    agent_token: str
+    operator_token: str
 
 
 @pytest.fixture(scope="module")
@@ -75,7 +89,11 @@ def _find_free_port() -> int:
 
 @pytest.fixture()
 def daemon(go_binaries, db_path):
-    """Starts amh-daemon pointed at db_path, waits for /healthz, tears down."""
+    """Starts amh-daemon pointed at db_path with the two role tokens
+    configured, waits for /healthz, tears down. Yields a DaemonHandle
+    (base_url, agent_token, operator_token) — real deployments never put
+    the operator token in the agent process's own environment; this
+    fixture holds both only because tests need to play both roles."""
     api_port = _find_free_port()
     health_port = _find_free_port()
     env = dict(
@@ -85,13 +103,15 @@ def daemon(go_binaries, db_path):
         AMH_DAEMON_PORT=str(health_port),
         AMH_API_PORT=str(api_port),
         HABITAT_ROUTINE_TICK_MS="60000",
+        AMH_API_AGENT_TOKEN=TEST_AGENT_TOKEN,
+        AMH_API_OPERATOR_TOKEN=TEST_OPERATOR_TOKEN,
     )
     proc = subprocess.Popen([go_binaries["daemon"]], cwd=REPO_ROOT, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     base_url = f"http://127.0.0.1:{api_port}"
     try:
         _wait_for_health(health_port)
-        yield base_url
+        yield DaemonHandle(base_url=base_url, agent_token=TEST_AGENT_TOKEN, operator_token=TEST_OPERATOR_TOKEN)
     finally:
         proc.terminate()
         try:

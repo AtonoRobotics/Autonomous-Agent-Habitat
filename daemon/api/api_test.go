@@ -115,6 +115,49 @@ func seedVentDeviceAction(t *testing.T, db *sql.DB, device ...string) string {
 	return "vent-actuator.set_open_pct"
 }
 
+// seedIrreversibleDeviceAction sets up a device_action with no verified
+// inverse (reversible=0) — the residue the ApprovalGate exists to cover —
+// backed by a real reachable SSH device, so the "now it proceeds" leg of
+// TestIrreversibleActuation_RequiresApprovalCreatedAndApprovedOverHTTP can
+// genuinely execute the forward command over SSH once approved.
+func seedIrreversibleDeviceAction(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	srv := testssh.Start(t, func(cmd string) string {
+		if cmd == "dose 5ml" {
+			return "ok"
+		}
+		return "error: unknown command"
+	})
+	host, port, err := splitHostPort(srv.Addr)
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	cfg := connectors.SSHConnectorConfig{
+		Host:                 host,
+		Port:                 port,
+		User:                 "amh",
+		PrivateKeyPath:       writeEphemeralClientKey(t),
+		HostKeyAuthorizedKey: string(ssh.MarshalAuthorizedKey(srv.HostSigner.PublicKey())),
+	}
+	configJSON, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal config: %v", err)
+	}
+
+	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', ?)", string(configJSON)); err != nil {
+		t.Fatalf("seed connector: %v", err)
+	}
+	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('nutrient-doser', 'doser', 'nutrient-doser-connector')"); err != nil {
+		t.Fatalf("seed device: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
+		VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0)`); err != nil {
+		t.Fatalf("seed device_action: %v", err)
+	}
+	return "nutrient-doser.dispense_ml"
+}
+
 func TestHandleActuate_RealSSHRoundTripOverHTTP(t *testing.T) {
 	db := testDB(t)
 	deviceActionID := seedVentDeviceAction(t, db)

@@ -76,8 +76,9 @@ func main() {
 }
 
 type ventState struct {
-	mu      sync.Mutex
-	openPct int
+	mu        sync.Mutex
+	openPct   int
+	doseCount int
 }
 
 func handleConn(nConn net.Conn, cfg *ssh.ServerConfig, state *ventState) {
@@ -133,6 +134,15 @@ func runVentCommand(state *ventState, cmd string) string {
 			return "error: invalid value"
 		}
 		state.openPct = val
+		return "ok"
+	case strings.HasPrefix(cmd, "dose ") && strings.HasSuffix(cmd, "ml"):
+		// The reference irreversible action from
+		// contracts/manifests/connector.manifest.yaml's worked example
+		// (nutrient-doser.dispense_ml): a consuming action with no undo
+		// endpoint. This fixture serves both the reversible vent scenario
+		// and this irreversible one so ApprovalGate e2e tests don't need
+		// a second device simulator binary.
+		state.doseCount++
 		return "ok"
 	default:
 		return "error: unknown command"

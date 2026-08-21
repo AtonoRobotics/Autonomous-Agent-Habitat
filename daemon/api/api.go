@@ -42,6 +42,29 @@ type actuateResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
+type createTicketRequest struct {
+	Action any    `json:"action"`
+	Risk   string `json:"risk"`
+}
+
+type createTicketResponse struct {
+	TicketID string `json:"ticket_id,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+type approveRequest struct {
+	ApprovedBy string `json:"approved_by"`
+}
+
+type simpleResponse struct {
+	Error string `json:"error,omitempty"`
+}
+
+type ticketStatusResponse struct {
+	Satisfied bool   `json:"satisfied"`
+	Error     string `json:"error,omitempty"`
+}
+
 type Server struct {
 	Addr     string
 	DB       *sql.DB
@@ -73,6 +96,9 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, log *slog.Logger) *Se
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/device-actions/{deviceActionID}/actuate", s.handleActuate)
+	mux.HandleFunc("POST /v1/approval-gates", s.handleCreateTicket)
+	mux.HandleFunc("POST /v1/approval-gates/{ticketID}/approve", s.handleApprove)
+	mux.HandleFunc("GET /v1/approval-gates/{ticketID}", s.handleTicketStatus)
 	return mux
 }
 
@@ -140,7 +166,71 @@ func (s *Server) handleActuate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, actuateResponse{Result: result})
 }
 
-func writeJSON(w http.ResponseWriter, status int, body actuateResponse) {
+// handleCreateTicket lets a caller request approval for an action that
+// has no verified inverse and no approved SafetyCase — the residue
+// §12/v6 scopes the ApprovalGate to. Creating a ticket never grants
+// anything by itself; it only exists so an agent-external authority (an
+// operator today; a defined independent-reviewer role for a SafetyCase,
+// per §14.7) has something concrete to approve via handleApprove.
+func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
+	var req createTicketRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, createTicketResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	risk := interlocks.Risk(req.Risk)
+	if risk != interlocks.Reversible && risk != interlocks.Irreversible {
+		writeJSON(w, http.StatusBadRequest, createTicketResponse{Error: "risk must be 'reversible' or 'irreversible'"})
+		return
+	}
+
+	ticket, err := s.Gate.Require(r.Context(), req.Action, risk)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, createTicketResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, createTicketResponse{TicketID: ticket.ID})
+}
+
+// handleApprove is the ONLY endpoint that can satisfy a ticket. It is
+// deliberately dumb about who's allowed to call it — approved_by is
+// recorded, not authenticated, here — because V0 has no operator-identity
+// system yet (see caveat in docs/AMH-SPECIFICATION.md re: SafetyCase's
+// independent_review role being deployment-specific). A real deployment
+// puts an authn/authz layer in front of this endpoint; this package's job
+// is the reversibility/approval bookkeeping, not identity.
+func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
+	ticketID := r.PathValue("ticketID")
+
+	var req approveRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if req.ApprovedBy == "" {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "approved_by is required"})
+		return
+	}
+
+	if err := s.Gate.Approve(r.Context(), interlocks.Ticket{ID: ticketID}, req.ApprovedBy); err != nil {
+		writeJSON(w, http.StatusConflict, simpleResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, simpleResponse{})
+}
+
+func (s *Server) handleTicketStatus(w http.ResponseWriter, r *http.Request) {
+	ticketID := r.PathValue("ticketID")
+	satisfied, err := s.Gate.IsSatisfied(r.Context(), interlocks.Ticket{ID: ticketID})
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, ticketStatusResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, ticketStatusResponse{Satisfied: satisfied})
+}
+
+func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(body)

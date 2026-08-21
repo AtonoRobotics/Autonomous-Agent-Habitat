@@ -1,10 +1,12 @@
 # Autonomous Multi-Agent Habitat (AMH)
 
-A platform for autonomous agents doing real work under bounded authority. Fully autonomous, running 24/7, not a governance app or orchestration layer, but the core on which domain-specific applications are built.
+A platform core for autonomous agents doing real work under bounded authority. Fully autonomous, running 24/7 — not a governance app, not a security app, not a physical-robot stack. Domain-specific applications (including Physical AI) are built **on** AMH, not into it.
 
-**Designed for:** AI agents that control physical devices (via SSH, OPC-UA, MQTT, WinRM), learn from operational history, and self-heal on failure — with reversibility as the sole gating axis. Irreversible or high-consequence actions require evidence-backed approval, not blanket denial.
+**Architecture (v9):** Python agent/LLM layer (DeepAgents patterns reimplemented natively on DBOS) + Go control-plane daemon, DBOS Transact on SQLite, embedded hybrid KG + vector store, **small hard kernel + swappable capability modules**, reversible software capability composition (Cordis-inspired), eval-gated self-improvement, and stable seams for domain extensions.
 
-**Architecture (v8):** Python agent/LLM layer (DeepAgents patterns reimplemented natively on DBOS) + Go control-plane daemon (systemd/Windows Service), DBOS Transact on SQLite for durable-execution, embedded hybrid KG + vector store, spatial memory R-tree index, reversible capability composition, effect-tracked self-modification, and earned autonomy staged by evidence.
+## Scope correction (v9)
+
+Physical device safety, actuation interlocks, SSH/OPC-UA/MQTT device policy, and earned autonomy for physical effects are **not** core AMH concerns. They belong in a **Physical AI extension** that registers connectors, action policies, and interlocks through AMH’s module and policy seams. AMH provides the durable habitat, agent harness, memory, and generic authorization hooks — not domain safety policy.
 
 ## Layout
 
@@ -15,16 +17,17 @@ daemon/           Go control plane (single binary per OS)
 ├── scheduler/            cron/triggers/event sources
 ├── bus/                  embedded NATS + blackboard
 ├── mcp/                  MCP client + server (stdio, Streamable HTTP)
-├── connectors/           REST/GraphQL/webhook + SSH/WinRM/MQTT/OPC-UA
-├── interlocks/           ApprovalGate enforcement
+├── connectors/           generic connector runtime (protocol adapters as modules)
+├── policy/               generic ApprovalGate / policy enforcement hooks
 └── health/               watchdog, circuit breakers, bulkheads
 
 agents/           Python agent/LLM layer (uv-managed)
-├── harness/              deep-agent: planning, VFS, subagents, middleware
-├── coder/                CodeAct sandbox loop
+├── harness/              deep-agent patterns: planning, VFS, subagents, middleware
+├── coder/                CodeAct sandbox loop (+ optional PTC/Code mode)
 ├── context/              budget mgr, compactor, offload
 ├── memory/               5-tier + bi-temporal KG
 ├── kb/                   hybrid RAG (sqlite-vec + FTS5 + graph)
+├── modules/              capability lifecycle: register, start, stop, unload
 ├── selfimprove/          GEPA/ACE/Voyager + eval-gate
 └── workflows/            DBOS durable workflows & activities
 
@@ -34,57 +37,53 @@ contracts/        SHARED public interfaces
 ├── manifests/
 └── proto/                daemon↔agent gRPC
 
-sdk/              domain-app extension SDK (stable public API)
-├── python/               amh_sdk (Protocols)
+sdk/              domain-app & extension SDK (stable public API)
+├── python/               amh_sdk (Protocols, seams)
 └── ts/                   @amh/sdk (interfaces)
 
+extensions/       (optional in-tree examples; production packs may live out-of-tree)
+└── physical-ai/          device connectors, physical action policy, SafetyCase — NOT core
+
 store/            DDL, migrations
-migrations/       ordered SQL migrations for the business ledger
+migrations/       ordered SQL migrations
 evals/            eval suites, canary configs
 deploy/           systemd unit, Windows service, installers
-
-clients/          field surfaces (Linux page, iOS app)
-fixtures/         test-only packs and throwaway keys
-docker/           tenant-computer and local-stack images
-scripts/          bootstrap, pack signing, local run
-state/            per-tenant on-disk state (git-ignored)
 ```
 
 ## Getting started
 
-**Read first:** `docs/AMH-SPECIFICATION.md` — the complete architecture spec, design rationale, component decisions, and staged V0/V1 roadmap.
+**Read first:** `docs/AMH-SPECIFICATION.md` — architecture, kernel vs modules, design rationale, V0/V1 roadmap.
 
-**V0 (walking skeleton):** Go daemon supervisor + Python agent layer on DBOS/SQLite, one SSH connector, one reversible device action, approval gate for irreversible actions, MCP client, context budget manager, OTel tracing. Greenhouse scenario (monitor temp, open vent on threshold, self-heal on fault) runs end-to-end and survives daemon restart.
+**V0 (walking skeleton):** Go daemon supervisor + Python agent layer on DBOS/SQLite, MCP client, context budget manager, module lifecycle stub, OTel tracing. A non-physical demo workflow (goal → plan → tool use → durable replay) survives daemon restart.
 
-**V1 (autonomous habitat):** orchestrator/worker multi-agent (3–5 sub-agents for independent work), full 5-tier memory + bi-temporal KG, coder agent + sandbox, self-improvement (GEPA/ACE/Voyager behind eval/canary/promote), full self-healing (capability-level granularity), earned autonomy graduation engine (reversible track), Connector SDK, MCP server, extension/plugin model.
+**V1 (autonomous habitat):** orchestrator/worker multi-agent, full 5-tier memory + bi-temporal KG, coder agent + sandbox, self-improvement (GEPA/ACE/Voyager behind eval/canary/promote), capability-level self-healing, Connector SDK, MCP server, extension/plugin model with reversible software effects. Physical AI ships as a separate extension pack.
 
-## Key architectural decisions
+## Key architectural decisions (v9)
 
 | # | Subsystem | Decision | Why |
-|-|-|-|-|
+|---|-----------|----------|-----|
 | 1 | Runtime | Python + Go | Deepest agent ecosystem + single-binary daemon, native Windows |
 | 2 | Durable execution | DBOS Transact (SQLite) | In-process library, no separate server, official Windows support |
-| 3 | Gating axis | Reversibility, not physicality | Autonomy is not the danger; unreversable change is |
-| 4 | Harness | Native DeepAgents reimplementation | Patterns are MIT-licensed; package dependency collides with DBOS durability |
-| 5 | Context | KV-cache-stable + FS offload + sub-agent isolation | Anthropic/Manus/Cognition convergence; 15× token cost for multi-agent justified only for independent work |
-| 6 | Memory | 5-tier CoALA + bi-temporal KG | Standard cognitive taxonomy; Graphiti fact-invalidation model |
-| 7 | Spatial | R-tree-indexed Location + bi-temporal located_at edges | Path-planning extensions already committed; retrofitting later breaks stability |
-| 8 | Reversibility | Effect-tracked, verified-inverse reversibility | Covers software capabilities (rollback) AND physical device actuation (auto-reversal) |
-| 9 | Earned autonomy | Staged trust (reversible track) + SafetyCase (irreversible track) | Reversible actions automate readily; irreversible actions earn autonomy via evidence |
-| 10 | Self-mod safety | Independent tamper-proof instrumentation | Prevent reward-hacking; evals run on separate tooling the agent cannot edit |
+| 3 | Architecture shape | **Small hard kernel + swappable modules** | Rapid evolution without baking features into the core |
+| 4 | Harness | Native DeepAgents patterns on DBOS (not the package) | Patterns are right; package durability collides with DBOS |
+| 5 | Composition | Cordis-inspired reversible effects + capability seams | Safe unload/rollback of software modules; DeepSeek Harness as teacher |
+| 6 | Context | KV-cache-stable + FS offload + sub-agent isolation | Anthropic/Manus/Cognition convergence |
+| 7 | Memory | 5-tier CoALA + bi-temporal KG | Standard cognitive taxonomy; Graphiti-style fact invalidation |
+| 8 | Spatial | Optional core primitives (R-tree Location); **algorithms & safety in extensions** | Stable interface without domain policy in the kernel |
+| 9 | Physical safety | **Out of core — Physical AI extension** | Domain concern; keeps AMH usable for non-physical autonomy |
+| 10 | Self-mod safety | Independent tamper-proof instrumentation + eval/canary | Prevent reward-hacking; agent cannot edit its own eval tooling |
+| 11 | Policy | Generic ApprovalGate / policy hooks in core | Extensions supply domain policy (including physical interlocks) |
 
-## Permissions & safety gates
+## Kernel vs modules
 
-- **Reversible actions** (verified inverse exists): autonomous by default. Self-healing supervisor auto-reverses on post-actuation fault, no human wait.
-- **Irreversible actions** (no verified inverse, no approved SafetyCase): ApprovalGate required. Rate-limited and logged.
-- **High-consequence actions** (SafetyCase track): earn autonomy via independent review, guardrails proof, supervised track record — staged per-`risk_class`, not blanket excluded.
+**Kernel (stable, hard to bypass):** durable execution, supervision/health, reconstructible trajectory log, core ontology + store, module lifecycle, generic policy enforcement surface, public SDK contracts.
+
+**Modules (swappable):** harness variants, compaction policies, skills/prompts, self-improvement optimizers, model providers, connectors, RAG backends, domain packs (including Physical AI).
 
 ## Contributing
 
-The specification is normative. Subsystems implement their §N section of `docs/AMH-SPECIFICATION.md` — each carrying its own rules and refusals (see §A, monorepo layout, and the per-subsystem READMEs).
-
-For encoding patterns, stability contracts, and extension points, consult the Artifact sections: B (Protocol ports), C (Ontology), D (Inter-agent envelope), E (DDL), F (durable workflows), G (manifests), H (worked scenario).
+The specification is normative. Subsystems implement their section of `docs/AMH-SPECIFICATION.md`. Domain safety (physical or otherwise) is implemented in extensions, not by expanding the kernel.
 
 ---
 
-**Alpha Vector LLC.** Spec revision: v8 (2026-08-19). See `docs/AMH-SPECIFICATION.md` for revision history.
+**Alpha Vector LLC.** Spec revision: **v9 (2026-08-21)**. See `docs/AMH-SPECIFICATION.md` for revision history.

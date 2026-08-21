@@ -19,7 +19,7 @@ from typing import Any
 
 from dbos import DBOS
 
-from context.observability import agent_run_span
+from context.observability import agent_run_span, inject_trace_context
 from . import ontology
 
 
@@ -49,10 +49,15 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str) ->
 
 
 @DBOS.workflow()
-def run_subagent(task_id: str, objective: str, db_path: str) -> dict[str, Any]:
+def run_subagent(task_id: str, objective: str, db_path: str, trace_context: dict[str, str] | None = None) -> dict[str, Any]:
     """Runs as an isolated DBOS child workflow — crash-recoverable
-    independently of the parent (§14.2's subagent isolation contract)."""
-    with agent_run_span(agent_id=task_id):
+    independently of the parent (§14.2's subagent isolation contract).
+
+    trace_context (see start_subagent below) restores this span as a
+    child of the caller's trace, rather than starting an unrelated one —
+    DBOS.start_workflow runs this on its own worker thread with no
+    ambient OTel context otherwise."""
+    with agent_run_span(agent_id=task_id, trace_context=trace_context):
         run_id = ontology.create_run(db_path, task_id)
         ontology.set_task_status(db_path, task_id, "active")
         try:
@@ -64,6 +69,21 @@ def run_subagent(task_id: str, objective: str, db_path: str) -> dict[str, Any]:
             ontology.set_task_status(db_path, task_id, "failed")
             ontology.end_run(db_path, run_id, "error")
             raise
+
+
+def start_subagent(task_id: str, objective: str, db_path: str):
+    """Starts run_subagent as a DBOS child workflow, capturing the
+    caller's current OTel span context and passing it through explicitly
+    so the child's span nests under the caller's trace. Must be called
+    from inside the caller's own `with agent_run_span(...):` block — the
+    whole point is to capture whatever span is active at the call site.
+
+    The single choke point for starting a sub-agent: both pursue_goal and
+    run_greenhouse_scenario call this rather than DBOS.start_workflow
+    directly, so trace propagation only needs to be right in one place.
+    """
+    trace_context = inject_trace_context()
+    return DBOS.start_workflow(run_subagent, task_id, objective, db_path, trace_context)
 
 
 @DBOS.step()
@@ -86,10 +106,7 @@ def pursue_goal(goal_id: str, goal_text: str, db_path: str) -> str:
     with agent_run_span(agent_id=goal_id):
         tasks = decompose_goal(goal_id, goal_text, db_path)
 
-        handles = [
-            DBOS.start_workflow(run_subagent, t["task_id"], t["objective"], db_path)
-            for t in tasks
-        ]
+        handles = [start_subagent(t["task_id"], t["objective"], db_path) for t in tasks]
         gathered = [h.get_result() for h in handles]
 
         return synthesize(goal_id, gathered, db_path)

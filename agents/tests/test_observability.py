@@ -68,21 +68,14 @@ def test_tool_call_span_records_error_on_exception(span_exporter):
     assert spans[0].attributes["error.type"] == "test_error"
 
 
-def test_pursue_goal_emits_agent_run_span_per_workflow(span_exporter, tmp_path):
+def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, tmp_path):
     """The real integration: pursue_goal (parent) and each run_subagent
-    (child) must each produce their own invoke_agent span — proving the
-    tracing is wired into the actual DBOS workflow code path, not just
-    available as a library function nobody calls.
-
-    Known gap, stated plainly: the child spans are NOT nested under the
-    parent's trace. DBOS.start_workflow runs each child on its own worker
-    thread without propagating the parent's OTel context across that
-    boundary, so each span currently starts its own trace. Fixing that
-    needs explicit W3C trace-context propagation through the workflow's
-    input/DBOS context — real work, out of scope for the V0 tracing slice
-    this test covers. What's verified here is that the spans exist with
-    correct attributes, not that they're correctly correlated yet.
-    """
+    (child) must each produce their own invoke_agent span, AND the child
+    spans must share the parent's trace ID — proving trace-context
+    propagation (context.observability.inject_trace_context /
+    workflows.goal.start_subagent) actually threads through
+    DBOS.start_workflow's worker-thread boundary rather than each child
+    starting an unrelated trace of its own."""
     from dbos import DBOS
 
     from workflows import ontology
@@ -113,7 +106,16 @@ def test_pursue_goal_emits_agent_run_span_per_workflow(span_exporter, tmp_path):
 
     agent_ids = {s.attributes["gen_ai.agent.id"] for s in invoke_agent_spans}
     assert goal_id in agent_ids
+    parent_span = next(s for s in invoke_agent_spans if s.attributes["gen_ai.agent.id"] == goal_id)
     child_spans = [s for s in invoke_agent_spans if s.attributes["gen_ai.agent.id"] != goal_id]
     assert len(child_spans) == 2
     for span in invoke_agent_spans:
         assert span.attributes["gen_ai.operation.name"] == "invoke_agent"
+
+    # The actual point of this test: children share the parent's trace ID
+    # (propagated across the DBOS.start_workflow worker-thread boundary),
+    # and each child's parent_span_id points at the parent goal span.
+    for child in child_spans:
+        assert child.context.trace_id == parent_span.context.trace_id
+        assert child.parent is not None
+        assert child.parent.span_id == parent_span.context.span_id

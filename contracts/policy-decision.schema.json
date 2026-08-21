@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amh.dev/schemas/v1/policy-decision.schema.json",
+  "title": "AMH Policy Decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion", "decisionId", "operationId", "actionDigest", "policyId",
+    "policyVersion", "result", "decidedAt", "expiresAt", "rowVersion"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "decisionId": { "type": "string", "format": "uuid" },
+    "operationId": { "type": "string", "format": "uuid" },
+    "actionDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "policyId": { "type": "string", "minLength": 1, "maxLength": 192 },
+    "policyVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "result": { "enum": ["admit", "admit_with_constraints", "needs_approval", "defer", "deny"] },
+    "constraints": {
+      "type": "object",
+      "additionalProperties": true,
+      "default": {}
+    },
+    "approvalRequestId": { "type": "string", "format": "uuid" },
+    "reasonCodes": {
+      "type": "array",
+      "items": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{2,127}$" },
+      "uniqueItems": true,
+      "default": []
+    },
+    "evidenceRefs": {
+      "type": "array",
+      "items": { "type": "string", "format": "uri-reference" },
+      "uniqueItems": true,
+      "default": []
+    },
+    "decidedAt": { "type": "string", "format": "date-time" },
+    "expiresAt": { "type": "string", "format": "date-time" },
+    "consumedAt": { "type": "string", "format": "date-time" },
+    "rowVersion": { "type": "integer", "minimum": 0 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "result": { "const": "needs_approval" } } },
+      "then": { "required": ["approvalRequestId"] }
+    }
+  ]
+}

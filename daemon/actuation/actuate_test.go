@@ -94,6 +94,57 @@ func TestExecuteReversibleVerified_NoGateNeeded(t *testing.T) {
 	}
 }
 
+// TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward
+// guards against a real bug: a malformed or missing inverse_template must be
+// caught while rendering the inverse from the just-read prior state, before
+// the forward command ever runs — not after. Otherwise a bad inverse
+// template turns a "reversible, verified" action into an actual physical
+// effect with no recorded inverse and no error a caller can act on before
+// it's too late.
+func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t *testing.T) {
+	db := testDB(t)
+	seedConnectorAndDevice(t, db)
+	ctx := context.Background()
+
+	_, err := db.Exec(`INSERT INTO device_action
+		(id, device_id, name, reversible, inverse_template, verified_at)
+		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		"vent-actuator.set_open_pct",
+		`{"not_shell_template": "oops"}`, // missing the required shell_template field
+	)
+	if err != nil {
+		t.Fatalf("seed device_action: %v", err)
+	}
+
+	act := &fakeActuator{responses: map[string]string{
+		"vent-ctl get-open-pct":    "40",
+		"vent-ctl set-open-pct 60": "ok",
+	}}
+	gate := interlocks.New(db)
+
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.set_open_pct", Command{
+		Forward:   "vent-ctl set-open-pct 60",
+		ReadState: "vent-ctl get-open-pct",
+	}, nil)
+	if err == nil {
+		t.Fatalf("expected Execute to fail on a malformed inverse_template")
+	}
+	for _, call := range act.calls {
+		if call == "vent-ctl set-open-pct 60" {
+			t.Fatalf("forward command must never run when the inverse template fails to render, but got calls: %v", act.calls)
+		}
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM device_effect WHERE device_action_id = ?`,
+		"vent-actuator.set_open_pct").Scan(&count); err != nil {
+		t.Fatalf("query device_effect: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("expected no device_effect recorded, got %d", count)
+	}
+}
+
 func TestExecuteUnverified_RequiresApprovedTicket(t *testing.T) {
 	db := testDB(t)
 	seedConnectorAndDevice(t, db)

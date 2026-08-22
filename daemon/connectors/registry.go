@@ -37,7 +37,10 @@ type SSHConnectorConfig struct {
 	InsecureSkipHostKeyVerify bool   `json:"insecure_skip_host_key_verify,omitempty"`
 }
 
-var ErrUnsupportedConnectorType = errors.New("connectors: unsupported connector type")
+var (
+	ErrUnsupportedConnectorType = errors.New("connectors: unsupported connector type")
+	ErrConnectorDisabled        = errors.New("connectors: connector is disabled")
+)
 
 // Registry resolves device_action -> device -> connector -> live Actuator
 // on every call. It deliberately does not cache SSH connections: each
@@ -56,19 +59,22 @@ func NewRegistry(db *sql.DB) *Registry {
 // ResolveActuator looks up the connector for the device that owns
 // deviceActionID and builds a live Actuator for it.
 func (r *Registry) ResolveActuator(ctx context.Context, deviceActionID string) (*sshconn.Connector, error) {
-	var connectorType, configJSON string
+	var connectorType, configJSON, status string
 	err := r.DB.QueryRowContext(ctx, `
-		SELECT c.type, c.config
+		SELECT c.type, c.config, c.status
 		FROM device_action da
 		JOIN device d ON d.id = da.device_id
 		JOIN connector c ON c.id = d.connector_id
 		WHERE da.id = ?`, deviceActionID,
-	).Scan(&connectorType, &configJSON)
+	).Scan(&connectorType, &configJSON, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("connectors: no connector found for device_action %s", deviceActionID)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("connectors: resolve %s: %w", deviceActionID, err)
+	}
+	if status != "active" {
+		return nil, fmt.Errorf("%w: connector for device_action %s has status %q", ErrConnectorDisabled, deviceActionID, status)
 	}
 
 	switch connectorType {

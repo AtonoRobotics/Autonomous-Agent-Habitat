@@ -308,7 +308,11 @@ func (s *Server) handleActuate(w http.ResponseWriter, r *http.Request) {
 
 	act, err := s.Registry.ResolveActuator(r.Context(), deviceActionID)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, actuateResponse{Error: err.Error()})
+		status := http.StatusNotFound
+		if errors.Is(err, connectors.ErrConnectorDisabled) {
+			status = http.StatusForbidden
+		}
+		writeJSON(w, status, actuateResponse{Error: err.Error()})
 		return
 	}
 

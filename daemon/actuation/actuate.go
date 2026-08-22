@@ -98,13 +98,18 @@ func Execute(ctx context.Context, db *sql.DB, act Actuator, gate *interlocks.Gat
 		if err != nil {
 			return "", fmt.Errorf("actuation: read prior state: %w", err)
 		}
-		result, err := act.RunShell(ctx, cmd.Forward)
-		if err != nil {
-			return "", fmt.Errorf("actuation: invoke: %w", err)
-		}
+		// Render and validate the inverse from priorState before invoking
+		// the forward command — a malformed inverse_template must be
+		// caught before the physical effect happens, not after, so a
+		// rendering failure never leaves an unrecorded, un-reversible
+		// effect on the device.
 		inverseShell, err := renderInverse(da.inverseTemplate.String, priorState)
 		if err != nil {
 			return "", fmt.Errorf("actuation: render inverse: %w", err)
+		}
+		result, err := act.RunShell(ctx, cmd.Forward)
+		if err != nil {
+			return "", fmt.Errorf("actuation: invoke: %w", err)
 		}
 		if err := recordEffect(ctx, db, da.id, cmd.Forward, &inverseShell, "success"); err != nil {
 			return "", err

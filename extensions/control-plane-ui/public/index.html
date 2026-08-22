@@ -76,13 +76,76 @@
       <h2>Accounts <span class="hint">authenticate accounts and modules — secrets are stored encrypted and never shown again</span></h2>
       <form id="form-create-account" class="card">
         <h3>Register an account</h3>
-        <label>Provider <input name="provider" placeholder="github, gmail, ..." required></label>
+        <label>Model-provider preset <span class="hint">optional — just fills in a consistent provider name; agents select this account via their own ADAPTER_PROVIDER setting</span>
+          <select id="account-preset">
+            <option value="">— none (custom provider) —</option>
+            <option value="anthropic">Anthropic (native)</option>
+            <option value="openai">OpenAI (api.openai.com)</option>
+            <option value="grok">Grok / SuperGrok (api.x.ai)</option>
+            <option value="glm">GLM / Z.ai Coding Plan</option>
+            <option value="vllm">Self-hosted vLLM</option>
+            <option value="ollama">Self-hosted Ollama</option>
+          </select>
+        </label>
+        <label>Provider <input name="provider" placeholder="github, gmail, anthropic, ..." required></label>
         <label>Display name <input name="display_name" placeholder="amh-bot"></label>
         <button type="submit">Register</button>
       </form>
       <div id="accounts-table"></div>
     </section>
   </main>
+
+  <dialog id="credential-dialog">
+    <form id="form-credential">
+      <h3 id="credential-dialog-title">Authenticate account</h3>
+      <label>Credential type
+        <select id="credential-kind-toggle">
+          <option value="opaque">Opaque secret (connectors, generic providers)</option>
+          <option value="model">Model-provider credential (inference seam)</option>
+        </select>
+      </label>
+
+      <div id="credential-opaque-fields">
+        <label>Secret <textarea id="credential-opaque-secret" rows="3" placeholder="raw secret value" autocomplete="off"></textarea></label>
+      </div>
+
+      <div id="credential-model-fields" class="hidden">
+        <label>Preset <span class="hint">fills in the kind and base URL below — still editable</span>
+          <select id="credential-preset">
+            <option value="">— custom —</option>
+            <option value="anthropic">Anthropic (native)</option>
+            <option value="openai">OpenAI (api.openai.com)</option>
+            <option value="grok">Grok / SuperGrok (api.x.ai)</option>
+            <option value="glm-anthropic">GLM / Z.ai — Anthropic-compatible endpoint</option>
+            <option value="glm-openai">GLM / Z.ai — OpenAI-compatible coding endpoint</option>
+            <option value="vllm">Self-hosted vLLM</option>
+            <option value="ollama">Self-hosted Ollama</option>
+          </select>
+        </label>
+        <label>Kind
+          <select id="credential-model-kind">
+            <option value="anthropic">anthropic (native Messages API)</option>
+            <option value="openai_compatible">openai_compatible (chat completions)</option>
+          </select>
+        </label>
+        <label>API key <input id="credential-api-key" type="password" placeholder="leave blank if using OAuth below" autocomplete="off"></label>
+        <label>Base URL <input id="credential-base-url" placeholder="leave blank for the provider's default"></label>
+        <details>
+          <summary>OAuth (subscription) tokens — optional</summary>
+          <label>Access token <input id="credential-oauth-access" type="password" autocomplete="off"></label>
+          <label>Refresh token <input id="credential-oauth-refresh" type="password" autocomplete="off"></label>
+          <label>Expires at <input id="credential-oauth-expires" type="datetime-local"></label>
+          <label>Refresh URL <input id="credential-oauth-refresh-url" placeholder="https://.../oauth/token"></label>
+          <label>Client ID <input id="credential-oauth-client-id"></label>
+        </details>
+      </div>
+
+      <div class="dialog-actions">
+        <button type="button" id="credential-cancel">Cancel</button>
+        <button type="submit" id="credential-save">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <div id="toast"></div>
 

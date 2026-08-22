@@ -254,6 +254,34 @@ document.addEventListener('DOMContentLoaded', () => {
 
 // ── Accounts ─────────────────────────────────────────────────────────────
 
+// Provider-name presets for the "Register an account" form — purely a
+// convenience so the free-text Provider field (which agents match against
+// via their own ADAPTER_PROVIDER env var, see agents/context/llm.py) stays
+// consistent across operators, not a fixed enum the daemon enforces.
+const ACCOUNT_PROVIDER_PRESETS = {
+  anthropic: 'anthropic',
+  openai: 'openai',
+  grok: 'grok',
+  glm: 'glm',
+  vllm: 'vllm',
+  ollama: 'ollama',
+};
+
+// Model-provider credential presets — fill in the envelope's kind/base_url
+// per daemon/inference/inference.go's verified per-vendor wiring (see that
+// package's doc comment). base_url left blank uses that provider kind's
+// built-in default (Anthropic direct, or none for openai_compatible, which
+// requires one explicitly).
+const CREDENTIAL_PRESETS = {
+  anthropic: { kind: 'anthropic', baseUrl: '', apiKeyHint: 'sk-ant-...' },
+  openai: { kind: 'openai_compatible', baseUrl: 'https://api.openai.com/v1', apiKeyHint: 'sk-...' },
+  grok: { kind: 'openai_compatible', baseUrl: 'https://api.x.ai/v1', apiKeyHint: 'xai-... or an OAuth access token below' },
+  'glm-anthropic': { kind: 'anthropic', baseUrl: 'https://api.z.ai/api/anthropic', apiKeyHint: 'your Z.ai Coding Plan API key' },
+  'glm-openai': { kind: 'openai_compatible', baseUrl: 'https://api.z.ai/api/coding/paas/v4', apiKeyHint: 'your Z.ai Coding Plan API key' },
+  vllm: { kind: 'openai_compatible', baseUrl: 'http://localhost:8000/v1', apiKeyHint: 'any non-empty placeholder — vLLM does not validate it locally' },
+  ollama: { kind: 'openai_compatible', baseUrl: 'http://localhost:11434/v1', apiKeyHint: "'ollama' (or any placeholder) — Ollama does not validate it" },
+};
+
 async function loadAccounts() {
   const container = document.getElementById('accounts-table');
   try {
@@ -271,15 +299,7 @@ async function loadAccounts() {
       const authBtn = document.createElement('button');
       authBtn.textContent = 'Authenticate…';
       authBtn.disabled = a.status === 'revoked';
-      authBtn.addEventListener('click', async () => {
-        const secret = window.prompt('Secret for ' + a.provider + ' (' + a.id + ') — never stored or shown in plaintext again:');
-        if (secret === null || secret === '') return;
-        try {
-          await api('/v1/accounts/' + encodeURIComponent(a.id) + '/credential', { method: 'POST', body: JSON.stringify({ secret }) });
-          toast('Account authenticated');
-          loadAccounts();
-        } catch (err) { toast('Authenticate failed: ' + err.message, 'error'); }
-      });
+      authBtn.addEventListener('click', () => openCredentialDialog(a));
       actions.appendChild(authBtn);
       addAction(actions, 'Revoke', () => revokeAccount(a.id), a.status === 'revoked');
       tr.appendChild(actions);
@@ -298,6 +318,12 @@ function revokeAccount(id) {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  const accountPreset = document.getElementById('account-preset');
+  accountPreset.addEventListener('change', () => {
+    const provider = ACCOUNT_PROVIDER_PRESETS[accountPreset.value];
+    if (provider) document.querySelector('#form-create-account [name="provider"]').value = provider;
+  });
+
   document.getElementById('form-create-account').addEventListener('submit', async (ev) => {
     ev.preventDefault();
     const form = new FormData(ev.target);
@@ -307,10 +333,133 @@ document.addEventListener('DOMContentLoaded', () => {
         body: JSON.stringify({ provider: form.get('provider'), display_name: form.get('display_name') }),
       });
       toast('Account registered — use Authenticate to store its credential');
+      accountPreset.value = '';
       loadAccounts();
     } catch (err) { toast('Register failed: ' + err.message, 'error'); }
   });
 });
+
+// ── Credential dialog ───────────────────────────────────────────────────
+//
+// Two credential shapes travel through the same /v1/accounts/{id}/credential
+// endpoint as an opaque {"secret": "<string>"} — the daemon never interprets
+// it. For a connector or generic provider that string is just the secret
+// itself. For a model-provider account it is instead the JSON-encoded
+// credential envelope daemon/inference/inference.go parses
+// ({kind, api_key, base_url, oauth}) — this dialog builds that JSON so an
+// operator never hand-writes it.
+
+let credentialDialogAccount = null;
+
+function initCredentialDialog() {
+  const dialog = document.getElementById('credential-dialog');
+  const kindToggle = document.getElementById('credential-kind-toggle');
+  const opaqueFields = document.getElementById('credential-opaque-fields');
+  const modelFields = document.getElementById('credential-model-fields');
+  const preset = document.getElementById('credential-preset');
+  const modelKind = document.getElementById('credential-model-kind');
+  const baseUrl = document.getElementById('credential-base-url');
+  const apiKey = document.getElementById('credential-api-key');
+
+  kindToggle.addEventListener('change', () => {
+    const isModel = kindToggle.value === 'model';
+    opaqueFields.classList.toggle('hidden', isModel);
+    modelFields.classList.toggle('hidden', !isModel);
+  });
+
+  preset.addEventListener('change', () => {
+    const p = CREDENTIAL_PRESETS[preset.value];
+    if (!p) return;
+    modelKind.value = p.kind;
+    baseUrl.value = p.baseUrl;
+    apiKey.placeholder = p.apiKeyHint;
+  });
+
+  document.getElementById('credential-cancel').addEventListener('click', () => dialog.close());
+
+  document.getElementById('form-credential').addEventListener('submit', async (ev) => {
+    ev.preventDefault();
+    if (!credentialDialogAccount) return;
+    let secret;
+    if (kindToggle.value === 'opaque') {
+      secret = document.getElementById('credential-opaque-secret').value;
+      if (!secret) { toast('Secret cannot be empty', 'error'); return; }
+    } else {
+      secret = buildCredentialEnvelope();
+      if (secret === null) return; // buildCredentialEnvelope already toasted the error
+    }
+    try {
+      await api('/v1/accounts/' + encodeURIComponent(credentialDialogAccount.id) + '/credential', {
+        method: 'POST',
+        body: JSON.stringify({ secret }),
+      });
+      toast('Account authenticated');
+      dialog.close();
+      loadAccounts();
+    } catch (err) {
+      toast('Authenticate failed: ' + err.message, 'error');
+    }
+  });
+}
+
+function buildCredentialEnvelope() {
+  const kind = document.getElementById('credential-model-kind').value;
+  const apiKey = document.getElementById('credential-api-key').value.trim();
+  const baseUrl = document.getElementById('credential-base-url').value.trim();
+  const accessToken = document.getElementById('credential-oauth-access').value.trim();
+  const refreshToken = document.getElementById('credential-oauth-refresh').value.trim();
+  const expiresLocal = document.getElementById('credential-oauth-expires').value;
+  const refreshUrl = document.getElementById('credential-oauth-refresh-url').value.trim();
+  const clientId = document.getElementById('credential-oauth-client-id').value.trim();
+
+  const envelope = { kind };
+  if (apiKey) envelope.api_key = apiKey;
+  if (baseUrl) envelope.base_url = baseUrl;
+  if (accessToken) {
+    if (!expiresLocal) { toast('OAuth access token needs an expiry so it can be refreshed on time', 'error'); return null; }
+    envelope.oauth = {
+      access_token: accessToken,
+      refresh_token: refreshToken,
+      expires_at: new Date(expiresLocal).toISOString(),
+      refresh_url: refreshUrl,
+      client_id: clientId,
+    };
+  }
+  if (!envelope.api_key && !envelope.oauth) {
+    toast('Provide either an API key or an OAuth access token', 'error');
+    return null;
+  }
+  if (kind === 'openai_compatible' && !envelope.base_url) {
+    toast('openai_compatible credentials require a base URL', 'error');
+    return null;
+  }
+  return JSON.stringify(envelope);
+}
+
+function resetCredentialDialogFields() {
+  document.getElementById('credential-kind-toggle').value = 'opaque';
+  document.getElementById('credential-opaque-fields').classList.remove('hidden');
+  document.getElementById('credential-model-fields').classList.add('hidden');
+  document.getElementById('credential-opaque-secret').value = '';
+  document.getElementById('credential-preset').value = '';
+  document.getElementById('credential-model-kind').value = 'anthropic';
+  document.getElementById('credential-api-key').value = '';
+  document.getElementById('credential-api-key').placeholder = 'leave blank if using OAuth below';
+  document.getElementById('credential-base-url').value = '';
+  document.getElementById('credential-oauth-access').value = '';
+  document.getElementById('credential-oauth-refresh').value = '';
+  document.getElementById('credential-oauth-expires').value = '';
+  document.getElementById('credential-oauth-refresh-url').value = '';
+  document.getElementById('credential-oauth-client-id').value = '';
+}
+
+function openCredentialDialog(account) {
+  credentialDialogAccount = account;
+  resetCredentialDialogFields();
+  document.getElementById('credential-dialog-title').textContent =
+    'Authenticate ' + account.provider + ' (' + account.id + ')';
+  document.getElementById('credential-dialog').showModal();
+}
 
 function escapeHtml(s) {
   return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -319,5 +468,6 @@ function escapeHtml(s) {
 document.addEventListener('DOMContentLoaded', () => {
   initTabs();
   initTokenBar();
+  initCredentialDialog();
   refreshCurrentTab();
 });

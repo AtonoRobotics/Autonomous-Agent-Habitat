@@ -112,3 +112,35 @@ tr:last-child td { border-bottom: none; }
 }
 .toast-item.ok { background: var(--ok); }
 .toast-item.error { background: var(--danger); }
+
+.hidden { display: none !important; }
+
+dialog#credential-dialog {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1.25rem;
+  background: var(--card);
+  color: var(--fg);
+  width: 28rem;
+  max-width: 90vw;
+}
+dialog#credential-dialog::backdrop { background: rgba(0, 0, 0, 0.4); }
+dialog#credential-dialog h3 { margin: 0 0 0.75rem; font-size: 1rem; }
+dialog#credential-dialog form { display: flex; flex-direction: column; gap: 0.6rem; }
+dialog#credential-dialog label { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.85rem; }
+dialog#credential-dialog input, dialog#credential-dialog select, dialog#credential-dialog textarea {
+  padding: 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: inherit;
+  font-size: 0.9rem;
+}
+dialog#credential-dialog details { border: 1px solid var(--border); border-radius: 4px; padding: 0.5rem; }
+dialog#credential-dialog details[open] { display: flex; flex-direction: column; gap: 0.6rem; }
+dialog#credential-dialog summary { cursor: pointer; font-size: 0.85rem; }
+.dialog-actions { display: flex; justify-content: flex-end; gap: 0.5rem; margin-top: 0.25rem; }
+.dialog-actions button { padding: 0.45rem 1rem; border-radius: 4px; cursor: pointer; }
+#credential-save { border: none; background: var(--accent); color: white; }
+#credential-cancel { border: 1px solid var(--border); background: var(--card); color: var(--fg); }

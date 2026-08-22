@@ -24,6 +24,9 @@ daemon/                Go control-plane daemon (single binary)
 ├── sandbox/                    per-agent computer provisioning (container or
 │                                Linux namespace isolation)
 ├── credentials/                AES-256-GCM encrypted account/module credential store
+├── inference/                  model-provider seam: agents get real inference through
+│                                the daemon using only their agent token, never a
+│                                model-provider credential of their own
 ├── interlocks/                 ApprovalGate: ticket-based approval for actions
 │                                with no verified inverse
 ├── safetycase/                 standing, revocable autonomy grants for
@@ -71,10 +74,11 @@ Everything below is working code with tests that exercise it against real proces
 - **Authorization.** Two bearer-token roles (agent, operator), constant-time comparison, fail-closed daemon startup if either token is unset. An agent token is mechanically refused on every operator-only route (extension install/activate/dispose, credential writes, SafetyCase/ApprovalGate approval) — not a convention, enforced by the server.
 - **Context management.** Per-tool-result token cap, budget tracking, compaction triggered at a configurable threshold, trace-context propagation across DBOS worker-thread boundaries so a subordinate agent's span nests under its parent's.
 - **MCP client.** stdio transport, tested against a real third-party MCP server (pinned, not `npx`-refetched per run).
+- **Model-provider inference (`daemon/inference`).** Agents call `POST /v1/inference/{complete,count-tokens}` on the daemon using only their agent bearer token; the daemon holds the actual provider credential (registered once as a `daemon/credentials` account) and makes the real call. An `anthropic` kind speaks the native Messages API (API key or OAuth bearer); an `openai_compatible` kind speaks chat completions — between the two, Anthropic, OpenAI, Grok/SuperGrok, GLM/Z.ai's Coding Plan, and self-hosted vLLM/Ollama are all covered without per-vendor code. OAuth subscription tokens refresh and rotate back into the credential store automatically. `agents/context/llm.py` is a pure HTTP client to this seam — it holds no model-provider credential of its own. `agents/context/budget.py`'s token counting is a real tokenizer, not a `chars // 4` approximation.
 
 ## What's declared but not yet built
 
-Stated plainly rather than hidden in a roadmap: `agents/context/budget.py`'s token counting and `agents/context/compactor.py`'s summarization are not model-backed — there is no LLM client in this repository yet, so goal decomposition and sub-agent work are not real cognition either. Building that requires a model provider and an API key this environment does not hold; the code is honest about producing a real result or failing, not about faking one.
+Stated plainly rather than hidden in a roadmap: this repository has never obtained a live OAuth session against a real subscription provider (Codex, Grok) end to end, because the network egress this code has been developed under blocks the vendor auth domains — the OAuth refresh mechanism itself is real and tested, but has only been exercised against a fake token endpoint, not a real one. OpenAI Codex under a ChatGPT subscription is deliberately unimplemented — see `daemon/inference/inference.go`'s doc comment for why.
 
 The v10 core/extension boundary (`docs/AMH-SPECIFICATION.md` §2.3, §13, §16) states that physical devices, connectors, and safety cases for physical actuation belong in a separate Physical AI extension, not AMH core. `daemon/actuation`, `daemon/connectors`, and `daemon/safetycase` currently live in core and have not yet been moved to match that boundary.
 

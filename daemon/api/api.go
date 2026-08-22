@@ -24,6 +24,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/selfimprove"
@@ -43,6 +44,7 @@ type Server struct {
 	Policy      *policy.Engine
 	SelfImprove *selfimprove.Engine
 	Backup      *backup.Backer
+	Operations  *operations.Engine
 	Tracer      trace.TracerProvider
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
@@ -73,6 +75,7 @@ func New(addr string, db *sql.DB, dbURL string, tp trace.TracerProvider, auth *a
 	}
 	ext := extensions.New(db)
 	ext.RequireSignatures = requireSignatures
+	pol := policy.New(db)
 	return &Server{
 		Addr:        addr,
 		DB:          db,
@@ -80,9 +83,10 @@ func New(addr string, db *sql.DB, dbURL string, tp trace.TracerProvider, auth *a
 		Sandbox:     sandbox.New(db, sandboxBaseDir),
 		Credentials: creds,
 		Inference:   inferenceRouter,
-		Policy:      policy.New(db),
+		Policy:      pol,
 		SelfImprove: selfimprove.New(db),
 		Backup:      backup.New(dbURL),
+		Operations:  operations.New(db, pol),
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,
@@ -256,6 +260,31 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleBackup, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/restore",
 		s.Auth.RequireRole(s.handleRestore, authn.RoleOperator))
+
+	// External-effect lifecycle (§4, §11, acceptance invariant #2):
+	// agent-or-operator throughout — Propose composes with daemon/policy
+	// for admission (the actual gated moment), and every other route here
+	// is the caller mechanically reporting real dispatch progress on an
+	// operation it's already authorized to run, not a new authority
+	// grant. See daemon/operations and operations.go for why Resolve
+	// trusts the caller's terminal-outcome argument rather than computing
+	// it server-side.
+	mux.HandleFunc("POST /v1/operations",
+		s.Auth.RequireRole(s.handlePropose, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/operations",
+		s.Auth.RequireRole(s.handleListEffects, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/operations/{effectID}",
+		s.Auth.RequireRole(s.handleGetEffect, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/operations/{effectID}/dispatch-pending",
+		s.Auth.RequireRole(s.handleMarkDispatchPending, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/operations/{effectID}/dispatched",
+		s.Auth.RequireRole(s.handleMarkDispatched, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/operations/{effectID}/observed",
+		s.Auth.RequireRole(s.handleMarkObserved, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/operations/{effectID}/outcome-unknown",
+		s.Auth.RequireRole(s.handleMarkOutcomeUnknown, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/operations/{effectID}/resolve",
+		s.Auth.RequireRole(s.handleResolve, authn.RoleAgent, authn.RoleOperator))
 
 	return mux
 }

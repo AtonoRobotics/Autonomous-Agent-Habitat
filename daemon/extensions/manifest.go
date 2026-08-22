@@ -171,3 +171,15 @@ func (m Manifest) Digest() (string, error) {
 	sum := sha256.Sum256(canonical)
 	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
+
+// SignableDigest is the content digest a manifest's spec.signature attests
+// to: the same construction as Digest, but computed with the signature
+// field itself stripped first, since a signature cannot attest to its own
+// bytes. The registry recomputes this server-side and requires it to equal
+// the manifest's declared signature.digest exactly — the same "never trust
+// a caller-supplied digest" property daemon/policy enforces for action
+// digests.
+func (m Manifest) SignableDigest() (string, error) {
+	m.Spec.Signature = nil
+	return m.Digest()
+}

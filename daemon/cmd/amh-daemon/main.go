@@ -105,7 +105,14 @@ func main() {
 	}
 
 	sandboxBaseDir := getenv("AMH_SANDBOX_DIR", "./state/computers")
-	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log, sandboxBaseDir, creds)
+
+	// Unsigned manifests are admitted by default (see
+	// daemon/extensions.Registry.RequireSignatures's doc comment) — set
+	// this to require every Discover to carry a signature that verifies
+	// against a key already registered via
+	// POST /v1/extensions/trusted-keys.
+	requireSignatures := getenv("AMH_EXTENSIONS_REQUIRE_SIGNATURES", "false") == "true"
+	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
 
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)

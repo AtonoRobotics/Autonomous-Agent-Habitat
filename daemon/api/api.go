@@ -1,8 +1,8 @@
 // Package api is the daemon-resident HTTP surface the Python agent layer
 // calls for durable workflow control-plane operations: extension
 // lifecycle, per-agent compute sandboxes, account/credential management,
-// the model-provider inference seam, and the generic policy/approval
-// seam.
+// the model-provider inference seam, the generic policy/approval seam,
+// and the self-improvement candidate lifecycle.
 //
 // Every route requires a bearer token (daemon/authn) — there is no
 // unauthenticated mode. Which role a route accepts is the whole
@@ -25,6 +25,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/selfimprove"
 )
 
 type simpleResponse struct {
@@ -39,6 +40,7 @@ type Server struct {
 	Credentials *credentials.Store
 	Inference   *inference.Router
 	Policy      *policy.Engine
+	SelfImprove *selfimprove.Engine
 	Tracer      trace.TracerProvider
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
@@ -52,8 +54,11 @@ type Server struct {
 // creds may be nil (control-plane account/credential routes are then
 // unavailable) — see main.go, which treats a missing AMH_CREDENTIAL_KEY as
 // a soft-disable of just that surface, not a refusal to start, since the
-// extension/sandbox surfaces don't depend on it.
-func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store) *Server {
+// extension/sandbox surfaces don't depend on it. requireSignatures sets
+// extensions.Registry.RequireSignatures — see that field's doc comment and
+// main.go's AMH_EXTENSIONS_REQUIRE_SIGNATURES for why this defaults to
+// false rather than being mandatory from day one.
+func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store, requireSignatures bool) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -61,14 +66,17 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 	if creds != nil {
 		inferenceRouter = inference.New(creds)
 	}
+	ext := extensions.New(db)
+	ext.RequireSignatures = requireSignatures
 	return &Server{
 		Addr:        addr,
 		DB:          db,
-		Extensions:  extensions.New(db),
+		Extensions:  ext,
 		Sandbox:     sandbox.New(db, sandboxBaseDir),
 		Credentials: creds,
 		Inference:   inferenceRouter,
 		Policy:      policy.New(db),
+		SelfImprove: selfimprove.New(db),
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,
@@ -108,6 +116,21 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleListExtensions, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/extensions/get",
 		s.Auth.RequireRole(s.handleGetExtension, authn.RoleAgent, authn.RoleOperator))
+
+	// Trusted signing keys (§14: "signed extension packs and compatibility
+	// qualification") — the operator-managed set of Ed25519 keys
+	// daemon/extensions.Discover verifies a manifest's spec.signature
+	// against. Register/revoke are operator-only, same rationale as
+	// extension mutations above; a public key is not a secret, so reads
+	// are agent-or-operator. See trust.go for handler bodies.
+	mux.HandleFunc("POST /v1/extensions/trusted-keys",
+		s.Auth.RequireRole(s.handleRegisterTrustedKey, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions/trusted-keys",
+		s.Auth.RequireRole(s.handleListTrustedKeys, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions/trusted-keys/{keyID}",
+		s.Auth.RequireRole(s.handleGetTrustedKey, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/trusted-keys/{keyID}/revoke",
+		s.Auth.RequireRole(s.handleRevokeTrustedKey, authn.RoleOperator))
 
 	// Computers: agent OR operator for both create and destroy — a
 	// computer's Create/Destroy pair is always reversible by construction
@@ -181,6 +204,42 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleApproveApprovalRequest, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/policy/approvals/{approvalID}/deny",
 		s.Auth.RequireRole(s.handleDenyApprovalRequest, authn.RoleOperator))
+
+	// Self-improvement candidate lifecycle (§10): Generate is agent-or-
+	// operator — an agent (or future optimizer module) proposes a
+	// candidate. RecordEval, unlike Generate, is operator-only: the
+	// daemon always computes the pass/fail verdict itself from raw
+	// case results (see daemon/selfimprove's doc comment), but computing
+	// the verdict server-side does not by itself make the EVIDENCE
+	// independent — an agent holding only its own token could otherwise
+	// Generate a candidate and immediately self-report fabricated
+	// all-passing case_results under any evaluator_id it likes. Requiring
+	// the operator token to record evidence is the one producer/evaluator
+	// separation this daemon's two-role RBAC can actually express: the
+	// process submitting eval results must be trusted infrastructure
+	// distinct from whatever proposed the candidate, not the same agent
+	// credential. Canary/promote/demote/rollback/reject are likewise
+	// operator-only — switching what's live, the same "deterministic
+	// services commit" tier as policy's approve/deny. See
+	// daemon/selfimprove and selfimprove.go for handler bodies.
+	mux.HandleFunc("POST /v1/selfimprove/candidates",
+		s.Auth.RequireRole(s.handleGenerateCandidate, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/selfimprove/candidates",
+		s.Auth.RequireRole(s.handleListCandidates, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/selfimprove/candidates/{candidateID}",
+		s.Auth.RequireRole(s.handleGetCandidate, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/eval",
+		s.Auth.RequireRole(s.handleRecordEval, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/canary",
+		s.Auth.RequireRole(s.handleCanaryCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/promote",
+		s.Auth.RequireRole(s.handlePromoteCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/demote",
+		s.Auth.RequireRole(s.handleDemoteCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/rollback",
+		s.Auth.RequireRole(s.handleRollbackCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/reject",
+		s.Auth.RequireRole(s.handleRejectCandidate, authn.RoleOperator))
 
 	return mux
 }

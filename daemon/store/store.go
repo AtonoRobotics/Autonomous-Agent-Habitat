@@ -8,16 +8,36 @@
 // rather than go:embed'd, since embed cannot reach outside this package's
 // own directory tree; deployment packaging must ship store/migrations/
 // alongside the amh-daemon binary (see deploy/).
+//
+// Open only ever applies migrations forward, in filename order — Rollback
+// (§14: "upgrade/rollback") is the separate, explicit reverse operation,
+// using each migration's paired down-migration file under
+// store/migrations/down/ (same filename, opposite direction). A migration
+// with no down file simply can't be rolled back through this mechanism;
+// see Rollback's doc comment.
 package store
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
+)
+
+var (
+	// ErrNoMigrationsApplied means Rollback was called against a database
+	// with nothing recorded in schema_migrations to roll back.
+	ErrNoMigrationsApplied = errors.New("store: no migrations are recorded as applied")
+
+	// ErrNoDownMigration means the most recently applied migration has no
+	// paired file under migrationsDir/down — Rollback fails closed rather
+	// than silently doing nothing, or rolling back some other migration
+	// instead of the one actually most recent.
+	ErrNoDownMigration = errors.New("store: most recently applied migration has no paired down-migration file")
 )
 
 // Open connects to the PostgreSQL database named by dbURL (a standard
@@ -42,6 +62,67 @@ func Open(dbURL, migrationsDir string) (*sql.DB, error) {
 		return nil, fmt.Errorf("store: migrate: %w", err)
 	}
 	return db, nil
+}
+
+// Rollback reverses exactly the most recently applied migration recorded
+// in schema_migrations, using its paired down-migration file under
+// migrationsDir/down — e.g. up-migration migrationsDir/0001_init.sql
+// pairs with migrationsDir/down/0001_init.sql (§14: "upgrade/rollback").
+// It fails closed with ErrNoDownMigration if that file doesn't exist,
+// rather than silently doing nothing or rolling back some other
+// migration than the one actually most recent. Call it repeatedly (once
+// per returned name) to roll back more than one migration; there is
+// deliberately no "roll back N at once" variant — each call re-derives
+// "most recent" from the database's own current state, so a caller can't
+// roll back a migration that was never actually applied.
+//
+// Unlike Open, Rollback does not also apply pending forward migrations
+// first — it is a maintenance operation run against a stopped or
+// otherwise quiesced daemon (see cmd/amh-daemon's -rollback-migration
+// flag), not something the running admin API exposes live.
+func Rollback(dbURL, migrationsDir string) (rolledBack string, err error) {
+	db, err := sql.Open("pgx", dbURL)
+	if err != nil {
+		return "", fmt.Errorf("store: open for rollback: %w", err)
+	}
+	defer db.Close()
+	if err := db.Ping(); err != nil {
+		return "", fmt.Errorf("store: ping for rollback: %w", err)
+	}
+
+	var name string
+	err = db.QueryRow(`SELECT filename FROM schema_migrations ORDER BY filename DESC LIMIT 1`).Scan(&name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNoMigrationsApplied
+	}
+	if err != nil {
+		return "", fmt.Errorf("store: find most recently applied migration: %w", err)
+	}
+
+	downPath := filepath.Join(migrationsDir, "down", name)
+	downSQL, err := os.ReadFile(downPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("%w: %s", ErrNoDownMigration, name)
+		}
+		return "", fmt.Errorf("store: read down migration for %s: %w", name, err)
+	}
+
+	tx, err := db.Begin()
+	if err != nil {
+		return "", fmt.Errorf("store: begin rollback tx for %s: %w", name, err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(string(downSQL)); err != nil {
+		return "", fmt.Errorf("store: apply down migration for %s: %w", name, err)
+	}
+	if _, err := tx.Exec(`DELETE FROM schema_migrations WHERE filename = $1`, name); err != nil {
+		return "", fmt.Errorf("store: unrecord migration %s: %w", name, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return "", fmt.Errorf("store: commit rollback of %s: %w", name, err)
+	}
+	return name, nil
 }
 
 func migrate(db *sql.DB, dir string) error {

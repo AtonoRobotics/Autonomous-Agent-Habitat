@@ -41,6 +41,20 @@ def test_from_env_provider_defaults_to_empty_string(monkeypatch):
     assert client.provider == ""
 
 
+def test_from_env_providers_defaults_to_none(monkeypatch):
+    monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
+    monkeypatch.delenv("ADAPTER_PROVIDERS", raising=False)
+    client = from_env("http://127.0.0.1:9999", "agent-token")
+    assert client.providers is None
+
+
+def test_from_env_parses_comma_separated_providers_failover_chain(monkeypatch):
+    monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("ADAPTER_PROVIDERS", "grok, anthropic ,glm")
+    client = from_env("http://127.0.0.1:9999", "agent-token")
+    assert client.providers == ["grok", "anthropic", "glm"]
+
+
 class _FakeDaemon(BaseHTTPRequestHandler):
     captured_path = None
     captured_auth = None
@@ -89,6 +103,27 @@ def test_complete_sends_real_request_and_parses_real_response(fake_daemon):
     assert _FakeDaemon.captured_body["model"] == "claude-sonnet-5"
     assert _FakeDaemon.captured_body["system"] == "be helpful"
     assert _FakeDaemon.captured_body["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_complete_sends_providers_failover_chain_when_set(fake_daemon):
+    _FakeDaemon.response_body = json.dumps({"text": "the real answer"}).encode()
+    client = ModelClient(
+        daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5",
+        providers=["grok", "anthropic"],
+    )
+
+    client.complete(system="", messages=[{"role": "user", "content": "hi"}])
+
+    assert _FakeDaemon.captured_body["providers"] == ["grok", "anthropic"]
+
+
+def test_complete_sends_empty_providers_list_when_unset(fake_daemon):
+    _FakeDaemon.response_body = json.dumps({"text": "ok"}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5", provider="anthropic")
+
+    client.complete(system="", messages=[{"role": "user", "content": "hi"}])
+
+    assert _FakeDaemon.captured_body["providers"] == []
 
 
 def test_count_tokens_sends_real_request_and_parses_real_response(fake_daemon):

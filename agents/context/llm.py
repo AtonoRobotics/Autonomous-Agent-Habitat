@@ -51,11 +51,18 @@ class ModelClient:
     agent_token: str
     model: str
     provider: str = ""
+    providers: list[str] | None = None
+    """Ordered failover chain of registered provider accounts (see
+    daemon/inference's Request.Providers) — e.g. ["anthropic-prod",
+    "anthropic-eval"] or ["grok", "anthropic"]. The daemon tries each in
+    order and returns the first success. Takes precedence over `provider`
+    when set; `provider` remains the single-provider shorthand."""
 
     def complete(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> str:
         """Returns the model's real text response, via the daemon."""
         payload = {
             "provider": self.provider,
+            "providers": self.providers or [],
             "model": self.model,
             "system": system,
             "messages": messages,
@@ -67,7 +74,13 @@ class ModelClient:
     def count_tokens(self, system: str, messages: list[dict[str, str]]) -> int:
         """Returns the provider's real input token count, via the daemon.
         Only implemented (daemon-side) for the anthropic provider."""
-        payload = {"provider": self.provider, "model": self.model, "system": system, "messages": messages}
+        payload = {
+            "provider": self.provider,
+            "providers": self.providers or [],
+            "model": self.model,
+            "system": system,
+            "messages": messages,
+        }
         result = self._post("/v1/inference/count-tokens", payload)
         return result["input_tokens"]
 
@@ -92,15 +105,26 @@ class ModelClient:
 def from_env(daemon_api_base_url: str, agent_token: str) -> ModelClient:
     """Builds a ModelClient for the model named by ADAPTER_MODEL (and
     optionally ADAPTER_PROVIDER — which registered daemon account to use;
-    the daemon defaults to "anthropic" if omitted). Neither of these is a
-    secret: choosing which model to ask for is a normal agent-run
-    parameter, unlike the credential that authenticates the call, which
-    this module never holds. Raises ModelNotConfiguredError if
-    ADAPTER_MODEL is unset — every caller in this codebase must let that
-    propagate, not catch it and substitute a fake result.
+    the daemon defaults to "anthropic" if omitted). ADAPTER_PROVIDERS, if
+    set, is a comma-separated ordered failover chain (e.g.
+    "anthropic-prod,anthropic-eval") and takes precedence over
+    ADAPTER_PROVIDER. None of these is a secret: choosing which model/
+    provider to ask for is a normal agent-run parameter, unlike the
+    credential that authenticates the call, which this module never
+    holds. Raises ModelNotConfiguredError if ADAPTER_MODEL is unset —
+    every caller in this codebase must let that propagate, not catch it
+    and substitute a fake result.
     """
     model = os.environ.get("ADAPTER_MODEL", "").strip()
     if not model:
         raise ModelNotConfiguredError("ADAPTER_MODEL is not set — no model is configured for this agent run")
     provider = os.environ.get("ADAPTER_PROVIDER", "").strip()
-    return ModelClient(daemon_api_base_url=daemon_api_base_url, agent_token=agent_token, model=model, provider=provider)
+    providers_raw = os.environ.get("ADAPTER_PROVIDERS", "").strip()
+    providers = [p.strip() for p in providers_raw.split(",") if p.strip()] or None
+    return ModelClient(
+        daemon_api_base_url=daemon_api_base_url,
+        agent_token=agent_token,
+        model=model,
+        provider=provider,
+        providers=providers,
+    )

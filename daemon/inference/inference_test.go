@@ -5,9 +5,11 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -263,6 +265,136 @@ func TestComplete_ProviderErrorPropagates(t *testing.T) {
 	_, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}})
 	if err == nil {
 		t.Fatalf("expected the provider's 401 to propagate as an error")
+	}
+}
+
+func TestComplete_FailsOverToSecondProviderOnFirstFailure(t *testing.T) {
+	primaryCalls := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":"primary is down"}`))
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"content":[{"type":"text","text":"answer from backup"}]}`))
+	}))
+	defer backup.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "primary", map[string]string{"kind": "anthropic", "api_key": "k1", "base_url": primary.URL})
+	registerProviderAccount(t, creds, "backup", map[string]string{"kind": "anthropic", "api_key": "k2", "base_url": backup.URL})
+
+	router := New(creds)
+	result, err := router.Complete(context.Background(), Request{
+		Providers: []string{"primary", "backup"},
+		Model:     "claude-sonnet-5",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result != "answer from backup" {
+		t.Fatalf("expected the backup provider's answer, got %q", result)
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("expected exactly one attempt against the failed primary before failing over, got %d", primaryCalls)
+	}
+}
+
+func TestComplete_FirstProviderSucceeds_SecondNeverCalled(t *testing.T) {
+	backupCalls := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"content":[{"type":"text","text":"answer from primary"}]}`))
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		backupCalls++
+		w.Write([]byte(`{"content":[{"type":"text","text":"should never be seen"}]}`))
+	}))
+	defer backup.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "primary", map[string]string{"kind": "anthropic", "api_key": "k1", "base_url": primary.URL})
+	registerProviderAccount(t, creds, "backup", map[string]string{"kind": "anthropic", "api_key": "k2", "base_url": backup.URL})
+
+	router := New(creds)
+	result, err := router.Complete(context.Background(), Request{
+		Providers: []string{"primary", "backup"},
+		Model:     "claude-sonnet-5",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if result != "answer from primary" {
+		t.Fatalf("expected the primary provider's answer, got %q", result)
+	}
+	if backupCalls != 0 {
+		t.Fatalf("expected the backup provider never to be called when the primary succeeds, got %d calls", backupCalls)
+	}
+}
+
+func TestComplete_AllProvidersFail_ReturnsJoinedErrorNamingEach(t *testing.T) {
+	failing := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"boom"}`))
+	}))
+	defer failing.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "primary", map[string]string{"kind": "anthropic", "api_key": "k1", "base_url": failing.URL})
+	// "backup" is deliberately never registered — an unconfigured provider
+	// in the chain must also be reported, not silently skipped.
+
+	router := New(creds)
+	_, err := router.Complete(context.Background(), Request{
+		Providers: []string{"primary", "backup"},
+		Model:     "claude-sonnet-5",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatalf("expected an error when every provider in the chain fails")
+	}
+	if !errors.Is(err, ErrAllProvidersFailed) {
+		t.Fatalf("expected ErrAllProvidersFailed, got %v", err)
+	}
+	if !errors.Is(err, ErrProviderNotConfigured) {
+		t.Fatalf("expected the unconfigured 'backup' provider's error to be preserved in the joined error, got %v", err)
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, `"primary"`) || !strings.Contains(msg, `"backup"`) {
+		t.Fatalf("expected the joined error to name both providers, got %q", msg)
+	}
+}
+
+func TestCountTokens_FailsOverPastAKindThatDoesNotSupportIt(t *testing.T) {
+	anthropicServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"input_tokens":42}`))
+	}))
+	defer anthropicServer.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	// "glm" is openai_compatible, which CountTokens does not implement —
+	// the chain must move past it to "anthropic" rather than giving up.
+	registerProviderAccount(t, creds, "glm", map[string]string{"kind": "openai_compatible", "api_key": "k", "base_url": "http://example.invalid"})
+	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "k", "base_url": anthropicServer.URL})
+
+	router := New(creds)
+	n, err := router.CountTokens(context.Background(), Request{
+		Providers: []string{"glm", "anthropic"},
+		Model:     "claude-sonnet-5",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("CountTokens: %v", err)
+	}
+	if n != 42 {
+		t.Fatalf("expected 42, got %d", n)
 	}
 }
 

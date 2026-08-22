@@ -305,7 +305,12 @@ func TestAccountRoutes_503WhenCredentialStoreDisabled(t *testing.T) {
 
 func registerFakeModelProvider(t *testing.T, ts *httptest.Server, providerFakeURL string) {
 	t.Helper()
-	createBody, _ := json.Marshal(map[string]string{"provider": "test-fake", "display_name": "fake provider"})
+	registerFakeModelProviderNamed(t, ts, "test-fake", providerFakeURL)
+}
+
+func registerFakeModelProviderNamed(t *testing.T, ts *httptest.Server, provider, providerFakeURL string) {
+	t.Helper()
+	createBody, _ := json.Marshal(map[string]string{"provider": provider, "display_name": "fake provider"})
 	create := postJSON(t, ts.URL+"/v1/accounts", testOperatorToken, createBody)
 	var acct accountResponse
 	json.NewDecoder(create.Body).Decode(&acct)
@@ -342,6 +347,41 @@ func TestInferenceComplete_RealRoundTripThroughRegisteredProvider(t *testing.T) 
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result.Text != "the real answer" {
 		t.Fatalf("expected the real provider text, got %q", result.Text)
+	}
+}
+
+func TestInferenceComplete_ProvidersFieldFailsOverOverHTTP(t *testing.T) {
+	primaryCalls := 0
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		primaryCalls++
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"answer from backup"}}]}`))
+	}))
+	defer backup.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProviderNamed(t, ts, "primary", primary.URL)
+	registerFakeModelProviderNamed(t, ts, "backup", backup.URL)
+
+	body, _ := json.Marshal(map[string]any{
+		"providers": []string{"primary", "backup"}, "model": "test-model",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	resp := postJSON(t, ts.URL+"/v1/inference/complete", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 after failing over to the backup provider, got %d", resp.StatusCode)
+	}
+	var result inferenceCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Text != "answer from backup" {
+		t.Fatalf("expected the backup provider's answer, got %q", result.Text)
+	}
+	if primaryCalls != 1 {
+		t.Fatalf("expected exactly one attempt against the failed primary, got %d", primaryCalls)
 	}
 }
 

@@ -490,6 +490,7 @@ type inferenceMessage struct {
 
 type inferenceCompleteRequest struct {
 	Provider  string             `json:"provider,omitempty"`
+	Providers []string           `json:"providers,omitempty"`
 	Model     string             `json:"model"`
 	System    string             `json:"system,omitempty"`
 	Messages  []inferenceMessage `json:"messages"`
@@ -546,6 +547,7 @@ func (s *Server) handleInferenceComplete(w http.ResponseWriter, r *http.Request)
 	}
 	text, err := s.Inference.Complete(r.Context(), inference.Request{
 		Provider:  req.Provider,
+		Providers: req.Providers,
 		Model:     req.Model,
 		System:    req.System,
 		Messages:  toInferenceMessages(req.Messages),
@@ -572,10 +574,11 @@ func (s *Server) handleInferenceCountTokens(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	n, err := s.Inference.CountTokens(r.Context(), inference.Request{
-		Provider: req.Provider,
-		Model:    req.Model,
-		System:   req.System,
-		Messages: toInferenceMessages(req.Messages),
+		Provider:  req.Provider,
+		Providers: req.Providers,
+		Model:     req.Model,
+		System:    req.System,
+		Messages:  toInferenceMessages(req.Messages),
 	})
 	if err != nil {
 		writeJSON(w, inferenceErrorStatus(err), inferenceCountTokensResponse{Error: err.Error()})

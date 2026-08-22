@@ -71,10 +71,21 @@ type Message struct {
 // Request is provider-neutral: Provider selects which registered account's
 // credential to use, Model is passed through to that provider's API
 // verbatim. Provider defaults to "anthropic" if empty, matching this
-// package's only provider with no explicit selection required in V0's
-// single-tenant deployment.
+// package's original single-provider behavior when no fallback chain is
+// given.
+//
+// Providers, if non-empty, is an ordered failover chain: the caller (or
+// its operator-configured default) names more than one registered
+// provider — e.g. {"anthropic-prod", "anthropic-eval"}, or
+// {"grok", "anthropic"} — and Complete/CountTokens try each in order,
+// returning the first success. daemon/credentials.GetActiveAccountByProvider
+// already documents that redundancy is expressed as distinct provider
+// strings, not multiple accounts sharing one; Providers is routing on top
+// of that existing design, not a new credential-selection rule. Providers
+// takes precedence over Provider when both are set.
 type Request struct {
 	Provider  string
+	Providers []string
 	Model     string
 	System    string
 	Messages  []Message
@@ -84,7 +95,19 @@ type Request struct {
 var (
 	ErrProviderNotConfigured = errors.New("inference: no active account is registered for this provider")
 	ErrProviderCallFailed    = errors.New("inference: the model provider call failed")
+	// ErrAllProvidersFailed wraps the joined per-provider errors when every
+	// provider in a Request's failover chain failed — see providerChain.
+	ErrAllProvidersFailed = errors.New("inference: every provider in the failover chain failed")
 )
+
+// providerChain returns req's ordered list of providers to try: Providers
+// if set, otherwise the single Provider (defaulting to "anthropic").
+func providerChain(req Request) []string {
+	if len(req.Providers) > 0 {
+		return req.Providers
+	}
+	return []string{providerOrDefault(req.Provider)}
+}
 
 // credentialEnvelope is the JSON shape stored (encrypted) as a model-
 // provider account's credential — see this package's doc comment.
@@ -123,9 +146,27 @@ func New(creds *credentials.Store) *Router {
 	return &Router{Credentials: creds, HTTPClient: &http.Client{Timeout: 120 * time.Second}}
 }
 
-// Complete returns the model's real text response.
+// Complete returns the model's real text response. If req names more than
+// one provider (Providers), each is tried in order and the first success
+// wins — a failure on one provider (misconfigured, rate-limited, down)
+// does not fail the request while another configured provider is still
+// usable. Every provider's failure is preserved (errors.Join) in the
+// returned error so a caller can see exactly what was tried, not just the
+// last attempt.
 func (r *Router) Complete(ctx context.Context, req Request) (string, error) {
-	env, err := r.resolveCredential(ctx, providerOrDefault(req.Provider))
+	var errs []error
+	for _, provider := range providerChain(req) {
+		text, err := r.completeOne(ctx, provider, req)
+		if err == nil {
+			return text, nil
+		}
+		errs = append(errs, fmt.Errorf("provider %q: %w", provider, err))
+	}
+	return "", errors.Join(append([]error{ErrAllProvidersFailed}, errs...)...)
+}
+
+func (r *Router) completeOne(ctx context.Context, provider string, req Request) (string, error) {
+	env, err := r.resolveCredential(ctx, provider)
 	if err != nil {
 		return "", err
 	}
@@ -139,11 +180,25 @@ func (r *Router) Complete(ctx context.Context, req Request) (string, error) {
 	}
 }
 
-// CountTokens returns the provider's real input token count. Only
+// CountTokens returns the provider's real input token count, trying each
+// provider in req's failover chain in order (see Complete). Only
 // implemented for the anthropic provider — see context.llm's equivalent
-// note on the Python side.
+// note on the Python side — so a chain containing only openai_compatible
+// providers will exhaust the chain and return ErrAllProvidersFailed.
 func (r *Router) CountTokens(ctx context.Context, req Request) (int, error) {
-	env, err := r.resolveCredential(ctx, providerOrDefault(req.Provider))
+	var errs []error
+	for _, provider := range providerChain(req) {
+		n, err := r.countTokensOne(ctx, provider, req)
+		if err == nil {
+			return n, nil
+		}
+		errs = append(errs, fmt.Errorf("provider %q: %w", provider, err))
+	}
+	return 0, errors.Join(append([]error{ErrAllProvidersFailed}, errs...)...)
+}
+
+func (r *Router) countTokensOne(ctx context.Context, provider string, req Request) (int, error) {
+	env, err := r.resolveCredential(ctx, provider)
 	if err != nil {
 		return 0, err
 	}

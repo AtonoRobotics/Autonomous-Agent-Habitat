@@ -12,7 +12,7 @@ import (
 func TestApprovalGateLifecycle_CreateApproveStatus(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -67,7 +67,7 @@ func TestApprovalGateLifecycle_CreateApproveStatus(t *testing.T) {
 func TestApprovalGateApprove_RejectsAgentToken(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -99,7 +99,7 @@ func TestApprovalGateApprove_RejectsAgentToken(t *testing.T) {
 func TestApprovalGateApprove_RejectsDoubleApproval(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -126,7 +126,7 @@ func TestApprovalGateApprove_RejectsDoubleApproval(t *testing.T) {
 func TestApprovalGateCreateTicket_RejectsInvalidRisk(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -151,7 +151,7 @@ func TestIrreversibleActuation_RequiresApprovalCreatedAndApprovedOverHTTP(t *tes
 	seedIrreversibleDeviceAction(t, db)
 
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 

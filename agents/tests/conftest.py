@@ -24,6 +24,13 @@ MIGRATIONS_DIR = os.path.join(REPO_ROOT, "store", "migrations")
 TEST_AGENT_TOKEN = "test-agent-token"
 TEST_OPERATOR_TOKEN = "test-operator-token"
 
+# A fixed, valid (32 raw bytes, base64-encoded) test-only key so the
+# daemon's account/credential control-plane routes are enabled in tests
+# that use the `daemon` fixture — never a real secret, just deterministic
+# test input. See daemon/credentials's doc comment for the real format
+# (openssl rand -base64 32).
+TEST_CREDENTIAL_KEY = "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8="
+
 
 @dataclass(frozen=True)
 class DaemonHandle:
@@ -88,7 +95,7 @@ def _find_free_port() -> int:
 
 
 @pytest.fixture()
-def daemon(go_binaries, db_path):
+def daemon(go_binaries, db_path, tmp_path):
     """Starts amh-daemon pointed at db_path with the two role tokens
     configured, waits for /healthz, tears down. Yields a DaemonHandle
     (base_url, agent_token, operator_token) — real deployments never put
@@ -105,6 +112,8 @@ def daemon(go_binaries, db_path):
         HABITAT_ROUTINE_TICK_MS="60000",
         AMH_API_AGENT_TOKEN=TEST_AGENT_TOKEN,
         AMH_API_OPERATOR_TOKEN=TEST_OPERATOR_TOKEN,
+        AMH_CREDENTIAL_KEY=TEST_CREDENTIAL_KEY,
+        AMH_SANDBOX_DIR=str(tmp_path / "computers"),
     )
     proc = subprocess.Popen([go_binaries["daemon"]], cwd=REPO_ROOT, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)

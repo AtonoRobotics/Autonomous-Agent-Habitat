@@ -216,7 +216,7 @@ func TestHandleActuate_RealSSHRoundTripOverHTTP(t *testing.T) {
 	deviceActionID := seedVentDeviceAction(t, db)
 
 	tp := sdktrace.NewTracerProvider() // no exporter needed for this test
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -267,7 +267,7 @@ func TestHandleActuate_UnreversibleWithoutTicketIsForbidden(t *testing.T) {
 	db.Exec(`INSERT INTO device_action (id, device_id, name, reversible) VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
 
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -285,7 +285,7 @@ func TestHandleActuate_RejectsRequestsWithNoToken(t *testing.T) {
 	deviceActionID := seedVentDeviceAction(t, db)
 
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 

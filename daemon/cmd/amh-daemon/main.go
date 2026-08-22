@@ -15,6 +15,7 @@ import (
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/api"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/scheduler"
@@ -35,6 +36,18 @@ func main() {
 	host := getenv("AMH_DAEMON_HOST", "127.0.0.1")
 	port := getenv("AMH_DAEMON_PORT", "8080")
 	apiPort := getenv("AMH_API_PORT", "8090")
+
+	// Every process-isolation extension the registry launches
+	// (daemon/extensions) inherits this daemon's environment via plain
+	// exec.Command — see that package's doc comment on why it is
+	// deliberately not exec.CommandContext. Setting AMH_API_BASE_URL here,
+	// once, is what lets ANY such extension (not just the control-plane
+	// UI) call back into its own admin API without each one needing a
+	// separate, extension-specific way to discover the daemon's address.
+	if os.Getenv("AMH_API_BASE_URL") == "" {
+		os.Setenv("AMH_API_BASE_URL", "http://"+host+":"+apiPort)
+	}
+
 	tickMs, err := strconv.Atoi(getenv("HABITAT_ROUTINE_TICK_MS", "60000"))
 	if err != nil {
 		log.Error("invalid HABITAT_ROUTINE_TICK_MS", "error", err)
@@ -79,7 +92,24 @@ func main() {
 		os.Exit(1)
 	}
 
-	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log)
+	// AMH_CREDENTIAL_KEY gates only the account/credential admin routes
+	// (daemon/api/controlplane.go's credentialsUnavailable), not daemon
+	// startup — unlike the two RBAC tokens above, a habitat with no
+	// external accounts to authenticate yet has no reason to refuse to
+	// run. See daemon/credentials's doc comment for how to generate one.
+	var creds *credentials.Store
+	if key, err := credentials.LoadKeyFromEnv(); err == nil {
+		creds, err = credentials.New(db, key)
+		if err != nil {
+			log.Error("refusing to enable credential store: invalid AMH_CREDENTIAL_KEY", "error", err)
+			os.Exit(1)
+		}
+	} else {
+		log.Warn("AMH_CREDENTIAL_KEY not set: account/credential control-plane routes are disabled", "hint", "generate one with: openssl rand -base64 32")
+	}
+
+	sandboxBaseDir := getenv("AMH_SANDBOX_DIR", "./state/computers")
+	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log, sandboxBaseDir, creds)
 
 	sup := supervisor.New("amh-daemon", supervisor.OneForOne, 5, time.Minute, log)
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})

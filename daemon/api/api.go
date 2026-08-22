@@ -33,8 +33,11 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/actuation"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/safetycase"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
 )
 
 type actuateRequest struct {
@@ -107,14 +110,17 @@ type safetyCaseStatusResponse struct {
 }
 
 type Server struct {
-	Addr       string
-	DB         *sql.DB
-	Registry   *connectors.Registry
-	Gate       *interlocks.Gate
-	SafetyCase *safetycase.Registry
-	Tracer     trace.TracerProvider
-	Auth       *authn.Authenticator
-	Log        *slog.Logger
+	Addr        string
+	DB          *sql.DB
+	Registry    *connectors.Registry
+	Gate        *interlocks.Gate
+	SafetyCase  *safetycase.Registry
+	Extensions  *extensions.Registry
+	Sandbox     *sandbox.Provisioner
+	Credentials *credentials.Store
+	Tracer      trace.TracerProvider
+	Auth        *authn.Authenticator
+	Log         *slog.Logger
 
 	srv *http.Server
 }
@@ -122,19 +128,26 @@ type Server struct {
 // New wires the API's dependencies. auth is required — there is no
 // unauthenticated mode; see amh-daemon's main.go, which refuses to start
 // this server at all if its two role tokens aren't both configured.
-func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger) *Server {
+// creds may be nil (control-plane account/credential routes are then
+// unavailable) — see main.go, which treats a missing AMH_CREDENTIAL_KEY as
+// a soft-disable of just that surface, not a refusal to start, since
+// device actuation and the extension/sandbox surfaces don't depend on it.
+func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
 	return &Server{
-		Addr:       addr,
-		DB:         db,
-		Registry:   connectors.NewRegistry(db),
-		Gate:       interlocks.New(db),
-		SafetyCase: safetycase.New(db),
-		Tracer:     tp,
-		Auth:       auth,
-		Log:        log,
+		Addr:        addr,
+		DB:          db,
+		Registry:    connectors.NewRegistry(db),
+		Gate:        interlocks.New(db),
+		SafetyCase:  safetycase.New(db),
+		Extensions:  extensions.New(db),
+		Sandbox:     sandbox.New(db, sandboxBaseDir),
+		Credentials: creds,
+		Tracer:      tp,
+		Auth:        auth,
+		Log:         log,
 	}
 }
 
@@ -173,6 +186,72 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleRevokeSafetyCase, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/safety-cases/{caseID}",
 		s.Auth.RequireRole(s.handleSafetyCaseStatus, authn.RoleAgent, authn.RoleOperator))
+
+	// Control plane: extensions, computers, connectors, accounts. See
+	// controlplane.go for handler bodies and the doc comment there for why
+	// extension id/version travel in the request body or query string
+	// rather than the URL path (namespaced extension ids contain "/",
+	// which Go's ServeMux path segments cannot represent).
+	//
+	// Extension mutations (discover/activate/quiesce/dispose) are
+	// operator-only: activating an extension runs new code with
+	// daemon-level reach, the exact class of action decision 9
+	// ("agents propose; deterministic services commit") reserves for a
+	// deterministic, human-gated path rather than autonomous agent action.
+	mux.HandleFunc("POST /v1/extensions",
+		s.Auth.RequireRole(s.handleDiscoverExtension, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/activate",
+		s.Auth.RequireRole(s.handleActivateExtension, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/quiesce",
+		s.Auth.RequireRole(s.handleQuiesceExtension, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/dispose",
+		s.Auth.RequireRole(s.handleDisposeExtension, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions",
+		s.Auth.RequireRole(s.handleListExtensions, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions/get",
+		s.Auth.RequireRole(s.handleGetExtension, authn.RoleAgent, authn.RoleOperator))
+
+	// Computers: agent OR operator for both create and destroy — a
+	// computer's Create/Destroy pair is always reversible by construction
+	// (daemon/sandbox), so per §12/v6 (reversibility is the sole gating
+	// axis) an agent provisioning or tearing down its own compute instance
+	// needs no operator gate, unlike installing an extension.
+	mux.HandleFunc("POST /v1/computers",
+		s.Auth.RequireRole(s.handleCreateComputer, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/computers/{computerID}/destroy",
+		s.Auth.RequireRole(s.handleDestroyComputer, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/computers/{computerID}",
+		s.Auth.RequireRole(s.handleGetComputer, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/computers",
+		s.Auth.RequireRole(s.handleListComputers, authn.RoleAgent, authn.RoleOperator))
+
+	// Connectors: create/disable are operator-only (a connector carries
+	// network reach and, via account_id, may carry credential access).
+	mux.HandleFunc("POST /v1/connectors",
+		s.Auth.RequireRole(s.handleCreateConnector, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/connectors/{connectorID}/disable",
+		s.Auth.RequireRole(s.handleDisableConnector, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/connectors",
+		s.Auth.RequireRole(s.handleListConnectors, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/connectors/{connectorID}",
+		s.Auth.RequireRole(s.handleGetConnector, authn.RoleAgent, authn.RoleOperator))
+
+	// Accounts: creating an account, storing/rotating its credential
+	// ("authenticate an account"), and revoking are all operator-only —
+	// secret material and external identity are exactly the actions
+	// decision 9 reserves from autonomous agent action. Reads return
+	// metadata only (daemon/credentials.Account never carries a secret).
+	mux.HandleFunc("POST /v1/accounts",
+		s.Auth.RequireRole(s.handleCreateAccount, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/accounts/{accountID}/credential",
+		s.Auth.RequireRole(s.handlePutAccountCredential, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/accounts/{accountID}/revoke",
+		s.Auth.RequireRole(s.handleRevokeAccount, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/accounts",
+		s.Auth.RequireRole(s.handleListAccounts, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/accounts/{accountID}",
+		s.Auth.RequireRole(s.handleGetAccount, authn.RoleAgent, authn.RoleOperator))
+
 	return mux
 }
 

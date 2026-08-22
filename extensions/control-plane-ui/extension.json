@@ -1,0 +1,23 @@
+{
+  "apiVersion": "amh/v1",
+  "kind": "Extension",
+  "metadata": {
+    "id": "amh.control-plane/ui",
+    "name": "AMH Control Plane UI",
+    "version": "1.0.0",
+    "publisher": "amh-core",
+    "description": "First-party operator UI for installing harnesses, provisioning computers, configuring connectors, and authenticating accounts and modules — against the same admin API any third-party control-plane UI would use."
+  },
+  "spec": {
+    "entrypoint": "__ABSOLUTE_PATH_TO_SERVER_JS__",
+    "isolation": "process",
+    "provides": [
+      { "id": "amh.control-plane/ui-cap", "version": "1.0.0" }
+    ],
+    "requires": [],
+    "compatibility": {
+      "amhCore": ">=0.1.0",
+      "platforms": ["linux_amd64", "linux_arm64"]
+    }
+  }
+}

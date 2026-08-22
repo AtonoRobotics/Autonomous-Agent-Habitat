@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AMH Control Plane</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>AMH Control Plane</h1>
+    <div class="token-bar">
+      <label>Bearer token
+        <input id="token-input" type="password" placeholder="operator or agent token" autocomplete="off">
+      </label>
+      <span id="token-status" class="status"></span>
+    </div>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="extensions" class="active">Extensions</button>
+    <button data-tab="computers">Computers</button>
+    <button data-tab="connectors">Connectors</button>
+    <button data-tab="accounts">Accounts</button>
+  </nav>
+
+  <main>
+    <section id="tab-extensions" class="tab active">
+      <h2>Extensions <span class="hint">install harnesses, connectors, knowledge-base/memory/model-provider modules — anything the registry hosts</span></h2>
+      <form id="form-discover-extension" class="card">
+        <h3>Install (discover) an extension</h3>
+        <textarea id="extension-manifest" rows="10" placeholder='{"apiVersion":"amh/v1","kind":"Extension","metadata":{"id":"amh.example/thing","name":"Example","version":"1.0.0","publisher":"you"},"spec":{"entrypoint":"true","isolation":"in_process","provides":[],"requires":[],"compatibility":{"amhCore":">=0.1.0"}}}'></textarea>
+        <button type="submit">Discover</button>
+      </form>
+      <div id="extensions-table"></div>
+    </section>
+
+    <section id="tab-computers" class="tab">
+      <h2>Computers <span class="hint">each agent's own isolated compute instance — build a sandbox, tear it down</span></h2>
+      <form id="form-create-computer" class="card">
+        <h3>Provision a computer</h3>
+        <label>Agent ID <input name="agent_id" placeholder="agent-1"></label>
+        <label>Isolation
+          <select name="isolation">
+            <option value="process">process (unshare, no daemon needed)</option>
+            <option value="container">container (docker)</option>
+          </select>
+        </label>
+        <label>Image / command <input name="image" placeholder="sleep infinity" required></label>
+        <button type="submit">Create</button>
+      </form>
+      <label class="filter">Filter by agent ID <input id="computers-agent-filter" placeholder="agent-1"></label>
+      <div id="computers-table"></div>
+    </section>
+
+    <section id="tab-connectors" class="tab">
+      <h2>Connectors <span class="hint">any type — not limited to a fixed built-in list</span></h2>
+      <form id="form-create-connector" class="card">
+        <h3>Add a connector</h3>
+        <label>ID <input name="id" placeholder="my-connector" required></label>
+        <label>Type <input name="type" placeholder="ssh, rest, mqtt, or any extension-defined type" required></label>
+        <label>Auth
+          <select name="auth">
+            <option value="none">none</option>
+            <option value="apikey">apikey</option>
+            <option value="oauth2">oauth2</option>
+            <option value="mtls">mtls</option>
+          </select>
+        </label>
+        <label>Config (JSON) <textarea name="config" rows="3" placeholder="{}"></textarea></label>
+        <button type="submit">Add</button>
+      </form>
+      <div id="connectors-table"></div>
+    </section>
+
+    <section id="tab-accounts" class="tab">
+      <h2>Accounts <span class="hint">authenticate accounts and modules — secrets are stored encrypted and never shown again</span></h2>
+      <form id="form-create-account" class="card">
+        <h3>Register an account</h3>
+        <label>Provider <input name="provider" placeholder="github, gmail, ..." required></label>
+        <label>Display name <input name="display_name" placeholder="amh-bot"></label>
+        <button type="submit">Register</button>
+      </form>
+      <div id="accounts-table"></div>
+    </section>
+  </main>
+
+  <div id="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

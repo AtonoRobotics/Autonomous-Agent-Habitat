@@ -12,7 +12,7 @@ import (
 func TestSafetyCaseLifecycle_CreateEvidenceApproveStatus(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -76,7 +76,7 @@ func TestSafetyCaseLifecycle_CreateEvidenceApproveStatus(t *testing.T) {
 func TestSafetyCaseApprove_RejectsAgentToken(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -107,7 +107,7 @@ func TestSafetyCaseApprove_RejectsAgentToken(t *testing.T) {
 func TestSafetyCaseRevoke_RejectsAgentTokenAndIsImmediate(t *testing.T) {
 	db := testDB(t)
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
@@ -156,7 +156,7 @@ func TestIrreversibleActuation_SucceedsViaApprovedSafetyCaseWithNoTicket(t *test
 	seedIrreversibleDeviceAction(t, db)
 
 	tp := sdktrace.NewTracerProvider()
-	server := New("", db, tp, testAuth(t), nil)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 

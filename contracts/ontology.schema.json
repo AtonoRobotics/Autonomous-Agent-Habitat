@@ -127,6 +127,38 @@
         "resolved_at": { "type": ["string", "null"], "format": "date-time" },
         "reason": { "type": ["string", "null"] }
       }
+    },
+    "CandidateVersion": {
+      "type": "object",
+      "description": "§10's self-improvement lifecycle: GENERATED -> EVALUATED -> CANARY -> PROMOTED | REJECTED; PROMOTED -> DEMOTED -> ROLLED_BACK. `ref` is an opaque pointer to the actual candidate content (a prompt digest, a skill id+version, a module build ref, ...) — its meaning belongs to whatever produced the candidate, not this core record.",
+      "required": ["id", "candidate_class", "ref", "status", "created_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "candidate_class": { "type": "string", "enum": ["prompt", "retrieval_policy", "skill", "module", "core_code"] },
+        "ref": { "type": "string" },
+        "status": { "type": "string", "enum": ["generated", "evaluated", "canary", "promoted", "rejected", "demoted", "rolled_back"] },
+        "generated_by": { "type": ["string", "null"] },
+        "created_at": { "type": "string", "format": "date-time" },
+        "canary_at": { "type": ["string", "null"], "format": "date-time" },
+        "promoted_at": { "type": ["string", "null"], "format": "date-time" },
+        "demoted_at": { "type": ["string", "null"], "format": "date-time" },
+        "rolled_back_at": { "type": ["string", "null"], "format": "date-time" },
+        "rollback_target_id": { "type": ["string", "null"] }
+      }
+    },
+    "Eval": {
+      "type": "object",
+      "description": "Independent evidence for a CandidateVersion. `passed` is computed by the core from caller-supplied raw per-case results against a fixed threshold (docs/AMH-SPECIFICATION.md §10: \"No optimizer may alter its evaluator... or promotion threshold\") — a caller declares raw measurements, never the verdict itself, the same discipline PolicyDecision applies to a proposed action's reversibility.",
+      "required": ["id", "candidate_version_id", "evaluator_id", "evaluator_version", "passed", "evaluated_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "candidate_version_id": { "type": "string" },
+        "evaluator_id": { "type": "string" },
+        "evaluator_version": { "type": "string" },
+        "metrics": {},
+        "passed": { "type": "boolean" },
+        "evaluated_at": { "type": "string", "format": "date-time" }
+      }
     }
   }
 }

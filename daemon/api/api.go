@@ -1,8 +1,8 @@
 // Package api is the daemon-resident HTTP surface the Python agent layer
 // calls for durable workflow control-plane operations: extension
 // lifecycle, per-agent compute sandboxes, account/credential management,
-// the model-provider inference seam, and the generic policy/approval
-// seam.
+// the model-provider inference seam, the generic policy/approval seam,
+// and the self-improvement candidate lifecycle.
 //
 // Every route requires a bearer token (daemon/authn) — there is no
 // unauthenticated mode. Which role a route accepts is the whole
@@ -25,6 +25,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/selfimprove"
 )
 
 type simpleResponse struct {
@@ -39,6 +40,7 @@ type Server struct {
 	Credentials *credentials.Store
 	Inference   *inference.Router
 	Policy      *policy.Engine
+	SelfImprove *selfimprove.Engine
 	Tracer      trace.TracerProvider
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
@@ -69,6 +71,7 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 		Credentials: creds,
 		Inference:   inferenceRouter,
 		Policy:      policy.New(db),
+		SelfImprove: selfimprove.New(db),
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,
@@ -181,6 +184,34 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleApproveApprovalRequest, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/policy/approvals/{approvalID}/deny",
 		s.Auth.RequireRole(s.handleDenyApprovalRequest, authn.RoleOperator))
+
+	// Self-improvement candidate lifecycle (§10): agent-or-operator for
+	// generate/record-eval — an agent (or future optimizer module)
+	// proposes a candidate and submits raw eval-case results, but the
+	// daemon computes the pass/fail verdict itself (see
+	// daemon/selfimprove's doc comment on why the caller never declares
+	// the verdict). Canary/promote/demote/rollback/reject are
+	// operator-only — switching what's live, the same "deterministic
+	// services commit" tier as policy's approve/deny. See
+	// daemon/selfimprove and selfimprove.go for handler bodies.
+	mux.HandleFunc("POST /v1/selfimprove/candidates",
+		s.Auth.RequireRole(s.handleGenerateCandidate, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/selfimprove/candidates",
+		s.Auth.RequireRole(s.handleListCandidates, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/selfimprove/candidates/{candidateID}",
+		s.Auth.RequireRole(s.handleGetCandidate, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/eval",
+		s.Auth.RequireRole(s.handleRecordEval, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/canary",
+		s.Auth.RequireRole(s.handleCanaryCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/promote",
+		s.Auth.RequireRole(s.handlePromoteCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/demote",
+		s.Auth.RequireRole(s.handleDemoteCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/rollback",
+		s.Auth.RequireRole(s.handleRollbackCandidate, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/reject",
+		s.Auth.RequireRole(s.handleRejectCandidate, authn.RoleOperator))
 
 	return mux
 }

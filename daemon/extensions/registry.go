@@ -2,7 +2,9 @@ package extensions
 
 import (
 	"context"
+	"crypto/ed25519"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,7 +18,18 @@ var (
 	ErrInvalidState       = errors.New("extensions: not in a valid state for this transition")
 	ErrMissingRequirement = errors.New("extensions: a required capability is not provided by any active extension")
 	ErrActiveDependents   = errors.New("extensions: other active extensions still require a capability this extension provides")
+	ErrIncompatibleCore   = errors.New("extensions: manifest's spec.compatibility.amhCore range does not admit this daemon's core version")
+	ErrSignatureRequired  = errors.New("extensions: this registry requires every manifest to declare a valid spec.signature")
+	ErrInvalidSignature   = errors.New("extensions: spec.signature failed verification")
 )
+
+// CoreVersion is this daemon build's own compatibility version — what a
+// manifest's spec.compatibility.amhCore range is checked against. It is
+// not the AMH specification's version; it is the version a domain
+// extension author targets when declaring "what core am I compatible
+// with," the qualification half of §14's "signed extension packs and
+// compatibility qualification."
+const CoreVersion = "0.1.0"
 
 // Status is the extension lifecycle state — the Cordis activation pipeline:
 // discovered -> activating -> active -> quiescing -> disposed, with
@@ -62,10 +75,20 @@ type Extension struct {
 type Registry struct {
 	DB *sql.DB
 	l  *launcher
+
+	// Trust is the operator-managed set of Ed25519 keys Discover trusts to
+	// admit a signed manifest (see trust.go).
+	Trust *TrustStore
+
+	// RequireSignatures, when true, fails Discover closed for any manifest
+	// that declares no spec.signature at all — see Discover's doc comment
+	// and README's "What's declared but not yet built" for why this
+	// defaults to false rather than being mandatory from day one.
+	RequireSignatures bool
 }
 
 func New(db *sql.DB) *Registry {
-	return &Registry{DB: db, l: newLauncher()}
+	return &Registry{DB: db, l: newLauncher(), Trust: newTrustStore(db)}
 }
 
 // Discover validates a manifest and records it as a candidate extension —
@@ -74,8 +97,33 @@ func New(db *sql.DB) *Registry {
 // with a changed digest it is refused (bump the version instead — this
 // registry never silently swaps out a running extension's declared
 // contract).
+//
+// Two more admission checks run here, both real and both fail-closed where
+// they apply (§14's "signed extension packs and compatibility
+// qualification"):
+//
+//   - compatibility: m.Spec.Compatibility.AMHCore is always checked against
+//     this build's CoreVersion — a manifest declaring a range this daemon
+//     doesn't satisfy is refused unconditionally, the same way a capability
+//     requirement's version range is enforced during Activate.
+//   - signature: if a manifest declares spec.signature, it MUST verify —
+//     algorithm must be ed25519, the declared digest must equal the
+//     manifest's own recomputed SignableDigest (never trust the caller's
+//     digest), the keyId must resolve to a currently-trusted, non-revoked
+//     key in r.Trust, and the Ed25519 signature must verify against that
+//     key. If a manifest declares no signature at all, Discover admits it
+//     exactly as before UNLESS r.RequireSignatures is set — the same
+//     "fail-closed only where a property is actually declared" posture
+//     daemon/policy takes toward reversibility, not a claim that every
+//     manifest in this registry is signed today.
 func (r *Registry) Discover(ctx context.Context, m Manifest) (*Extension, error) {
 	if err := m.Validate(); err != nil {
+		return nil, err
+	}
+	if err := r.checkCompatibility(m); err != nil {
+		return nil, err
+	}
+	if err := r.checkSignature(ctx, m); err != nil {
 		return nil, err
 	}
 	digest, err := m.Digest()
@@ -344,6 +392,56 @@ func (r *Registry) List(ctx context.Context) ([]*Extension, error) {
 		out = append(out, ext)
 	}
 	return out, rows.Err()
+}
+
+// checkCompatibility enforces spec.compatibility.amhCore against this
+// daemon's own CoreVersion — unconditional, unlike signature verification,
+// since a manifest always declares this field (Validate already requires
+// it non-empty) and there is no "not declared" case to leave unenforced.
+func (r *Registry) checkCompatibility(m Manifest) error {
+	ok, err := satisfiesRange(CoreVersion, m.Spec.Compatibility.AMHCore)
+	if err != nil {
+		return fmt.Errorf("%w: %q: %v", ErrIncompatibleCore, m.Spec.Compatibility.AMHCore, err)
+	}
+	if !ok {
+		return fmt.Errorf("%w: this daemon is core %s, manifest requires %q", ErrIncompatibleCore, CoreVersion, m.Spec.Compatibility.AMHCore)
+	}
+	return nil
+}
+
+// checkSignature verifies m.Spec.Signature if present, and fails closed if
+// absent only when r.RequireSignatures is set. See Discover's doc comment
+// for the full admission rule.
+func (r *Registry) checkSignature(ctx context.Context, m Manifest) error {
+	sig := m.Spec.Signature
+	if sig == nil {
+		if r.RequireSignatures {
+			return ErrSignatureRequired
+		}
+		return nil
+	}
+	if sig.Algorithm != "ed25519" {
+		return fmt.Errorf("%w: unsupported algorithm %q", ErrInvalidSignature, sig.Algorithm)
+	}
+	digest, err := m.SignableDigest()
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidSignature, err)
+	}
+	if sig.Digest != digest {
+		return fmt.Errorf("%w: signature.digest %s does not match the manifest's actual recomputed content digest %s", ErrInvalidSignature, sig.Digest, digest)
+	}
+	pub, err := r.Trust.verified(ctx, sig.KeyID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidSignature, err)
+	}
+	sigBytes, err := hex.DecodeString(sig.Value)
+	if err != nil || len(sigBytes) != ed25519.SignatureSize {
+		return fmt.Errorf("%w: signature.value must be %d hex-encoded bytes", ErrInvalidSignature, ed25519.SignatureSize)
+	}
+	if !ed25519.Verify(pub, []byte(digest), sigBytes) {
+		return fmt.Errorf("%w: ed25519 verification failed for key %s", ErrInvalidSignature, sig.KeyID)
+	}
+	return nil
 }
 
 func (r *Registry) requirementSatisfied(ctx context.Context, req Requirement) (bool, error) {

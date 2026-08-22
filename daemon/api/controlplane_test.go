@@ -29,7 +29,7 @@ func newTestServer(t *testing.T, withCredentials bool) *httptest.Server {
 			t.Fatalf("credentials.New: %v", err)
 		}
 	}
-	server := New("", db, tp, testAuth(t), nil, t.TempDir(), creds)
+	server := New("", db, tp, testAuth(t), nil, t.TempDir(), creds, false)
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
 	return ts

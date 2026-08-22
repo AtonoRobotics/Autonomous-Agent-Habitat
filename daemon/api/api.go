@@ -54,8 +54,11 @@ type Server struct {
 // creds may be nil (control-plane account/credential routes are then
 // unavailable) — see main.go, which treats a missing AMH_CREDENTIAL_KEY as
 // a soft-disable of just that surface, not a refusal to start, since the
-// extension/sandbox surfaces don't depend on it.
-func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store) *Server {
+// extension/sandbox surfaces don't depend on it. requireSignatures sets
+// extensions.Registry.RequireSignatures — see that field's doc comment and
+// main.go's AMH_EXTENSIONS_REQUIRE_SIGNATURES for why this defaults to
+// false rather than being mandatory from day one.
+func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store, requireSignatures bool) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -63,10 +66,12 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 	if creds != nil {
 		inferenceRouter = inference.New(creds)
 	}
+	ext := extensions.New(db)
+	ext.RequireSignatures = requireSignatures
 	return &Server{
 		Addr:        addr,
 		DB:          db,
-		Extensions:  extensions.New(db),
+		Extensions:  ext,
 		Sandbox:     sandbox.New(db, sandboxBaseDir),
 		Credentials: creds,
 		Inference:   inferenceRouter,
@@ -111,6 +116,21 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleListExtensions, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/extensions/get",
 		s.Auth.RequireRole(s.handleGetExtension, authn.RoleAgent, authn.RoleOperator))
+
+	// Trusted signing keys (§14: "signed extension packs and compatibility
+	// qualification") — the operator-managed set of Ed25519 keys
+	// daemon/extensions.Discover verifies a manifest's spec.signature
+	// against. Register/revoke are operator-only, same rationale as
+	// extension mutations above; a public key is not a secret, so reads
+	// are agent-or-operator. See trust.go for handler bodies.
+	mux.HandleFunc("POST /v1/extensions/trusted-keys",
+		s.Auth.RequireRole(s.handleRegisterTrustedKey, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions/trusted-keys",
+		s.Auth.RequireRole(s.handleListTrustedKeys, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions/trusted-keys/{keyID}",
+		s.Auth.RequireRole(s.handleGetTrustedKey, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/trusted-keys/{keyID}/revoke",
+		s.Auth.RequireRole(s.handleRevokeTrustedKey, authn.RoleOperator))
 
 	// Computers: agent OR operator for both create and destroy — a
 	// computer's Create/Destroy pair is always reversible by construction

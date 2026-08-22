@@ -17,6 +17,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/mcp"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/scheduler"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
@@ -112,10 +113,14 @@ func main() {
 	sandboxBaseDir := getenv("AMH_SANDBOX_DIR", "./state/computers")
 	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log, sandboxBaseDir, creds)
 
+	mcpPort := getenv("AMH_MCP_PORT", "8093")
+	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)
+
 	sup := supervisor.New("amh-daemon", supervisor.OneForOne, 5, time.Minute, log)
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})
 	sup.Add(supervisor.Child{Name: "health", Run: healthSrv.Run})
 	sup.Add(supervisor.Child{Name: "api", Run: apiSrv.Run})
+	sup.Add(supervisor.Child{Name: "mcp", Run: mcpSrv.Run})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

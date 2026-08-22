@@ -53,6 +53,7 @@ class DaemonHandle:
     base_url: str
     agent_token: str
     operator_token: str
+    mcp_base_url: str
 
 
 @pytest.fixture(scope="module")
@@ -205,12 +206,14 @@ def daemon(go_binaries, db_path, tmp_path):
     fixture holds both only because tests need to play both roles."""
     api_port = _find_free_port()
     health_port = _find_free_port()
+    mcp_port = _find_free_port()
     env = dict(
         os.environ,
         DATABASE_URL=f"sqlite:{db_path}",
         AMH_MIGRATIONS_DIR=MIGRATIONS_DIR,
         AMH_DAEMON_PORT=str(health_port),
         AMH_API_PORT=str(api_port),
+        AMH_MCP_PORT=str(mcp_port),
         HABITAT_ROUTINE_TICK_MS="60000",
         AMH_API_AGENT_TOKEN=TEST_AGENT_TOKEN,
         AMH_API_OPERATOR_TOKEN=TEST_OPERATOR_TOKEN,
@@ -220,9 +223,10 @@ def daemon(go_binaries, db_path, tmp_path):
     proc = subprocess.Popen([go_binaries["daemon"]], cwd=REPO_ROOT, env=env,
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     base_url = f"http://127.0.0.1:{api_port}"
+    mcp_base_url = f"http://127.0.0.1:{mcp_port}"
     try:
         _wait_for_health(health_port)
-        yield DaemonHandle(base_url=base_url, agent_token=TEST_AGENT_TOKEN, operator_token=TEST_OPERATOR_TOKEN)
+        yield DaemonHandle(base_url=base_url, agent_token=TEST_AGENT_TOKEN, operator_token=TEST_OPERATOR_TOKEN, mcp_base_url=mcp_base_url)
     finally:
         proc.terminate()
         try:

@@ -1,12 +1,13 @@
 // Self-improvement candidate lifecycle routes (docs/AMH-SPECIFICATION.md
-// §10) over daemon/selfimprove. Generate/RecordEval are agent-or-
-// operator — an agent (or a future optimizer module calling with an
-// agent token) proposes a candidate and submits raw eval-case results;
-// the daemon computes the pass/fail verdict itself (see
-// daemon/selfimprove's doc comment). Canary/Promote/Demote/Rollback/
-// Reject are operator-only — switching what's live is exactly the
-// "deterministic services commit" half of decision 9, the same tier as
-// daemon/policy's Approve/Deny.
+// §10) over daemon/selfimprove. Generate is agent-or-operator — an agent
+// (or a future optimizer module) proposes a candidate. RecordEval and
+// every state transition (Canary/Promote/Demote/Rollback/Reject) are
+// operator-only: the daemon always computes the pass/fail verdict from
+// raw case results, but that alone doesn't make the evidence
+// independent if the same agent token that proposed the candidate can
+// also submit whatever results it likes — see api.go's route-table
+// doc comment for why RecordEval sits at the operator tier, not the
+// "agents propose" tier Generate does.
 package api
 
 import (

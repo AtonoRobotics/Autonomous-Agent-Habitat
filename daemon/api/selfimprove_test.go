@@ -28,11 +28,23 @@ func generateCandidate(t *testing.T, ts *httptest.Server, class string) candidat
 func recordEval(t *testing.T, ts *httptest.Server, candidateID string, caseResults []bool) evalResponse {
 	t.Helper()
 	body, _ := json.Marshal(map[string]any{"evaluator_id": "eval-suite", "evaluator_version": "1.0.0", "case_results": caseResults})
-	resp := postJSON(t, ts.URL+"/v1/selfimprove/candidates/"+candidateID+"/eval", testAgentToken, body)
+	resp := postJSON(t, ts.URL+"/v1/selfimprove/candidates/"+candidateID+"/eval", testOperatorToken, body)
 	defer resp.Body.Close()
 	var ev evalResponse
 	json.NewDecoder(resp.Body).Decode(&ev)
 	return ev
+}
+
+func TestSelfImproveRecordEval_RequiresOperatorToken(t *testing.T) {
+	ts := newTestServer(t, false)
+	c := generateCandidate(t, ts, "prompt")
+
+	body, _ := json.Marshal(map[string]any{"evaluator_id": "eval-suite", "evaluator_version": "1.0.0", "case_results": passCaseResults(10)})
+	agentAttempt := postJSON(t, ts.URL+"/v1/selfimprove/candidates/"+c.ID+"/eval", testAgentToken, body)
+	defer agentAttempt.Body.Close()
+	if agentAttempt.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for an agent token recording an eval, got %d", agentAttempt.StatusCode)
+	}
 }
 
 func TestSelfImproveGenerate_ValidClass_CreatedOverHTTP(t *testing.T) {

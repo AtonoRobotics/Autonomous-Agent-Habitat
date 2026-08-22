@@ -8,13 +8,18 @@
 //
 // § 10 is explicit that "no optimizer may alter its evaluator, held-out
 // cases, instrumentation, policy decision, approval, or promotion
-// threshold." This package enforces that the only way it knows how:
+// threshold." This package enforces that two ways, not one:
 // RecordEval takes raw, caller-supplied per-case pass/fail results and
 // computes the passed verdict itself against a fixed threshold
 // (MinPassRate) — a caller declares measurements, never the verdict,
 // exactly the "core computes the verdict from a declared property"
 // discipline daemon/policy already applies to a proposed action's
-// reversibility.
+// reversibility. But a server-computed verdict over caller-supplied
+// measurements is only as independent as the caller submitting them:
+// daemon/api's route table (see its own doc comment) gates RecordEval
+// at the operator tier, not the "agents propose" tier Generate sits at
+// — an agent holding only its own token can propose a candidate, but
+// cannot also be the one asserting it passed.
 //
 // # What this package does NOT do
 //
@@ -271,10 +276,32 @@ func (e *Engine) Promote(ctx context.Context, candidateID string) (*CandidateVer
 	}
 	defer tx.Rollback()
 
-	var class, status string
+	// Learn the class first (no row lock needed for this alone), so the
+	// class-level advisory lock below can be acquired before anything
+	// promotion-relevant is read. Locking only candidateID's own row (as
+	// an earlier version of this function did) does NOT serialize two
+	// concurrent Promote calls for two DIFFERENT candidates of the SAME
+	// class: each transaction locks a different row, so both can read
+	// "no previously promoted candidate" (or the same one) and both
+	// commit as 'promoted', leaving two live bindings for one class.
+	// pg_advisory_xact_lock blocks any other Promote/Rollback of this
+	// class until this transaction ends (commit or rollback) — real
+	// mutual exclusion a per-row lock cannot provide.
+	var class string
+	if err := tx.QueryRowContext(ctx, `SELECT candidate_class FROM candidate_version WHERE id = $1`, candidateID).Scan(&class); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("selfimprove: query candidate class for promote: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, class); err != nil {
+		return nil, fmt.Errorf("selfimprove: acquire class promotion lock: %w", err)
+	}
+
+	var status string
 	var canaryAt sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT candidate_class, status, canary_at FROM candidate_version WHERE id = $1 FOR UPDATE`, candidateID).
-		Scan(&class, &status, &canaryAt); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT status, canary_at FROM candidate_version WHERE id = $1 FOR UPDATE`, candidateID).
+		Scan(&status, &canaryAt); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}
@@ -284,9 +311,17 @@ func (e *Engine) Promote(ctx context.Context, candidateID string) (*CandidateVer
 		return nil, ErrInvalidTransition
 	}
 
+	// >= , not >: iso8601 truncates to millisecond precision, so a passing
+	// eval recorded in the same millisecond Canary() set canary_at in is a
+	// real, valid post-canary result that a strict > would wrongly reject.
+	// This can only ever admit a truly pre-canary eval if that eval and
+	// the Canary() call itself land in the same millisecond AND status
+	// somehow already reads 'canary' before Canary()'s transaction
+	// committed — impossible under Postgres MVCC, since RecordEval only
+	// ever observes 'canary' after that transaction has actually committed.
 	var passingEvalCount int
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*) FROM eval WHERE candidate_version_id = $1 AND passed = true AND evaluated_at > $2`,
+		SELECT COUNT(*) FROM eval WHERE candidate_version_id = $1 AND passed = true AND evaluated_at >= $2`,
 		candidateID, canaryAt.String,
 	).Scan(&passingEvalCount); err != nil {
 		return nil, fmt.Errorf("selfimprove: query canary evidence: %w", err)
@@ -361,10 +396,25 @@ func (e *Engine) Rollback(ctx context.Context, candidateID string) (*CandidateVe
 	}
 	defer tx.Rollback()
 
-	var class, status string
+	// Same class-level serialization as Promote, and for the same reason:
+	// Rollback also mutates "at most one promoted candidate per class,"
+	// so it must not race a concurrent Promote (or another Rollback) of
+	// the same class. See Promote's doc comment.
+	var class string
+	if err := tx.QueryRowContext(ctx, `SELECT candidate_class FROM candidate_version WHERE id = $1`, candidateID).Scan(&class); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("selfimprove: query candidate class for rollback: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1)::bigint)`, class); err != nil {
+		return nil, fmt.Errorf("selfimprove: acquire class promotion lock: %w", err)
+	}
+
+	var status string
 	var rollbackTargetID sql.NullString
-	if err := tx.QueryRowContext(ctx, `SELECT candidate_class, status, rollback_target_id FROM candidate_version WHERE id = $1 FOR UPDATE`, candidateID).
-		Scan(&class, &status, &rollbackTargetID); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT status, rollback_target_id FROM candidate_version WHERE id = $1 FOR UPDATE`, candidateID).
+		Scan(&status, &rollbackTargetID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, ErrNotFound
 		}

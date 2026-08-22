@@ -31,6 +31,15 @@ CREATE TABLE candidate_version (
 );
 CREATE INDEX idx_candidate_version_class_status ON candidate_version(candidate_class, status);
 
+-- Belt-and-suspenders backstop for "at most one promoted candidate per
+-- class": daemon/selfimprove.Promote/Rollback already serialize this
+-- with a class-keyed advisory lock, but a partial unique index makes the
+-- invariant a real constraint the database itself enforces even if that
+-- application-level locking is ever bypassed or has a bug — a second
+-- concurrent promotion attempt fails with a constraint violation instead
+-- of silently succeeding.
+CREATE UNIQUE INDEX idx_candidate_version_one_promoted_per_class ON candidate_version(candidate_class) WHERE status = 'promoted';
+
 -- Independent evidence for a candidate. `passed` is always computed by
 -- daemon/selfimprove from caller-supplied raw per-case results against a
 -- fixed threshold — never accepted as a caller-declared verdict (§10:

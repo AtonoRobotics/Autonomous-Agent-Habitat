@@ -185,12 +185,20 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/policy/approvals/{approvalID}/deny",
 		s.Auth.RequireRole(s.handleDenyApprovalRequest, authn.RoleOperator))
 
-	// Self-improvement candidate lifecycle (§10): agent-or-operator for
-	// generate/record-eval — an agent (or future optimizer module)
-	// proposes a candidate and submits raw eval-case results, but the
-	// daemon computes the pass/fail verdict itself (see
-	// daemon/selfimprove's doc comment on why the caller never declares
-	// the verdict). Canary/promote/demote/rollback/reject are
+	// Self-improvement candidate lifecycle (§10): Generate is agent-or-
+	// operator — an agent (or future optimizer module) proposes a
+	// candidate. RecordEval, unlike Generate, is operator-only: the
+	// daemon always computes the pass/fail verdict itself from raw
+	// case results (see daemon/selfimprove's doc comment), but computing
+	// the verdict server-side does not by itself make the EVIDENCE
+	// independent — an agent holding only its own token could otherwise
+	// Generate a candidate and immediately self-report fabricated
+	// all-passing case_results under any evaluator_id it likes. Requiring
+	// the operator token to record evidence is the one producer/evaluator
+	// separation this daemon's two-role RBAC can actually express: the
+	// process submitting eval results must be trusted infrastructure
+	// distinct from whatever proposed the candidate, not the same agent
+	// credential. Canary/promote/demote/rollback/reject are likewise
 	// operator-only — switching what's live, the same "deterministic
 	// services commit" tier as policy's approve/deny. See
 	// daemon/selfimprove and selfimprove.go for handler bodies.
@@ -201,7 +209,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/selfimprove/candidates/{candidateID}",
 		s.Auth.RequireRole(s.handleGetCandidate, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/eval",
-		s.Auth.RequireRole(s.handleRecordEval, authn.RoleAgent, authn.RoleOperator))
+		s.Auth.RequireRole(s.handleRecordEval, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/canary",
 		s.Auth.RequireRole(s.handleCanaryCandidate, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/promote",

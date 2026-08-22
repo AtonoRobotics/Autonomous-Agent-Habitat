@@ -3,6 +3,7 @@ package selfimprove
 import (
 	"context"
 	"database/sql"
+	"sync"
 	"testing"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
@@ -350,5 +351,102 @@ func TestList_FiltersByClassAndStatus(t *testing.T) {
 	}
 	if len(generated) != 2 {
 		t.Fatalf("expected both candidates in generated status, got %+v", generated)
+	}
+}
+
+// TestPromote_ConcurrentPromotionsOfSameClass_Serializes proves the
+// class-keyed advisory lock (and the partial unique index as a backstop)
+// actually prevent two candidates of the same class from ending up
+// simultaneously 'promoted' when two Promote calls race — the exact
+// failure mode a per-row lock alone cannot prevent, since each call locks
+// a different candidate row.
+func TestPromote_ConcurrentPromotionsOfSameClass_Serializes(t *testing.T) {
+	e := New(testDB(t))
+	ctx := context.Background()
+
+	// Both candidates reach 'canary' with real evidence before either
+	// Promote call starts — only the promotion itself races.
+	readyToPromote := func(ref string) *CandidateVersion {
+		c, err := e.Generate(ctx, ClassPrompt, ref, "optimizer-x")
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if _, err := e.RecordEval(ctx, c.ID, "eval-suite", "1.0.0", passResults(10)); err != nil {
+			t.Fatalf("RecordEval: %v", err)
+		}
+		if _, err := e.Canary(ctx, c.ID); err != nil {
+			t.Fatalf("Canary: %v", err)
+		}
+		if _, err := e.RecordEval(ctx, c.ID, "eval-suite", "1.0.0", passResults(10)); err != nil {
+			t.Fatalf("RecordEval (canary): %v", err)
+		}
+		return c
+	}
+	a := readyToPromote("ref-a")
+	b := readyToPromote("ref-b")
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, errs[0] = e.Promote(ctx, a.ID)
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, errs[1] = e.Promote(ctx, b.ID)
+	}()
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Promote %d: %v", i, err)
+		}
+	}
+
+	promoted, err := e.List(ctx, ListFilter{Class: ClassPrompt, Status: StatusPromoted})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(promoted) != 1 {
+		t.Fatalf("expected exactly one promoted prompt candidate after the race, got %+v", promoted)
+	}
+}
+
+func TestPromote_PassingEvalInSameMillisecondAsCanaryStart_StillCounts(t *testing.T) {
+	e := New(testDB(t))
+	ctx := context.Background()
+	c, err := e.Generate(ctx, ClassPrompt, "ref-1", "optimizer-x")
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if _, err := e.RecordEval(ctx, c.ID, "eval-suite", "1.0.0", passResults(10)); err != nil {
+		t.Fatalf("RecordEval: %v", err)
+	}
+	if _, err := e.Canary(ctx, c.ID); err != nil {
+		t.Fatalf("Canary: %v", err)
+	}
+
+	// Force the canary eval's evaluated_at to be textually EQUAL to
+	// canary_at (the same-millisecond collision a strict `>` would
+	// wrongly reject) rather than relying on timing to land there.
+	ev, err := e.RecordEval(ctx, c.ID, "eval-suite", "1.0.0", passResults(10))
+	if err != nil {
+		t.Fatalf("RecordEval (canary): %v", err)
+	}
+	got, err := e.Get(ctx, c.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if _, err := e.DB.ExecContext(ctx, `UPDATE eval SET evaluated_at = $1 WHERE id = $2`, got.CanaryAt, ev.ID); err != nil {
+		t.Fatalf("force same-millisecond eval: %v", err)
+	}
+
+	if _, err := e.Promote(ctx, c.ID); err != nil {
+		t.Fatalf("expected Promote to accept same-millisecond canary evidence, got %v", err)
 	}
 }

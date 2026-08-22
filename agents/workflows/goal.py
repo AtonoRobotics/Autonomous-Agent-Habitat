@@ -37,7 +37,7 @@ from dbos import DBOS, Queue
 from context.llm import from_env
 from context.observability import agent_run_span, inject_trace_context
 from harness.vfs import VFS
-from harness.agentic_loop import run_agentic_loop
+from harness.agentic_loop import mcp_servers_from_env, run_agentic_loop
 from memory.working import project_working_memory
 from . import ontology
 from .memory_hooks import recall_context, retain_outcome
@@ -144,7 +144,7 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
 
     client = from_env(daemon_api_base_url, agent_token)
     vfs = VFS(os.path.join(_workspace_root(), run_id))
-    loop_result = run_agentic_loop(full_objective, vfs, client)
+    loop_result = run_agentic_loop(full_objective, vfs, client, mcp_servers=mcp_servers_from_env())
     return {"task_id": task_id, "status": "done", "summary": loop_result.result}
 
 

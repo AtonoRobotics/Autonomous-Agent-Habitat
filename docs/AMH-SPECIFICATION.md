@@ -80,6 +80,7 @@ The core MAY host generic extension-provided schemas and indexes. Hosting does n
 - resource limits and bulkheads;
 - MCP transport gateway;
 - connector subprocess and socket I/O;
+- model-provider and tool-provider credential custody and inference request routing;
 - deterministic delivery of external triggers into DBOS using stable idempotency keys.
 
 The daemon SHALL NOT independently advance, retry, or complete a DBOS workflow. Restarting a process is not permission to repeat its durable operation.
@@ -88,7 +89,7 @@ The daemon SHALL NOT independently advance, retry, or complete a DBOS workflow. 
 
 `amh-agents` owns:
 
-- provider-neutral model calls;
+- provider-neutral model calls, issued through the daemon's inference seam using only its own agent identity — a cognition worker holds no model-provider API key, OAuth token, or base URL of its own;
 - context assembly and compaction;
 - planning and subordinate-agent cognition;
 - retrieval and memory consolidation;

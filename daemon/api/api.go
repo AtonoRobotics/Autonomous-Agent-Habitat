@@ -69,13 +69,15 @@ func New(addr string, db *sql.DB, dbURL string, tp trace.TracerProvider, auth *a
 	if log == nil {
 		log = slog.Default()
 	}
+	pol := policy.New(db)
+	ops := operations.New(db, pol)
 	var inferenceRouter *inference.Router
 	if creds != nil {
 		inferenceRouter = inference.New(creds)
+		inferenceRouter.Operations = ops
 	}
 	ext := extensions.New(db)
 	ext.RequireSignatures = requireSignatures
-	pol := policy.New(db)
 	return &Server{
 		Addr:        addr,
 		DB:          db,
@@ -86,7 +88,7 @@ func New(addr string, db *sql.DB, dbURL string, tp trace.TracerProvider, auth *a
 		Policy:      pol,
 		SelfImprove: selfimprove.New(db),
 		Backup:      backup.New(dbURL),
-		Operations:  operations.New(db, pol),
+		Operations:  ops,
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,

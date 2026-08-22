@@ -57,7 +57,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 )
 
 // Message mirrors a single chat turn — role is "user" or "assistant".
@@ -160,6 +164,16 @@ func (t *oauthToken) expired() bool {
 type Router struct {
 	Credentials *credentials.Store
 	HTTPClient  *http.Client
+
+	// Operations, if set, tracks every provider call this Router makes
+	// through daemon/operations's external-effect lifecycle (§4) — the
+	// first real call site for that package, closing the gap its own
+	// README section documented. nil means untracked: calls happen
+	// exactly as before this package existed, the same soft-disable
+	// posture daemon/api.Server.Credentials already takes when its own
+	// dependency is unset. Real production wiring (daemon/api.New)
+	// always sets this.
+	Operations *operations.Engine
 }
 
 func New(creds *credentials.Store) *Router {
@@ -190,14 +204,18 @@ func (r *Router) completeOne(ctx context.Context, provider string, req Request) 
 	if err != nil {
 		return "", err
 	}
-	switch env.Kind {
-	case "anthropic":
-		return r.anthropicComplete(ctx, env, req)
-	case "openai_compatible":
-		return r.openAICompatibleComplete(ctx, env, req)
-	default:
-		return "", fmt.Errorf("inference: account credential has unknown kind %q", env.Kind)
-	}
+	return trackEffect(ctx, r.Operations, "amh.core/inference.complete", provider,
+		map[string]any{"provider": provider, "model": req.Model},
+		func(ctx context.Context) (string, error) {
+			switch env.Kind {
+			case "anthropic":
+				return r.anthropicComplete(ctx, env, req)
+			case "openai_compatible":
+				return r.openAICompatibleComplete(ctx, env, req)
+			default:
+				return "", fmt.Errorf("inference: account credential has unknown kind %q", env.Kind)
+			}
+		})
 }
 
 // CountTokens returns the provider's real input token count, trying each
@@ -225,7 +243,11 @@ func (r *Router) countTokensOne(ctx context.Context, provider string, req Reques
 	if env.Kind != "anthropic" {
 		return 0, fmt.Errorf("inference: count_tokens is only implemented for the anthropic provider, got %q", env.Kind)
 	}
-	return r.anthropicCountTokens(ctx, env, req)
+	return trackEffect(ctx, r.Operations, "amh.core/inference.count-tokens", provider,
+		map[string]any{"provider": provider, "model": req.Model},
+		func(ctx context.Context) (int, error) {
+			return r.anthropicCountTokens(ctx, env, req)
+		})
 }
 
 // Embed returns real embedding vectors for req.Input, trying each provider
@@ -251,7 +273,11 @@ func (r *Router) embedOne(ctx context.Context, provider string, req EmbedRequest
 	if env.Kind != "openai_compatible" {
 		return EmbedResult{}, ErrEmbedNotSupported
 	}
-	return r.openAICompatibleEmbed(ctx, env, req)
+	return trackEffect(ctx, r.Operations, "amh.core/inference.embed", provider,
+		map[string]any{"provider": provider, "model": req.Model, "input_count": len(req.Input)},
+		func(ctx context.Context) (EmbedResult, error) {
+			return r.openAICompatibleEmbed(ctx, env, req)
+		})
 }
 
 func (r *Router) openAICompatibleEmbed(ctx context.Context, env credentialEnvelope, req EmbedRequest) (EmbedResult, error) {
@@ -547,6 +573,72 @@ func (r *Router) openAICompatibleComplete(ctx context.Context, env credentialEnv
 		return "", fmt.Errorf("inference: openai-compatible response had no choices: %s", string(respBody))
 	}
 	return payload.Choices[0].Message.Content, nil
+}
+
+// trackEffect wraps fn — one provider attempt — with daemon/operations
+// tracking (§4). ops == nil skips tracking entirely: fn runs exactly as
+// it would have before this package existed. Each attempt gets its own
+// fresh operation_id rather than sharing one across a Request's failover
+// chain, so this stays within daemon/operations's own documented
+// "exactly one attempt per operation_id" scope — a failed attempt on one
+// provider and a successful retry on the next are two distinct
+// Operations, not two attempts of one.
+//
+// Reversibility is declared "verified": a model-provider call has no
+// side effect outside its own response, the same "reversible by
+// construction" category daemon/sandbox's Create/Destroy pair already
+// uses in daemon/api's route-table doc comment — there is nothing
+// external for an inverse to undo.
+func trackEffect[T any](ctx context.Context, ops *operations.Engine, effectType, provider string, payload any, fn func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if ops == nil {
+		return fn(ctx)
+	}
+
+	eff, err := ops.Propose(ctx, operations.ProposeRequest{
+		OperationID:      uuid.NewString(),
+		OwnerExtensionID: "amh.core/inference",
+		EffectType:       effectType,
+		Payload:          payload,
+		Reversibility:    policy.ReversibilityVerified,
+	})
+	if err != nil {
+		return zero, fmt.Errorf("inference: propose operation: %w", err)
+	}
+	if eff, err = ops.MarkDispatchPending(ctx, eff.EffectID); err != nil {
+		return zero, fmt.Errorf("inference: mark dispatch_pending: %w", err)
+	}
+	if eff, err = ops.MarkDispatched(ctx, eff.EffectID, provider); err != nil {
+		return zero, fmt.Errorf("inference: mark dispatched: %w", err)
+	}
+
+	result, callErr := fn(ctx)
+
+	if _, err := ops.MarkObserved(ctx, eff.EffectID, ""); err != nil {
+		return zero, joinNonNil(callErr, fmt.Errorf("inference: mark observed: %w", err))
+	}
+
+	terminal := operations.StateConfirmed
+	var effErr *operations.EffectError
+	if callErr != nil {
+		terminal = operations.StateFailed
+		effErr = &operations.EffectError{Code: "PROVIDER_CALL_FAILED", Retryable: true, Message: callErr.Error()}
+	}
+	if _, err := ops.Resolve(ctx, eff.EffectID, terminal, effErr); err != nil {
+		return zero, joinNonNil(callErr, fmt.Errorf("inference: resolve effect: %w", err))
+	}
+	return result, callErr
+}
+
+// joinNonNil is errors.Join, but returns a bare non-nil err2 unwrapped
+// when err1 is nil — trackEffect's callers expect a plain provider-call
+// error on the happy path where only the operations-tracking calls
+// failed, not a Join wrapper around a single error.
+func joinNonNil(err1, err2 error) error {
+	if err1 == nil {
+		return err2
+	}
+	return errors.Join(err1, err2)
 }
 
 func (r *Router) doJSON(httpReq *http.Request) (*http.Response, []byte, error) {

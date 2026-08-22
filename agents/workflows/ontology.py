@@ -74,6 +74,19 @@ def set_goal_status(dsn: str, goal_id: str, status: str) -> None:
         conn.execute("UPDATE goal SET status = %s WHERE id = %s", (status, goal_id))
 
 
+def list_open_goals(dsn: str) -> list[tuple[str, str]]:
+    """Every goal still 'open' — read-only. workflows/dispatcher.py relies
+    on DBOS's own workflow-id deduplication for exactly-once dispatch
+    rather than a mutating claim step here: a mutating claim (flip status
+    before starting the workflow) would leave a crash window between
+    "claimed" and "workflow actually started" where a goal could get
+    stuck claimed-but-never-dispatched. A pure read has no such window —
+    see that module's doc comment."""
+    with connect(dsn) as conn:
+        rows = conn.execute("SELECT id, text FROM goal WHERE status = 'open'").fetchall()
+    return [(row[0], row[1]) for row in rows]
+
+
 def create_task(dsn: str, goal_id: str, objective: str) -> str:
     task_id = str(uuid.uuid4())
     with connect(dsn) as conn:

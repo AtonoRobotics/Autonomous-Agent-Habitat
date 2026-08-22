@@ -13,6 +13,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/a2a"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/api"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
@@ -109,11 +110,16 @@ func main() {
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)
 
+	a2aPort := getenv("AMH_A2A_PORT", "8094")
+	a2aPublicURL := getenv("AMH_A2A_PUBLIC_URL", "http://"+host+":"+a2aPort)
+	a2aSrv := a2a.New(host+":"+a2aPort, a2aPublicURL, a2a.NewStore(db), tp, auth, log)
+
 	sup := supervisor.New("amh-daemon", supervisor.OneForOne, 5, time.Minute, log)
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})
 	sup.Add(supervisor.Child{Name: "health", Run: healthSrv.Run})
 	sup.Add(supervisor.Child{Name: "api", Run: apiSrv.Run})
 	sup.Add(supervisor.Child{Name: "mcp", Run: mcpSrv.Run})
+	sup.Add(supervisor.Child{Name: "a2a", Run: a2aSrv.Run})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

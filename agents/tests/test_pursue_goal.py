@@ -1,10 +1,10 @@
 """Tests for the pursue_goal / run_subagent durable workflow (Artifact F).
 
 The key property under test is durability: a goal pursued via pursue_goal
-must survive a process restart. DBOS keeps workflow state in its system
-database (the same SQLite file used for our ontology tables), so a fresh
-DBOS() instance pointed at that file recovers and completes any pending
-workflow automatically on DBOS.launch().
+must survive a process restart. DBOS keeps workflow state in its own
+schema in the same PostgreSQL database used for our ontology tables (see
+workflows/runtime.py), so a fresh DBOS() instance pointed at that database
+recovers and completes any pending workflow automatically on DBOS.launch().
 """
 
 from __future__ import annotations
@@ -15,19 +15,7 @@ import sys
 import textwrap
 import uuid
 
-import pytest
-
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-MIGRATIONS_DIR = os.path.join(REPO_ROOT, "store", "migrations")
-
-
-@pytest.fixture()
-def db_path(tmp_path):
-    from workflows import ontology
-
-    path = str(tmp_path / "amh.db")
-    ontology.apply_migrations(path, MIGRATIONS_DIR)
-    return path
 
 
 def test_pursue_goal_runs_to_completion(db_path, daemon, fake_model_server):
@@ -46,12 +34,12 @@ def test_pursue_goal_runs_to_completion(db_path, daemon, fake_model_server):
     finally:
         DBOS.destroy()
 
-    import sqlite3
+    import psycopg
 
-    conn = sqlite3.connect(db_path)
-    (status,) = conn.execute("SELECT status FROM goal WHERE id = ?", (goal_id,)).fetchone()
+    conn = psycopg.connect(db_path)
+    (status,) = conn.execute("SELECT status FROM goal WHERE id = %s", (goal_id,)).fetchone()
     assert status == "done"
-    task_statuses = [row[0] for row in conn.execute("SELECT status FROM task WHERE goal_id = ?", (goal_id,))]
+    task_statuses = [row[0] for row in conn.execute("SELECT status FROM task WHERE goal_id = %s", (goal_id,))]
     assert task_statuses == ["done", "done"]
     conn.close()
 
@@ -123,9 +111,9 @@ def test_pursue_goal_survives_process_restart(db_path, tmp_path, daemon, fake_mo
     assert "RESULT:" in resume_result.stdout
     assert "monitor greenhouse temperature" in resume_result.stdout
 
-    import sqlite3
+    import psycopg
 
-    conn = sqlite3.connect(db_path)
-    (status,) = conn.execute("SELECT status FROM goal WHERE id = ?", (goal_id,)).fetchone()
+    conn = psycopg.connect(db_path)
+    (status,) = conn.execute("SELECT status FROM goal WHERE id = %s", (goal_id,)).fetchone()
     assert status == "done"
     conn.close()

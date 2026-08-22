@@ -4,21 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"testing"
 
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 // TestResolveActuator_RejectsDisabledConnector guards against a real bug:
@@ -59,7 +52,7 @@ func TestResolveActuator_AllowsActiveConnector(t *testing.T) {
 	db := testDB(t)
 	ctx := context.Background()
 
-	if _, err := db.Exec(`INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'apikey', ?)`,
+	if _, err := db.Exec(`INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'apikey', $1)`,
 		`{"host":"127.0.0.1","port":22,"user":"root","private_key_path":"/nonexistent","insecure_skip_host_key_verify":true}`,
 	); err != nil {
 		t.Fatalf("seed connector: %v", err)

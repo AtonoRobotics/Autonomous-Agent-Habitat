@@ -3,24 +3,17 @@ package extensions
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
 
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func baseManifest(id, version string) Manifest {
@@ -140,7 +133,7 @@ func TestActivateThenDispose_InProcess_RoundTrips(t *testing.T) {
 
 	// The dispose effect must be recorded as activation's verified inverse.
 	var effectType, outcome string
-	err = db.QueryRow(`SELECT effect_type, outcome FROM extension_effect WHERE extension_id = ? AND effect_type = 'dispose'`, "amh.test/widget").Scan(&effectType, &outcome)
+	err = db.QueryRow(`SELECT effect_type, outcome FROM extension_effect WHERE extension_id = $1 AND effect_type = 'dispose'`, "amh.test/widget").Scan(&effectType, &outcome)
 	if err != nil {
 		t.Fatalf("query dispose effect: %v", err)
 	}

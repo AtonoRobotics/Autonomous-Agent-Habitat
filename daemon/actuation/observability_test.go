@@ -19,7 +19,7 @@ func TestExecuteTracedRecordsSuccessSpan(t *testing.T) {
 
 	_, err := db.Exec(`INSERT INTO device_action
 		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		VALUES ($1, 'vent-actuator', 'set_open_pct', 1, $2, $3, $4, iso8601_now())`,
 		"vent-actuator.set_open_pct",
 		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
 		`{"shell_template": "vent-ctl get-open-pct"}`,
@@ -78,7 +78,7 @@ func TestExecuteTracedRecordsErrorSpan(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	)
 	if err != nil {

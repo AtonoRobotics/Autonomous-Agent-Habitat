@@ -65,7 +65,7 @@ func (r *Registry) ResolveActuator(ctx context.Context, deviceActionID string) (
 		FROM device_action da
 		JOIN device d ON d.id = da.device_id
 		JOIN connector c ON c.id = d.connector_id
-		WHERE da.id = ?`, deviceActionID,
+		WHERE da.id = $1`, deviceActionID,
 	).Scan(&connectorType, &configJSON, &status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("connectors: no connector found for device_action %s", deviceActionID)

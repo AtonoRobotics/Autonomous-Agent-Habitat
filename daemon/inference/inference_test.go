@@ -8,24 +8,17 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func testCredentials(t *testing.T, db *sql.DB) *credentials.Store {

@@ -299,7 +299,7 @@ func (s *Server) handleCreateConnector(w http.ResponseWriter, r *http.Request) {
 	}
 	_, err := s.DB.ExecContext(r.Context(), `
 		INSERT INTO connector (id, type, auth, config, extension_id, extension_version, account_id, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 'active')`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')`,
 		req.ID, req.Type, auth, configVal, extIDVal, extVerVal, acctVal,
 	)
 	if err != nil {
@@ -311,7 +311,7 @@ func (s *Server) handleCreateConnector(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDisableConnector(w http.ResponseWriter, r *http.Request) {
 	connectorID := r.PathValue("connectorID")
-	res, err := s.DB.ExecContext(r.Context(), `UPDATE connector SET status = 'disabled' WHERE id = ?`, connectorID)
+	res, err := s.DB.ExecContext(r.Context(), `UPDATE connector SET status = 'disabled' WHERE id = $1`, connectorID)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, simpleResponse{Error: err.Error()})
 		return
@@ -326,7 +326,7 @@ func (s *Server) handleDisableConnector(w http.ResponseWriter, r *http.Request) 
 func (s *Server) handleGetConnector(w http.ResponseWriter, r *http.Request) {
 	connectorID := r.PathValue("connectorID")
 	var resp connectorResponse
-	err := s.DB.QueryRowContext(r.Context(), `SELECT id, type, auth, status FROM connector WHERE id = ?`, connectorID).
+	err := s.DB.QueryRowContext(r.Context(), `SELECT id, type, auth, status FROM connector WHERE id = $1`, connectorID).
 		Scan(&resp.ID, &resp.Type, &resp.Auth, &resp.Status)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, connectorResponse{Error: "connector not found: " + connectorID})

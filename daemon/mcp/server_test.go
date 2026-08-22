@@ -24,7 +24,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/internal/testssh"
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 const (
@@ -34,13 +34,7 @@ const (
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func testServer(t *testing.T, db *sql.DB) *httptest.Server {
@@ -119,14 +113,14 @@ func seedVentDeviceAction(t *testing.T, db *sql.DB) string {
 		"host_key_authorized_key": string(ssh.MarshalAuthorizedKey(srv.HostSigner.PublicKey())),
 	}
 	configJSON, _ := json.Marshal(cfg)
-	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)", string(configJSON)); err != nil {
+	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', $1)", string(configJSON)); err != nil {
 		t.Fatalf("seed connector: %v", err)
 	}
 	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')"); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
 	_, err = db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
-		VALUES ('vent-actuator.set_open_pct', 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		VALUES ('vent-actuator.set_open_pct', 'vent-actuator', 'set_open_pct', 1, $1, $2, $3, iso8601_now())`,
 		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
 		`{"shell_template": "vent-ctl get-open-pct"}`,
 		`{"shell_template": "vent-ctl set-open-pct {{prior}}"}`,
@@ -157,7 +151,7 @@ func seedIrreversibleDeviceAction(t *testing.T, db *sql.DB) string {
 		"host_key_authorized_key": string(ssh.MarshalAuthorizedKey(srv.HostSigner.PublicKey())),
 	}
 	configJSON, _ := json.Marshal(cfg)
-	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', ?)", string(configJSON)); err != nil {
+	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', $1)", string(configJSON)); err != nil {
 		t.Fatalf("seed connector: %v", err)
 	}
 	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('nutrient-doser', 'doser', 'nutrient-doser-connector')"); err != nil {
@@ -388,7 +382,7 @@ func TestToolsCall_ActuateDevice_RealSSHRoundTrip(t *testing.T) {
 	}
 
 	var inverse string
-	if err := db.QueryRow("SELECT inverse_payload FROM device_effect WHERE device_action_id = ?", deviceActionID).Scan(&inverse); err != nil {
+	if err := db.QueryRow("SELECT inverse_payload FROM device_effect WHERE device_action_id = $1", deviceActionID).Scan(&inverse); err != nil {
 		t.Fatalf("query device_effect: %v", err)
 	}
 	if inverse != `{"shell":"vent-ctl set-open-pct 40"}` {

@@ -17,12 +17,12 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import sqlite3
 import subprocess
 import sys
 import textwrap
 import uuid
 
+import psycopg
 import pytest
 
 from conftest import REPO_ROOT, write_ephemeral_client_key  # noqa: F401 (fixtures via conftest autouse)
@@ -38,9 +38,9 @@ def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, 
         "private_key_path": write_ephemeral_client_key(tmp_path),
         "host_key_authorized_key": host_key_authorized_key,
     }
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     conn.execute(
-        "INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)",
+        "INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', %s)",
         (json.dumps(config),),
     )
     conn.execute("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')")
@@ -50,7 +50,7 @@ def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, 
                    '{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}',
                    '{"shell_template": "vent-ctl get-open-pct"}',
                    '{"shell_template": "vent-ctl set-open-pct {{prior}}"}',
-                   strftime('%Y-%m-%dT%H:%M:%fZ','now'))"""
+                   iso8601_now())"""
     )
     conn.commit()
     conn.close()
@@ -92,20 +92,22 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_pat
     # Step 4: real autonomous actuation through the daemon's API, no ApprovalGate needed
     assert result["actuation_result"] == "ok"
 
-    conn = sqlite3.connect(db_path)
-    (status,) = conn.execute("SELECT status FROM goal WHERE id = ?", (goal_id,)).fetchone()
+    conn = psycopg.connect(db_path)
+    (status,) = conn.execute("SELECT status FROM goal WHERE id = %s", (goal_id,)).fetchone()
     assert status == "done"
 
     forward, inverse, outcome = conn.execute(
-        "SELECT forward_payload, inverse_payload, outcome FROM device_effect WHERE device_action_id = ?",
+        "SELECT forward_payload, inverse_payload, outcome FROM device_effect WHERE device_action_id = %s",
         ("vent-actuator.set_open_pct",),
     ).fetchone()
     assert outcome == "success"
-    assert forward == '{"shell":"vent-ctl set-open-pct 60"}'
+    # psycopg auto-decodes a JSON column into a Python dict/list already —
+    # no json.loads() needed (unlike sqlite3, which returns raw text).
+    assert forward == {"shell": "vent-ctl set-open-pct 60"}
     # The recorded inverse must reflect the device's actual PRIOR state (40),
     # proving the actuation kernel really read it from the live device over
     # SSH before actuating — not a hardcoded or assumed value.
-    assert inverse == '{"shell":"vent-ctl set-open-pct 40"}'
+    assert inverse == {"shell": "vent-ctl set-open-pct 40"}
     conn.close()
 
 
@@ -174,11 +176,11 @@ def test_greenhouse_scenario_survives_process_restart(fake_device, daemon, db_pa
     assert resume_result.returncode == 0, resume_result.stderr
     assert "ACTUATION:ok" in resume_result.stdout
 
-    conn = sqlite3.connect(db_path)
-    (status,) = conn.execute("SELECT status FROM goal WHERE id = ?", (goal_id,)).fetchone()
+    conn = psycopg.connect(db_path)
+    (status,) = conn.execute("SELECT status FROM goal WHERE id = %s", (goal_id,)).fetchone()
     assert status == "done"
     (n,) = conn.execute(
-        "SELECT COUNT(*) FROM device_effect WHERE device_action_id = ?",
+        "SELECT COUNT(*) FROM device_effect WHERE device_action_id = %s",
         ("vent-actuator.set_open_pct",),
     ).fetchone()
     assert n == 1  # exactly one actuation — no double-execution across the crash/resume

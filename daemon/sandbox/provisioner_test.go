@@ -10,23 +10,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func seedAgent(t *testing.T, db *sql.DB, id string) {
 	t.Helper()
-	if _, err := db.Exec(`INSERT INTO agent (id, kind) VALUES (?, 'worker')`, id); err != nil {
+	if _, err := db.Exec(`INSERT INTO agent (id, kind) VALUES ($1, 'worker')`, id); err != nil {
 		t.Fatalf("seed agent: %v", err)
 	}
 }

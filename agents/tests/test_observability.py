@@ -68,7 +68,7 @@ def test_tool_call_span_records_error_on_exception(span_exporter):
     assert spans[0].attributes["error.type"] == "test_error"
 
 
-def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, tmp_path, daemon, fake_model_server):
+def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, db_path, daemon, fake_model_server):
     """The real integration: pursue_goal (parent) and each run_subagent
     (child) must each produce their own invoke_agent span, AND the child
     spans must share the parent's trace ID — proving trace-context
@@ -78,18 +78,8 @@ def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, tmp_path, daemo
     starting an unrelated trace of its own."""
     from dbos import DBOS
 
-    from workflows import ontology
     from workflows.goal import pursue_goal
     from workflows.runtime import init_dbos
-
-    db_path = str(tmp_path / "amh.db")
-    import os
-
-    migrations_dir = os.path.join(
-        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
-        "store", "migrations",
-    )
-    ontology.apply_migrations(db_path, migrations_dir)
 
     init_dbos("amh-agents-otel-test", db_path)
     DBOS.launch()

@@ -24,7 +24,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/internal/testssh"
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 // Fixed test-only tokens — never real secrets, just distinct strings so
@@ -36,13 +36,7 @@ const (
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func testAuth(t *testing.T) *authn.Authenticator {
@@ -152,7 +146,7 @@ func seedVentDeviceAction(t *testing.T, db *sql.DB, device ...string) string {
 		t.Fatalf("marshal config: %v", err)
 	}
 
-	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)", string(configJSON)); err != nil {
+	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', $1)", string(configJSON)); err != nil {
 		t.Fatalf("seed connector: %v", err)
 	}
 	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')"); err != nil {
@@ -163,7 +157,7 @@ func seedVentDeviceAction(t *testing.T, db *sql.DB, device ...string) string {
 		        '{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}',
 		        '{"shell_template": "vent-ctl get-open-pct"}',
 		        '{"shell_template": "vent-ctl set-open-pct {{prior}}"}',
-		        strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+		        iso8601_now())`)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
@@ -200,7 +194,7 @@ func seedIrreversibleDeviceAction(t *testing.T, db *sql.DB) string {
 		t.Fatalf("marshal config: %v", err)
 	}
 
-	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', ?)", string(configJSON)); err != nil {
+	if _, err := db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', $1)", string(configJSON)); err != nil {
 		t.Fatalf("seed connector: %v", err)
 	}
 	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('nutrient-doser', 'doser', 'nutrient-doser-connector')"); err != nil {
@@ -240,7 +234,7 @@ func TestHandleActuate_RealSSHRoundTripOverHTTP(t *testing.T) {
 	}
 
 	var inverse string
-	err := db.QueryRow("SELECT inverse_payload FROM device_effect WHERE device_action_id = ?", deviceActionID).Scan(&inverse)
+	err := db.QueryRow("SELECT inverse_payload FROM device_effect WHERE device_action_id = $1", deviceActionID).Scan(&inverse)
 	if err != nil {
 		t.Fatalf("query device_effect: %v", err)
 	}
@@ -263,7 +257,7 @@ func TestHandleActuate_UnreversibleWithoutTicketIsForbidden(t *testing.T) {
 		HostKeyAuthorizedKey: string(ssh.MarshalAuthorizedKey(srv.HostSigner.PublicKey())),
 	}
 	configJSON, _ := json.Marshal(cfg)
-	db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)", string(configJSON))
+	db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', $1)", string(configJSON))
 	db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')")
 	db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template) VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, '{"shell_template": "dose {{ml}}ml"}')`)
 

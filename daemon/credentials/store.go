@@ -110,7 +110,7 @@ func (s *Store) CreateAccount(ctx context.Context, provider, displayName string)
 		return nil, fmt.Errorf("credentials: provider is required")
 	}
 	id := uuid.NewString()
-	_, err := s.DB.ExecContext(ctx, `INSERT INTO account (id, provider, display_name, status) VALUES (?, ?, ?, 'pending')`, id, provider, displayName)
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO account (id, provider, display_name, status) VALUES ($1, $2, $3, 'pending')`, id, provider, displayName)
 	if err != nil {
 		return nil, fmt.Errorf("credentials: insert account: %w", err)
 	}
@@ -134,11 +134,11 @@ func (s *Store) RevokeAccount(ctx context.Context, id string) (*Account, error) 
 		return nil, fmt.Errorf("credentials: begin revoke tx: %w", err)
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE account SET status = 'revoked', revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?`, id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE account SET status = 'revoked', revoked_at = iso8601_now() WHERE id = $1`, id); err != nil {
 		return nil, fmt.Errorf("credentials: revoke account: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE credential SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE subject_type = 'account' AND subject_id = ? AND revoked_at IS NULL`,
+		`UPDATE credential SET revoked_at = iso8601_now() WHERE subject_type = 'account' AND subject_id = $1 AND revoked_at IS NULL`,
 		id,
 	); err != nil {
 		return nil, fmt.Errorf("credentials: revoke account credentials: %w", err)
@@ -152,7 +152,7 @@ func (s *Store) RevokeAccount(ctx context.Context, id string) (*Account, error) 
 func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 	var a Account
 	var displayName sql.NullString
-	err := s.DB.QueryRowContext(ctx, `SELECT id, provider, display_name, status FROM account WHERE id = ?`, id).
+	err := s.DB.QueryRowContext(ctx, `SELECT id, provider, display_name, status FROM account WHERE id = $1`, id).
 		Scan(&a.ID, &a.Provider, &displayName, &a.Status)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: account %s", ErrNotFound, id)
@@ -174,7 +174,7 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 func (s *Store) GetActiveAccountByProvider(ctx context.Context, provider string) (*Account, error) {
 	var id string
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT id FROM account WHERE provider = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`,
+		`SELECT id FROM account WHERE provider = $1 AND status = 'active' ORDER BY created_at DESC LIMIT 1`,
 		provider,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -233,7 +233,7 @@ func (s *Store) PutCredential(ctx context.Context, subjectType SubjectType, subj
 	defer tx.Rollback()
 
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE credential SET rotated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE subject_type = ? AND subject_id = ? AND revoked_at IS NULL AND rotated_at IS NULL`,
+		`UPDATE credential SET rotated_at = iso8601_now() WHERE subject_type = $1 AND subject_id = $2 AND revoked_at IS NULL AND rotated_at IS NULL`,
 		string(subjectType), subjectID,
 	); err != nil {
 		return "", fmt.Errorf("credentials: rotate previous credential: %w", err)
@@ -241,7 +241,7 @@ func (s *Store) PutCredential(ctx context.Context, subjectType SubjectType, subj
 
 	id := uuid.NewString()
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO credential (id, subject_type, subject_id, ciphertext, key_id) VALUES (?, ?, ?, ?, ?)`,
+		`INSERT INTO credential (id, subject_type, subject_id, ciphertext, key_id) VALUES ($1, $2, $3, $4, $5)`,
 		id, string(subjectType), subjectID, ciphertext, s.keyID,
 	); err != nil {
 		return "", fmt.Errorf("credentials: insert credential: %w", err)
@@ -249,7 +249,7 @@ func (s *Store) PutCredential(ctx context.Context, subjectType SubjectType, subj
 
 	if subjectType == SubjectAccount {
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE account SET status = 'active', activated_at = COALESCE(activated_at, strftime('%Y-%m-%dT%H:%M:%fZ','now')) WHERE id = ? AND status != 'revoked'`,
+			`UPDATE account SET status = 'active', activated_at = COALESCE(activated_at, iso8601_now()) WHERE id = $1 AND status != 'revoked'`,
 			subjectID,
 		); err != nil {
 			return "", fmt.Errorf("credentials: activate account: %w", err)
@@ -266,7 +266,7 @@ func (s *Store) PutCredential(ctx context.Context, subjectType SubjectType, subj
 // Authenticate will no longer return it.
 func (s *Store) RevokeCredential(ctx context.Context, credentialID string) error {
 	res, err := s.DB.ExecContext(ctx,
-		`UPDATE credential SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ? AND revoked_at IS NULL`,
+		`UPDATE credential SET revoked_at = iso8601_now() WHERE id = $1 AND revoked_at IS NULL`,
 		credentialID,
 	)
 	if err != nil {
@@ -297,7 +297,7 @@ func (s *Store) Authenticate(ctx context.Context, subjectType SubjectType, subje
 	// same timestamp tick would make that ordering ambiguous.
 	var ciphertext []byte
 	err := s.DB.QueryRowContext(ctx,
-		`SELECT ciphertext FROM credential WHERE subject_type = ? AND subject_id = ? AND rotated_at IS NULL AND revoked_at IS NULL`,
+		`SELECT ciphertext FROM credential WHERE subject_type = $1 AND subject_id = $2 AND rotated_at IS NULL AND revoked_at IS NULL`,
 		string(subjectType), subjectID,
 	).Scan(&ciphertext)
 	if errors.Is(err, sql.ErrNoRows) {

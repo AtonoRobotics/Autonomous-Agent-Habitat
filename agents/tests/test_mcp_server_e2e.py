@@ -13,9 +13,9 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 
 import httpx2
+import psycopg
 import pytest
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
@@ -33,9 +33,9 @@ def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, 
         "private_key_path": write_ephemeral_client_key(tmp_path),
         "host_key_authorized_key": host_key_authorized_key,
     }
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     conn.execute(
-        "INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)",
+        "INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', %s)",
         (json.dumps(config),),
     )
     conn.execute("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')")
@@ -45,7 +45,7 @@ def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, 
                    '{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}',
                    '{"shell_template": "vent-ctl get-open-pct"}',
                    '{"shell_template": "vent-ctl set-open-pct {{prior}}"}',
-                   strftime('%Y-%m-%dT%H:%M:%fZ','now'))"""
+                   iso8601_now())"""
     )
     conn.commit()
     conn.close()
@@ -76,13 +76,13 @@ async def test_official_mcp_client_calls_actuate_device_over_streamable_http(fak
 
     # The real device really moved — proven by inspecting the daemon's
     # own durable record of the effect, not just the MCP response.
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     inverse, outcome = conn.execute(
-        "SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = ?",
+        "SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = %s",
         ("vent-actuator.set_open_pct",),
     ).fetchone()
     assert outcome == "success"
-    assert inverse == '{"shell":"vent-ctl set-open-pct 40"}'
+    assert inverse == {"shell": "vent-ctl set-open-pct 40"}
     conn.close()
 
 

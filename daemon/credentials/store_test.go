@@ -5,21 +5,14 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"os"
-	"path/filepath"
 	"testing"
 
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func testKey(t *testing.T) []byte {
@@ -104,7 +97,7 @@ func TestCiphertext_IsNotStoredAsPlaintext(t *testing.T) {
 	}
 
 	var ciphertext []byte
-	if err := db.QueryRow(`SELECT ciphertext FROM credential WHERE subject_id = ?`, acct.ID).Scan(&ciphertext); err != nil {
+	if err := db.QueryRow(`SELECT ciphertext FROM credential WHERE subject_id = $1`, acct.ID).Scan(&ciphertext); err != nil {
 		t.Fatalf("query ciphertext: %v", err)
 	}
 	if containsBytes(ciphertext, secret) {
@@ -149,7 +142,7 @@ func TestPutCredential_RotatesPreviousCredential(t *testing.T) {
 	}
 
 	var rotatedAt sql.NullString
-	if err := db.QueryRow(`SELECT rotated_at FROM credential WHERE id = ?`, firstID).Scan(&rotatedAt); err != nil {
+	if err := db.QueryRow(`SELECT rotated_at FROM credential WHERE id = $1`, firstID).Scan(&rotatedAt); err != nil {
 		t.Fatalf("query first credential: %v", err)
 	}
 	if !rotatedAt.Valid {

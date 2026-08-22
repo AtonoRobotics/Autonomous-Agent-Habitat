@@ -38,7 +38,7 @@ type output struct {
 }
 
 func main() {
-	dbPath := flag.String("db", "", "path to the shared AMH SQLite database")
+	dbPath := flag.String("db", "", "connection URL for the shared AMH PostgreSQL database")
 	migrationsDir := flag.String("migrations", "./store/migrations", "path to store/migrations")
 	deviceActionID := flag.String("device-action-id", "", "device_action.id to execute")
 	host := flag.String("host", "127.0.0.1", "SSH device host")

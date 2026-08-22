@@ -16,7 +16,7 @@ def test_project_working_memory_assembles_goal_task_events_and_artifacts(db_path
     ontology.log_event(db_path, run_id, "tool_call", {"tool": "actuate"})
     ontology.log_event(db_path, run_id, "tool_result", {"outcome": "success"})
     with ontology.connect(db_path) as conn:
-        conn.execute("INSERT INTO artifact (id, task_id, uri, hash) VALUES ('a1', ?, 'file://out.log', 'abc')", (task_id,))
+        conn.execute("INSERT INTO artifact (id, task_id, uri, hash) VALUES ('a1', %s, 'file://out.log', 'abc')", (task_id,))
 
     wm = working.project_working_memory(db_path, run_id)
 

@@ -19,7 +19,7 @@ func TestExecute_ApprovedSafetyCaseGrantsAutonomyWithoutTicket(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	)
 	if err != nil {
@@ -28,7 +28,7 @@ func TestExecute_ApprovedSafetyCaseGrantsAutonomyWithoutTicket(t *testing.T) {
 	_, err = db.Exec(`INSERT INTO safety_case
 		(id, subject_id, subject_type, risk_class, independent_review, approved_at)
 		VALUES ('case-1', 'vent-actuator.dispense_ml', 'device_action', 'high', 1,
-		        strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+		        iso8601_now())`)
 	if err != nil {
 		t.Fatalf("seed safety_case: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestExecute_ApprovedSafetyCaseGrantsAutonomyWithoutTicket(t *testing.T) {
 
 	var inverse *string
 	var outcome string
-	err = db.QueryRow(`SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = ?`,
+	err = db.QueryRow(`SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = $1`,
 		"vent-actuator.dispense_ml").Scan(&inverse, &outcome)
 	if err != nil {
 		t.Fatalf("query device_effect: %v", err)
@@ -73,7 +73,7 @@ func TestExecute_SafetyCaseWithoutIndependentReviewDoesNotGrantAutonomy(t *testi
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	)
 	if err != nil {
@@ -82,7 +82,7 @@ func TestExecute_SafetyCaseWithoutIndependentReviewDoesNotGrantAutonomy(t *testi
 	_, err = db.Exec(`INSERT INTO safety_case
 		(id, subject_id, subject_type, risk_class, independent_review, approved_at)
 		VALUES ('case-1', 'vent-actuator.dispense_ml', 'device_action', 'high', 0,
-		        strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+		        iso8601_now())`)
 	if err != nil {
 		t.Fatalf("seed safety_case: %v", err)
 	}
@@ -108,7 +108,7 @@ func TestExecute_LowRiskSafetyCaseGrantsAutonomyWithoutIndependentReview(t *test
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.log_status', 'vent-actuator', 'log_status', 0, ?)`,
+		VALUES ('vent-actuator.log_status', 'vent-actuator', 'log_status', 0, $1)`,
 		`{"shell_template": "log-status"}`,
 	)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestExecute_LowRiskSafetyCaseGrantsAutonomyWithoutIndependentReview(t *test
 	_, err = db.Exec(`INSERT INTO safety_case
 		(id, subject_id, subject_type, risk_class, independent_review, approved_at)
 		VALUES ('case-1', 'vent-actuator.log_status', 'device_action', 'low', 0,
-		        strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+		        iso8601_now())`)
 	if err != nil {
 		t.Fatalf("seed safety_case: %v", err)
 	}
@@ -140,7 +140,7 @@ func TestExecute_RevokedSafetyCaseDoesNotGrantAutonomy(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	)
 	if err != nil {
@@ -149,7 +149,7 @@ func TestExecute_RevokedSafetyCaseDoesNotGrantAutonomy(t *testing.T) {
 	_, err = db.Exec(`INSERT INTO safety_case
 		(id, subject_id, subject_type, risk_class, independent_review, approved_at, revoked_at, revoked_reason)
 		VALUES ('case-1', 'vent-actuator.dispense_ml', 'device_action', 'high', 1,
-		        strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), 'incident')`)
+		        iso8601_now(), iso8601_now(), 'incident')`)
 	if err != nil {
 		t.Fatalf("seed safety_case: %v", err)
 	}

@@ -92,7 +92,7 @@ func (g *Gate) Require(ctx context.Context, deviceActionID string, params map[st
 	}
 	id := uuid.NewString()
 	_, err = g.DB.ExecContext(ctx,
-		`INSERT INTO approval_gate (id, action, risk, action_digest) VALUES (?, ?, ?, ?)`,
+		`INSERT INTO approval_gate (id, action, risk, action_digest) VALUES ($1, $2, $3, $4)`,
 		id, string(actionJSON), string(risk), digest,
 	)
 	if err != nil {
@@ -106,8 +106,8 @@ func (g *Gate) Require(ctx context.Context, deviceActionID string, params map[st
 // never the requesting agent itself).
 func (g *Gate) Approve(ctx context.Context, ticket Ticket, approvedBy string) error {
 	res, err := g.DB.ExecContext(ctx,
-		`UPDATE approval_gate SET approved_by = ?, approved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		 WHERE id = ? AND approved_at IS NULL`,
+		`UPDATE approval_gate SET approved_by = $1, approved_at = iso8601_now()
+		 WHERE id = $2 AND approved_at IS NULL`,
 		approvedBy, ticket.ID,
 	)
 	if err != nil {
@@ -127,7 +127,7 @@ func (g *Gate) Approve(ctx context.Context, ticket Ticket, approvedBy string) er
 func (g *Gate) IsSatisfied(ctx context.Context, ticket Ticket) (bool, error) {
 	var approvedAt sql.NullString
 	err := g.DB.QueryRowContext(ctx,
-		`SELECT approved_at FROM approval_gate WHERE id = ?`, ticket.ID,
+		`SELECT approved_at FROM approval_gate WHERE id = $1`, ticket.ID,
 	).Scan(&approvedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, fmt.Errorf("interlocks: ticket %s not found", ticket.ID)
@@ -148,7 +148,7 @@ func (g *Gate) Enforce(ctx context.Context, ticket Ticket, deviceActionID string
 	var approvedAt, usedAt sql.NullString
 	var storedDigest string
 	err := g.DB.QueryRowContext(ctx,
-		`SELECT approved_at, used_at, action_digest FROM approval_gate WHERE id = ?`, ticket.ID,
+		`SELECT approved_at, used_at, action_digest FROM approval_gate WHERE id = $1`, ticket.ID,
 	).Scan(&approvedAt, &usedAt, &storedDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("interlocks: ticket %s not found", ticket.ID)
@@ -167,7 +167,7 @@ func (g *Gate) Enforce(ctx context.Context, ticket Ticket, deviceActionID string
 	}
 
 	res, err := g.DB.ExecContext(ctx,
-		`UPDATE approval_gate SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ? AND used_at IS NULL`,
+		`UPDATE approval_gate SET used_at = iso8601_now() WHERE id = $1 AND used_at IS NULL`,
 		ticket.ID,
 	)
 	if err != nil {

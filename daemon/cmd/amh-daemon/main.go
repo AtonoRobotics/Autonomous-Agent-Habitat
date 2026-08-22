@@ -27,12 +27,7 @@ import (
 func main() {
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	dbURL := getenv("DATABASE_URL", "sqlite:./state/amh.db")
-	dbPath := dbURL
-	const sqlitePrefix = "sqlite:"
-	if len(dbURL) > len(sqlitePrefix) && dbURL[:len(sqlitePrefix)] == sqlitePrefix {
-		dbPath = dbURL[len(sqlitePrefix):]
-	}
+	dbURL := getenv("DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5432/amh")
 	migrationsDir := getenv("AMH_MIGRATIONS_DIR", "./store/migrations")
 	host := getenv("AMH_DAEMON_HOST", "127.0.0.1")
 	port := getenv("AMH_DAEMON_PORT", "8080")
@@ -55,13 +50,13 @@ func main() {
 		os.Exit(1)
 	}
 
-	db, err := store.Open(dbPath, migrationsDir)
+	db, err := store.Open(dbURL, migrationsDir)
 	if err != nil {
 		log.Error("failed to open store", "error", err)
 		os.Exit(1)
 	}
 	defer db.Close()
-	log.Info("store ready", "path", dbPath, "migrations", migrationsDir)
+	log.Info("store ready", "migrations", migrationsDir)
 
 	sched := scheduler.New(time.Duration(tickMs)*time.Millisecond, log)
 	sched.AddRoutine(func(ctx context.Context, tick time.Time) {

@@ -17,8 +17,8 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 
+import psycopg
 import pytest
 
 from conftest import write_ephemeral_client_key
@@ -37,9 +37,9 @@ def seed_nutrient_doser(db_path: str, host: str, port: int, host_key_authorized_
         "private_key_path": write_ephemeral_client_key(tmp_path),
         "host_key_authorized_key": host_key_authorized_key,
     }
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     conn.execute(
-        "INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', ?)",
+        "INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', %s)",
         (json.dumps(config),),
     )
     conn.execute(
@@ -122,9 +122,9 @@ def test_irreversible_action_requires_approval_over_http(fake_device, daemon, db
 
     # An irreversible action's effect must record no inverse — nothing to
     # auto-reverse, by construction.
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     inverse, outcome = conn.execute(
-        "SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = ?",
+        "SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = %s",
         ("nutrient-doser.dispense_ml",),
     ).fetchone()
     assert outcome == "success"

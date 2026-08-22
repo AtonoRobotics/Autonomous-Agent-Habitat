@@ -215,7 +215,7 @@ func AutoReverse(ctx context.Context, db *sql.DB, act Actuator, effectID string)
 	var deviceActionID string
 	var inversePayload sql.NullString
 	err := db.QueryRowContext(ctx,
-		`SELECT device_action_id, inverse_payload FROM device_effect WHERE id = ?`, effectID,
+		`SELECT device_action_id, inverse_payload FROM device_effect WHERE id = $1`, effectID,
 	).Scan(&deviceActionID, &inversePayload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("actuation: effect %s not found", effectID)
@@ -236,7 +236,7 @@ func AutoReverse(ctx context.Context, db *sql.DB, act Actuator, effectID string)
 
 	if _, err := act.RunShell(ctx, payload.Shell); err != nil {
 		if _, markErr := db.ExecContext(ctx,
-			`UPDATE device_effect SET outcome = 'fault_unreversed' WHERE id = ?`, effectID,
+			`UPDATE device_effect SET outcome = 'fault_unreversed' WHERE id = $1`, effectID,
 		); markErr != nil {
 			return fmt.Errorf("actuation: reverse failed (%v) and failed to mark fault_unreversed: %w", err, markErr)
 		}
@@ -244,7 +244,7 @@ func AutoReverse(ctx context.Context, db *sql.DB, act Actuator, effectID string)
 	}
 
 	_, err = db.ExecContext(ctx,
-		`UPDATE device_effect SET reversed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), outcome = 'fault_reversed' WHERE id = ?`,
+		`UPDATE device_effect SET reversed_at = iso8601_now(), outcome = 'fault_reversed' WHERE id = $1`,
 		effectID,
 	)
 	if err != nil {
@@ -257,7 +257,7 @@ func loadDeviceAction(ctx context.Context, db *sql.DB, id string) (*deviceAction
 	da := &deviceAction{id: id}
 	var reversible int
 	err := db.QueryRowContext(ctx,
-		`SELECT reversible, forward_template, read_state_template, inverse_template, verified_at FROM device_action WHERE id = ?`, id,
+		`SELECT reversible, forward_template, read_state_template, inverse_template, verified_at FROM device_action WHERE id = $1`, id,
 	).Scan(&reversible, &da.forwardTemplate, &da.readStateTemplate, &da.inverseTemplate, &da.verifiedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("actuation: device_action %s not found", id)
@@ -283,7 +283,7 @@ func hasApprovedSafetyCase(ctx context.Context, db *sql.DB, subjectID string) (b
 	var n int
 	err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM safety_case
-		 WHERE subject_id = ? AND subject_type = 'device_action'
+		 WHERE subject_id = $1 AND subject_type = 'device_action'
 		   AND approved_at IS NOT NULL AND revoked_at IS NULL
 		   AND (risk_class = 'low' OR independent_review = 1)`,
 		subjectID,
@@ -337,7 +337,7 @@ func recordPendingEffect(ctx context.Context, db *sql.DB, deviceActionID, forwar
 	id := uuid.NewString()
 	_, err = db.ExecContext(ctx,
 		`INSERT INTO device_effect (id, device_action_id, forward_payload, inverse_payload, outcome)
-		 VALUES (?, ?, ?, ?, 'pending')`,
+		 VALUES ($1, $2, $3, $4, 'pending')`,
 		id, deviceActionID, string(forwardPayload), inversePayload,
 	)
 	if err != nil {
@@ -350,5 +350,5 @@ func markEffectOutcome(ctx context.Context, db *sql.DB, effectID, outcome string
 	// Best-effort by design (see runJournaled): a failure here must not
 	// turn into an actuation error for an already-successful physical
 	// effect. The row is left at its last durable state either way.
-	db.ExecContext(ctx, `UPDATE device_effect SET outcome = ? WHERE id = ?`, outcome, effectID)
+	db.ExecContext(ctx, `UPDATE device_effect SET outcome = $1 WHERE id = $2`, outcome, effectID)
 }

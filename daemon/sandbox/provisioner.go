@@ -166,7 +166,7 @@ func (p *Provisioner) Create(ctx context.Context, agentID string, isolation Isol
 	}
 	_, err = p.DB.ExecContext(ctx, `
 		INSERT INTO computer (id, agent_id, isolation, image, status, resource_limits, workdir)
-		VALUES (?, ?, ?, ?, 'provisioning', ?, ?)`,
+		VALUES ($1, $2, $3, $4, 'provisioning', $5, $6)`,
 		id, agentIDVal, string(isolation), image, string(limitsJSON), workdir,
 	)
 	if err != nil {
@@ -176,13 +176,13 @@ func (p *Provisioner) Create(ctx context.Context, agentID string, isolation Isol
 	runtimeHandle, launchErr := launch(ctx, id, isolation, image, workdir, resourceLimits)
 	if launchErr != nil {
 		reason := launchErr.Error()
-		p.DB.ExecContext(ctx, `UPDATE computer SET status = 'failed', destroy_reason = ? WHERE id = ?`, reason, id)
+		p.DB.ExecContext(ctx, `UPDATE computer SET status = 'failed', destroy_reason = $1 WHERE id = $2`, reason, id)
 		return nil, fmt.Errorf("sandbox: provision %s: %w", id, launchErr)
 	}
 
 	_, err = p.DB.ExecContext(ctx, `
-		UPDATE computer SET status = 'ready', runtime_handle = ?, ready_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		WHERE id = ?`, runtimeHandle, id)
+		UPDATE computer SET status = 'ready', runtime_handle = $1, ready_at = iso8601_now()
+		WHERE id = $2`, runtimeHandle, id)
 	if err != nil {
 		teardown(ctx, isolation, runtimeHandle)
 		return nil, fmt.Errorf("sandbox: mark ready: %w", err)
@@ -211,8 +211,8 @@ func (p *Provisioner) Destroy(ctx context.Context, id, reason string) (*Computer
 	}
 
 	_, err = p.DB.ExecContext(ctx, `
-		UPDATE computer SET status = 'destroyed', destroyed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), destroy_reason = ?
-		WHERE id = ?`, reason, id)
+		UPDATE computer SET status = 'destroyed', destroyed_at = iso8601_now(), destroy_reason = $1
+		WHERE id = $2`, reason, id)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: mark destroyed: %w", err)
 	}
@@ -226,7 +226,7 @@ func (p *Provisioner) Get(ctx context.Context, id string) (*Computer, error) {
 	var limitsJSON string
 	err := p.DB.QueryRowContext(ctx, `
 		SELECT id, agent_id, isolation, image, status, runtime_handle, resource_limits, workdir, destroy_reason
-		FROM computer WHERE id = ?`, id,
+		FROM computer WHERE id = $1`, id,
 	).Scan(&c.ID, &agentID, &c.Isolation, &c.Image, &c.Status, &runtimeHandle, &limitsJSON, &c.Workdir, &destroyReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
@@ -248,7 +248,7 @@ func (p *Provisioner) Get(ctx context.Context, id string) (*Computer, error) {
 // ListForAgent returns every non-destroyed computer belonging to agentID —
 // what an operator or the agent itself would see as "my computers."
 func (p *Provisioner) ListForAgent(ctx context.Context, agentID string) ([]*Computer, error) {
-	rows, err := p.DB.QueryContext(ctx, `SELECT id FROM computer WHERE agent_id = ? AND status != 'destroyed' ORDER BY created_at DESC`, agentID)
+	rows, err := p.DB.QueryContext(ctx, `SELECT id FROM computer WHERE agent_id = $1 AND status != 'destroyed' ORDER BY created_at DESC`, agentID)
 	if err != nil {
 		return nil, fmt.Errorf("sandbox: list for agent %s: %w", agentID, err)
 	}

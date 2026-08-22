@@ -98,7 +98,7 @@ func (r *Registry) Create(ctx context.Context, subjectID string, subjectType Sub
 	id := uuid.NewString()
 	_, err := r.DB.ExecContext(ctx,
 		`INSERT INTO safety_case (id, subject_id, subject_type, risk_class, guardrails)
-		 VALUES (?, ?, ?, ?, '[]')`,
+		 VALUES ($1, $2, $3, $4, '[]')`,
 		id, subjectID, string(subjectType), string(riskClass),
 	)
 	if err != nil {
@@ -118,7 +118,7 @@ func (r *Registry) SubmitEvidence(ctx context.Context, id string, guardrailProof
 	defer tx.Rollback()
 
 	var existingJSON string
-	err = tx.QueryRowContext(ctx, `SELECT guardrails FROM safety_case WHERE id = ?`, id).Scan(&existingJSON)
+	err = tx.QueryRowContext(ctx, `SELECT guardrails FROM safety_case WHERE id = $1`, id).Scan(&existingJSON)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
 	}
@@ -139,7 +139,7 @@ func (r *Registry) SubmitEvidence(ctx context.Context, id string, guardrailProof
 		return fmt.Errorf("safetycase: marshal guardrails: %w", err)
 	}
 
-	if _, err := tx.ExecContext(ctx, `UPDATE safety_case SET guardrails = ? WHERE id = ?`, string(updatedJSON), id); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE safety_case SET guardrails = $1 WHERE id = $2`, string(updatedJSON), id); err != nil {
 		return fmt.Errorf("safetycase: update guardrails: %w", err)
 	}
 	return tx.Commit()
@@ -154,7 +154,7 @@ func (r *Registry) SubmitEvidence(ctx context.Context, id string, guardrailProof
 func (r *Registry) Approve(ctx context.Context, id, approvedBy string) error {
 	var approvedAt, revokedAt sql.NullString
 	err := r.DB.QueryRowContext(ctx,
-		`SELECT approved_at, revoked_at FROM safety_case WHERE id = ?`, id,
+		`SELECT approved_at, revoked_at FROM safety_case WHERE id = $1`, id,
 	).Scan(&approvedAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
@@ -171,8 +171,8 @@ func (r *Registry) Approve(ctx context.Context, id, approvedBy string) error {
 
 	_, err = r.DB.ExecContext(ctx,
 		`UPDATE safety_case
-		 SET independent_review = 1, approved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), approved_by = ?
-		 WHERE id = ?`,
+		 SET independent_review = 1, approved_at = iso8601_now(), approved_by = $1
+		 WHERE id = $2`,
 		approvedBy, id,
 	)
 	if err != nil {
@@ -188,7 +188,7 @@ func (r *Registry) Approve(ctx context.Context, id, approvedBy string) error {
 func (r *Registry) Revoke(ctx context.Context, id, reason string) error {
 	var approvedAt, revokedAt sql.NullString
 	err := r.DB.QueryRowContext(ctx,
-		`SELECT approved_at, revoked_at FROM safety_case WHERE id = ?`, id,
+		`SELECT approved_at, revoked_at FROM safety_case WHERE id = $1`, id,
 	).Scan(&approvedAt, &revokedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrNotFound
@@ -205,8 +205,8 @@ func (r *Registry) Revoke(ctx context.Context, id, reason string) error {
 
 	_, err = r.DB.ExecContext(ctx,
 		`UPDATE safety_case
-		 SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), revoked_reason = ?
-		 WHERE id = ?`,
+		 SET revoked_at = iso8601_now(), revoked_reason = $1
+		 WHERE id = $2`,
 		reason, id,
 	)
 	if err != nil {
@@ -223,7 +223,7 @@ func (r *Registry) Status(ctx context.Context, id string) (Status, error) {
 	var approvedAt, revokedAt, revokedReason sql.NullString
 	err := r.DB.QueryRowContext(ctx,
 		`SELECT id, subject_id, subject_type, risk_class, independent_review, approved_at, revoked_at, revoked_reason
-		 FROM safety_case WHERE id = ?`, id,
+		 FROM safety_case WHERE id = $1`, id,
 	).Scan(&st.ID, &st.SubjectID, &subjectType, &riskClass, &independentReview, &approvedAt, &revokedAt, &revokedReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Status{}, ErrNotFound

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import subprocess
 import threading
 import time
@@ -28,11 +29,31 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import quote, urlparse, urlunparse
 
+import psycopg
 import pytest
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 MIGRATIONS_DIR = os.path.join(REPO_ROOT, "store", "migrations")
+
+# PostgreSQL is authoritative persistent state (§1 decision 4) — not SQLite.
+# Every test gets its own schema in this shared instance (the same
+# schema-per-test isolation daemon/store/storetest uses on the Go side),
+# created fresh and dropped on cleanup. Override for a non-default local
+# Postgres via AMH_TEST_DATABASE_URL.
+TEST_POSTGRES_ADMIN_URL = os.environ.get("AMH_TEST_DATABASE_URL", "postgresql://postgres:postgres@127.0.0.1:5432/postgres")
+
+
+def _schema_scoped_dsn(admin_url: str, schema: str) -> str:
+    """Appends a search_path option to a Postgres connection URL so every
+    connection made through it defaults to `schema` — the space in the
+    libpq `options` value must be percent-encoded as %20, not the '+'
+    urlencode() would produce (form-encoding, not URI encoding; libpq
+    doesn't decode '+' as a space)."""
+    parsed = urlparse(admin_url)
+    options_value = quote(f"-c search_path={schema}", safe="")
+    return urlunparse(parsed._replace(query=f"options={options_value}"))
 
 # Fixed test-only tokens — never real secrets, just distinct strings that
 # let tests assert agent-vs-operator behavior deterministically. Mirrors
@@ -231,7 +252,7 @@ def daemon(go_binaries, db_path, tmp_path):
     mcp_port = _find_free_port()
     env = dict(
         os.environ,
-        DATABASE_URL=f"sqlite:{db_path}",
+        DATABASE_URL=db_path,
         AMH_MIGRATIONS_DIR=MIGRATIONS_DIR,
         AMH_DAEMON_PORT=str(health_port),
         AMH_API_PORT=str(api_port),
@@ -271,12 +292,27 @@ def _wait_for_health(port: int, timeout: float = 10.0) -> None:
 
 
 @pytest.fixture()
-def db_path(tmp_path):
+def db_path():
+    """Despite the historical name (SQLite-era: a file path), this yields a
+    PostgreSQL connection URL scoped to a fresh, isolated schema — kept as
+    `db_path` rather than renamed, since every test in this suite already
+    takes it as a fixture parameter by that name."""
     from workflows import ontology
 
-    path = str(tmp_path / "amh.db")
-    ontology.apply_migrations(path, MIGRATIONS_DIR)
-    return path
+    schema = f"test_{os.getpid()}_{secrets.token_hex(8)}"
+    admin = psycopg.connect(TEST_POSTGRES_ADMIN_URL, autocommit=True)
+    admin.execute(f'CREATE SCHEMA "{schema}"')
+    admin.close()
+
+    dsn = _schema_scoped_dsn(TEST_POSTGRES_ADMIN_URL, schema)
+    ontology.apply_migrations(dsn, MIGRATIONS_DIR)
+
+    try:
+        yield dsn
+    finally:
+        cleanup = psycopg.connect(TEST_POSTGRES_ADMIN_URL, autocommit=True)
+        cleanup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+        cleanup.close()
 
 
 def write_ephemeral_client_key(tmp_path) -> str:

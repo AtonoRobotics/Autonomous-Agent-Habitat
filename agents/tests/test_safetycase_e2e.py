@@ -14,8 +14,8 @@ from __future__ import annotations
 
 import json
 import shutil
-import sqlite3
 
+import psycopg
 import pytest
 
 from conftest import write_ephemeral_client_key
@@ -31,9 +31,9 @@ def seed_nutrient_doser(db_path: str, host: str, port: int, host_key_authorized_
         "private_key_path": write_ephemeral_client_key(tmp_path),
         "host_key_authorized_key": host_key_authorized_key,
     }
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     conn.execute(
-        "INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', ?)",
+        "INSERT INTO connector (id, type, auth, config) VALUES ('nutrient-doser-connector', 'ssh', 'none', %s)",
         (json.dumps(config),),
     )
     conn.execute(
@@ -110,9 +110,9 @@ def test_safety_case_grants_standing_autonomy_with_no_ticket(fake_device, daemon
     result = actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", {"ml": "5"})
     assert result == "ok"
 
-    conn = sqlite3.connect(db_path)
+    conn = psycopg.connect(db_path)
     inverse, outcome = conn.execute(
-        "SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = ?",
+        "SELECT inverse_payload, outcome FROM device_effect WHERE device_action_id = %s",
         ("nutrient-doser.dispense_ml",),
     ).fetchone()
     assert outcome == "success"

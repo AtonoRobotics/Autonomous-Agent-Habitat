@@ -216,7 +216,7 @@ func TestIrreversibleActuation_RequiresApprovalCreatedAndApprovedOverHTTP(t *tes
 	// An irreversible action's effect must still record no inverse — there
 	// is nothing to auto-reverse.
 	var inverse *string
-	err := db.QueryRow("SELECT inverse_payload FROM device_effect WHERE device_action_id = ?", "nutrient-doser.dispense_ml").Scan(&inverse)
+	err := db.QueryRow("SELECT inverse_payload FROM device_effect WHERE device_action_id = $1", "nutrient-doser.dispense_ml").Scan(&inverse)
 	if err != nil {
 		t.Fatalf("query device_effect: %v", err)
 	}

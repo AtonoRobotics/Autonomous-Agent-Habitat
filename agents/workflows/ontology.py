@@ -2,25 +2,32 @@
 (store/migrations/0001_init.sql) — Goal, Task, Run, Event. Kept deliberately
 thin: this is not an ORM, just enough persistence for the durable workflows
 in goal.py to log real state instead of only relying on DBOS's own system
-tables. See docs/AMH-SPECIFICATION.md Artifact C and E.
+tables. See docs/AMH-SPECIFICATION.md §1 (decision 4: "Postgres is
+authoritative persistent state") and §3.3.
+
+PostgreSQL, via psycopg (the same driver package the `dbos` package itself
+depends on) — not SQLite. Every function here takes a Postgres connection
+URL (dsn) as its first argument, mirroring daemon/store's own Open(dbURL,
+migrationsDir) signature on the Go side; both connect to the same cluster.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any, Iterator
+
+import psycopg
 
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
 
 
-def apply_migrations(db_path: str, migrations_dir: str) -> None:
+def apply_migrations(dsn: str, migrations_dir: str) -> None:
     """Apply store/migrations/*.sql in filename order, tracked in
     schema_migrations — the same idempotent scheme as daemon/store/store.go,
     reimplemented here so the Python agent layer can bootstrap the ontology
@@ -28,11 +35,11 @@ def apply_migrations(db_path: str, migrations_dir: str) -> None:
     run first. In a full deployment the daemon applies migrations before
     the agent layer starts; this is a convenience, not a second authority.
     """
-    with connect(db_path) as conn:
+    with connect(dsn) as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS schema_migrations (
                 filename TEXT PRIMARY KEY,
-                applied_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
+                applied_at TEXT NOT NULL DEFAULT (to_char(clock_timestamp() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
             )"""
         )
         applied = {row[0] for row in conn.execute("SELECT filename FROM schema_migrations")}
@@ -40,14 +47,13 @@ def apply_migrations(db_path: str, migrations_dir: str) -> None:
             if not filename.endswith(".sql") or filename in applied:
                 continue
             with open(os.path.join(migrations_dir, filename)) as f:
-                conn.executescript(f.read())
-            conn.execute("INSERT INTO schema_migrations (filename) VALUES (?)", (filename,))
+                conn.execute(f.read())
+            conn.execute("INSERT INTO schema_migrations (filename) VALUES (%s)", (filename,))
 
 
 @contextmanager
-def connect(db_path: str) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(db_path)
-    conn.execute("PRAGMA foreign_keys = ON")
+def connect(dsn: str) -> Iterator[psycopg.Connection]:
+    conn = psycopg.connect(dsn)
     try:
         yield conn
         conn.commit()
@@ -55,56 +61,56 @@ def connect(db_path: str) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def ensure_goal(db_path: str, goal_id: str, text: str, owner: str = "system") -> None:
-    with connect(db_path) as conn:
+def ensure_goal(dsn: str, goal_id: str, text: str, owner: str = "system") -> None:
+    with connect(dsn) as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO goal (id, text, owner, status) VALUES (?, ?, ?, 'active')",
+            "INSERT INTO goal (id, text, owner, status) VALUES (%s, %s, %s, 'active') ON CONFLICT DO NOTHING",
             (goal_id, text, owner),
         )
 
 
-def set_goal_status(db_path: str, goal_id: str, status: str) -> None:
-    with connect(db_path) as conn:
-        conn.execute("UPDATE goal SET status = ? WHERE id = ?", (status, goal_id))
+def set_goal_status(dsn: str, goal_id: str, status: str) -> None:
+    with connect(dsn) as conn:
+        conn.execute("UPDATE goal SET status = %s WHERE id = %s", (status, goal_id))
 
 
-def create_task(db_path: str, goal_id: str, objective: str) -> str:
+def create_task(dsn: str, goal_id: str, objective: str) -> str:
     task_id = str(uuid.uuid4())
-    with connect(db_path) as conn:
+    with connect(dsn) as conn:
         conn.execute(
-            "INSERT INTO task (id, goal_id, status) VALUES (?, ?, 'open')",
+            "INSERT INTO task (id, goal_id, status) VALUES (%s, %s, 'open')",
             (task_id, goal_id),
         )
     return task_id
 
 
-def set_task_status(db_path: str, task_id: str, status: str) -> None:
-    with connect(db_path) as conn:
-        conn.execute("UPDATE task SET status = ? WHERE id = ?", (status, task_id))
+def set_task_status(dsn: str, task_id: str, status: str) -> None:
+    with connect(dsn) as conn:
+        conn.execute("UPDATE task SET status = %s WHERE id = %s", (status, task_id))
 
 
-def create_run(db_path: str, task_id: str | None = None) -> str:
+def create_run(dsn: str, task_id: str | None = None) -> str:
     run_id = str(uuid.uuid4())
-    with connect(db_path) as conn:
+    with connect(dsn) as conn:
         conn.execute(
-            "INSERT INTO run (id, task_id, started, status) VALUES (?, ?, ?, 'running')",
+            "INSERT INTO run (id, task_id, started, status) VALUES (%s, %s, %s, 'running')",
             (run_id, task_id, now_iso()),
         )
     return run_id
 
 
-def end_run(db_path: str, run_id: str, status: str = "ok") -> None:
-    with connect(db_path) as conn:
+def end_run(dsn: str, run_id: str, status: str = "ok") -> None:
+    with connect(dsn) as conn:
         conn.execute(
-            "UPDATE run SET ended = ?, status = ? WHERE id = ?",
+            "UPDATE run SET ended = %s, status = %s WHERE id = %s",
             (now_iso(), status, run_id),
         )
 
 
-def log_event(db_path: str, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
+def log_event(dsn: str, run_id: str, event_type: str, payload: dict[str, Any]) -> None:
     event_id = str(uuid.uuid4())
-    with connect(db_path) as conn:
+    with connect(dsn) as conn:
         conn.execute(
-            "INSERT INTO event (id, run_id, type, ts, payload) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO event (id, run_id, type, ts, payload) VALUES (%s, %s, %s, %s, %s)",
             (event_id, run_id, event_type, now_iso(), json.dumps(payload)),
         )

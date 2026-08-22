@@ -4,11 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
-	"path/filepath"
 	"testing"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 // fakeActuator records every shell command it was asked to run and returns
@@ -29,13 +28,7 @@ func (f *fakeActuator) RunShell(ctx context.Context, command string) (string, er
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func seedConnectorAndDevice(t *testing.T, db *sql.DB) {
@@ -55,7 +48,7 @@ func TestExecuteReversibleVerified_NoGateNeeded(t *testing.T) {
 
 	_, err := db.Exec(`INSERT INTO device_action
 		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		VALUES ($1, 'vent-actuator', 'set_open_pct', 1, $2, $3, $4, iso8601_now())`,
 		"vent-actuator.set_open_pct",
 		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
 		`{"shell_template": "vent-ctl get-open-pct"}`,
@@ -83,7 +76,7 @@ func TestExecuteReversibleVerified_NoGateNeeded(t *testing.T) {
 
 	var forward, inverse string
 	var outcome string
-	err = db.QueryRow(`SELECT forward_payload, inverse_payload, outcome FROM device_effect WHERE device_action_id = ?`,
+	err = db.QueryRow(`SELECT forward_payload, inverse_payload, outcome FROM device_effect WHERE device_action_id = $1`,
 		"vent-actuator.set_open_pct").Scan(&forward, &inverse, &outcome)
 	if err != nil {
 		t.Fatalf("query device_effect: %v", err)
@@ -111,7 +104,7 @@ func TestExecute_ParamValueRejectsShellMetacharacters(t *testing.T) {
 
 	_, err := db.Exec(`INSERT INTO device_action
 		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		VALUES ($1, 'vent-actuator', 'set_open_pct', 1, $2, $3, $4, iso8601_now())`,
 		"vent-actuator.set_open_pct",
 		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
 		`{"shell_template": "vent-ctl get-open-pct"}`,
@@ -149,7 +142,7 @@ func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t
 
 	_, err := db.Exec(`INSERT INTO device_action
 		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		VALUES ($1, 'vent-actuator', 'set_open_pct', 1, $2, $3, $4, iso8601_now())`,
 		"vent-actuator.set_open_pct",
 		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
 		`{"shell_template": "vent-ctl get-open-pct"}`,
@@ -178,7 +171,7 @@ func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t
 	}
 
 	var count int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM device_effect WHERE device_action_id = ?`,
+	if err := db.QueryRow(`SELECT COUNT(*) FROM device_effect WHERE device_action_id = $1`,
 		"vent-actuator.set_open_pct").Scan(&count); err != nil {
 		t.Fatalf("query device_effect: %v", err)
 	}
@@ -194,14 +187,16 @@ func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t
 // Now the row is written first, so any DB-write failure on the path to
 // running the forward command (the journal write, or consuming the
 // ticket) blocks it entirely — proven here by forcing every write to fail
-// with PRAGMA query_only.
+// via a read-only session (Postgres's default_transaction_read_only,
+// pinned to one connection so it actually applies to every call Execute
+// makes through this *sql.DB).
 func TestExecute_JournalWriteFailureBlocksForwardCommand(t *testing.T) {
 	db := testDB(t)
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
 	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	); err != nil {
 		t.Fatalf("seed device_action: %v", err)
@@ -218,10 +213,11 @@ func TestExecute_JournalWriteFailureBlocksForwardCommand(t *testing.T) {
 		t.Fatalf("Approve: %v", err)
 	}
 
-	if _, err := db.Exec(`PRAGMA query_only = ON`); err != nil {
-		t.Fatalf("set query_only: %v", err)
+	db.SetMaxOpenConns(1) // pin to one connection so the session setting below actually sticks
+	if _, err := db.Exec(`SET default_transaction_read_only = ON`); err != nil {
+		t.Fatalf("set default_transaction_read_only: %v", err)
 	}
-	defer db.Exec(`PRAGMA query_only = OFF`)
+	defer db.Exec(`SET default_transaction_read_only = OFF`)
 
 	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: params}, &ticket)
 	if err == nil {
@@ -238,7 +234,7 @@ func TestExecuteUnverified_RequiresApprovedTicket(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	)
 	if err != nil {
@@ -283,7 +279,7 @@ func TestExecuteUnverified_RequiresApprovedTicket(t *testing.T) {
 	}
 
 	var inverse sql.NullString
-	err = db.QueryRow(`SELECT inverse_payload FROM device_effect WHERE device_action_id = ?`,
+	err = db.QueryRow(`SELECT inverse_payload FROM device_effect WHERE device_action_id = $1`,
 		"vent-actuator.dispense_ml").Scan(&inverse)
 	if err != nil {
 		t.Fatalf("query device_effect: %v", err)
@@ -302,7 +298,7 @@ func TestExecute_TicketCannotAuthorizeADifferentAction(t *testing.T) {
 	ctx := context.Background()
 
 	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, $1)`,
 		`{"shell_template": "dose {{ml}}ml"}`,
 	); err != nil {
 		t.Fatalf("seed device_action: %v", err)
@@ -348,7 +344,7 @@ func TestAutoReverse_UsesRecordedInverse(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, inverse_template, verified_at)
-		VALUES ('vent-actuator.set_open_pct', 'vent-actuator', 'set_open_pct', 1, '{}', strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
+		VALUES ('vent-actuator.set_open_pct', 'vent-actuator', 'set_open_pct', 1, '{}', iso8601_now())`)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}

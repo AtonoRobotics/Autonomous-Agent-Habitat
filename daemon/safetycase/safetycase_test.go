@@ -3,21 +3,14 @@ package safetycase
 import (
 	"context"
 	"database/sql"
-	"path/filepath"
 	"testing"
 
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	dir := t.TempDir()
-	db, err := store.Open(filepath.Join(dir, "amh.db"), "../../store/migrations")
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { db.Close() })
-	return db
+	return storetest.Open(t, "../../store/migrations")
 }
 
 func TestCreate_RejectsInvalidRiskClassAndSubjectType(t *testing.T) {
@@ -54,7 +47,7 @@ func TestSubmitEvidence_AccumulatesAcrossCalls(t *testing.T) {
 	}
 
 	var guardrailsJSON string
-	err = db.QueryRow("SELECT guardrails FROM safety_case WHERE id = ?", id).Scan(&guardrailsJSON)
+	err = db.QueryRow("SELECT guardrails FROM safety_case WHERE id = $1", id).Scan(&guardrailsJSON)
 	if err != nil {
 		t.Fatalf("query guardrails: %v", err)
 	}

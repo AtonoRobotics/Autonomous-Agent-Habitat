@@ -14,18 +14,18 @@ from __future__ import annotations
 import inspect
 import json
 import shutil
-import sqlite3
 import urllib.error
 import urllib.request
 
+import psycopg
 import pytest
 
 pytestmark = pytest.mark.skipif(shutil.which("go") is None, reason="go toolchain not available")
 
 
 def seed_agent(db_path: str, agent_id: str) -> None:
-    conn = sqlite3.connect(db_path)
-    conn.execute("INSERT INTO agent (id, kind) VALUES (?, 'worker')", (agent_id,))
+    conn = psycopg.connect(db_path)
+    conn.execute("INSERT INTO agent (id, kind) VALUES (%s, 'worker')", (agent_id,))
     conn.commit()
     conn.close()
 

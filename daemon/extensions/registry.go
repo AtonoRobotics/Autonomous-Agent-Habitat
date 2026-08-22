@@ -127,7 +127,7 @@ func (r *Registry) Discover(ctx context.Context, m Manifest) (*Extension, error)
 
 	_, err = tx.ExecContext(ctx, `
 		INSERT INTO extension (id, version, name, publisher, description, entrypoint, isolation, provides, requires, actions, compatibility, signature, manifest_digest, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'discovered')`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'discovered')`,
 		m.Metadata.ID, m.Metadata.Version, m.Metadata.Name, m.Metadata.Publisher, m.Metadata.Description,
 		m.Spec.Entrypoint, string(m.Spec.Isolation), string(providesJSON), string(requiresJSON), string(actionsJSON), string(compatJSON), sigJSON, digest,
 	)
@@ -137,7 +137,7 @@ func (r *Registry) Discover(ctx context.Context, m Manifest) (*Extension, error)
 	for _, p := range m.Spec.Provides {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO extension_provided_capability (extension_id, extension_version, capability_id, capability_version, contract)
-			VALUES (?, ?, ?, ?, ?)`,
+			VALUES ($1, $2, $3, $4, $5)`,
 			m.Metadata.ID, m.Metadata.Version, p.ID, p.Version, p.Contract,
 		); err != nil {
 			return nil, fmt.Errorf("extensions: insert provided capability %s: %w", p.ID, err)
@@ -195,8 +195,8 @@ func (r *Registry) Activate(ctx context.Context, id, version string) (*Extension
 		return nil, fmt.Errorf("extensions: begin activate-commit tx: %w", err)
 	}
 	_, err = tx.ExecContext(ctx, `
-		UPDATE extension SET status = 'active', runtime_handle = ?, activated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'), status_reason = NULL
-		WHERE id = ? AND version = ?`, runtimeHandle, id, version)
+		UPDATE extension SET status = 'active', runtime_handle = $1, activated_at = iso8601_now(), status_reason = NULL
+		WHERE id = $2 AND version = $3`, runtimeHandle, id, version)
 	if err != nil {
 		tx.Rollback()
 		_ = r.l.teardown(ctx, id, version, runtimeHandle)
@@ -206,7 +206,7 @@ func (r *Registry) Activate(ctx context.Context, id, version string) (*Extension
 	inverse, _ := json.Marshal(map[string]string{"action": "dispose", "runtime_handle": runtimeHandle})
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO extension_effect (id, extension_id, extension_version, effect_type, forward_payload, inverse_payload, outcome)
-		VALUES (?, ?, ?, 'activate', ?, ?, 'success')`,
+		VALUES ($1, $2, $3, 'activate', $4, $5, 'success')`,
 		uuid.NewString(), id, version, string(forward), string(inverse),
 	); err != nil {
 		tx.Rollback()
@@ -277,8 +277,8 @@ func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension,
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE extension SET status = 'disposed', disposed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-		WHERE id = ? AND version = ?`, id, version,
+		UPDATE extension SET status = 'disposed', disposed_at = iso8601_now()
+		WHERE id = $1 AND version = $2`, id, version,
 	); err != nil {
 		return nil, fmt.Errorf("extensions: mark disposed: %w", err)
 	}
@@ -286,7 +286,7 @@ func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension,
 	inverse, _ := json.Marshal(map[string]string{"action": "activate", "isolation": string(ext.Isolation)})
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO extension_effect (id, extension_id, extension_version, effect_type, forward_payload, inverse_payload, outcome)
-		VALUES (?, ?, ?, 'dispose', ?, ?, 'success')`,
+		VALUES ($1, $2, $3, 'dispose', $4, $5, 'success')`,
 		uuid.NewString(), id, version, string(forward), string(inverse),
 	); err != nil {
 		return nil, fmt.Errorf("extensions: record dispose effect: %w", err)
@@ -304,7 +304,7 @@ func (r *Registry) Get(ctx context.Context, id, version string) (*Extension, err
 	var providesJSON, requiresJSON string
 	err := r.DB.QueryRowContext(ctx, `
 		SELECT id, version, name, publisher, description, entrypoint, isolation, provides, requires, status, status_reason, runtime_handle, manifest_digest
-		FROM extension WHERE id = ? AND version = ?`, id, version,
+		FROM extension WHERE id = $1 AND version = $2`, id, version,
 	).Scan(&e.ID, &e.Version, &e.Name, &e.Publisher, &description, &e.Entrypoint, &e.Isolation, &providesJSON, &requiresJSON, &e.Status, &statusReason, &runtimeHandle, &e.ManifestDigest)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("%w: %s@%s", ErrNotFound, id, version)
@@ -351,7 +351,7 @@ func (r *Registry) requirementSatisfied(ctx context.Context, req Requirement) (b
 		SELECT epc.capability_version
 		FROM extension_provided_capability epc
 		JOIN extension e ON e.id = epc.extension_id AND e.version = epc.extension_version
-		WHERE epc.capability_id = ? AND e.status = 'active'`, req.Capability)
+		WHERE epc.capability_id = $1 AND e.status = 'active'`, req.Capability)
 	if err != nil {
 		return false, fmt.Errorf("extensions: query providers of %s: %w", req.Capability, err)
 	}
@@ -405,7 +405,7 @@ func (r *Registry) setStatus(ctx context.Context, id, version string, status Sta
 	if reason != "" {
 		reasonVal = reason
 	}
-	_, err := r.DB.ExecContext(ctx, `UPDATE extension SET status = ?, status_reason = ? WHERE id = ? AND version = ?`, string(status), reasonVal, id, version)
+	_, err := r.DB.ExecContext(ctx, `UPDATE extension SET status = $1, status_reason = $2 WHERE id = $3 AND version = $4`, string(status), reasonVal, id, version)
 	if err != nil {
 		return fmt.Errorf("extensions: set status %s: %w", status, err)
 	}
@@ -427,7 +427,7 @@ func (r *Registry) recordEffect(ctx context.Context, id, version, effectType str
 	}
 	_, err = r.DB.ExecContext(ctx, `
 		INSERT INTO extension_effect (id, extension_id, extension_version, effect_type, forward_payload, inverse_payload, outcome)
-		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
 		uuid.NewString(), id, version, effectType, string(fj), ij, outcome,
 	)
 	return err

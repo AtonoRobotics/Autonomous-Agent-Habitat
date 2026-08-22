@@ -164,7 +164,7 @@ func TestIrreversibleActuation_SucceedsViaApprovedSafetyCaseWithNoTicket(t *test
 
 	// Before any SafetyCase exists: still fails closed, exactly as
 	// without one.
-	noTicketBody, _ := json.Marshal(map[string]string{"forward": "dose 5ml"})
+	noTicketBody, _ := json.Marshal(map[string]any{"params": map[string]string{"ml": "5"}})
 	before := postJSON(t, actuateURL, testAgentToken, noTicketBody)
 	before.Body.Close()
 	if before.StatusCode != http.StatusForbidden {

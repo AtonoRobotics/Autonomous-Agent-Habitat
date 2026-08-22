@@ -55,8 +55,7 @@ def run_greenhouse_scenario(
     daemon_api_base_url: str,
     agent_token: str,
     device_action_id: str,
-    forward: str,
-    read_state: str,
+    params: dict[str, str],
 ) -> dict[str, Any]:
     """Top-level durable workflow for the full scenario. Crash-safe: if
     the process dies after step 4's actuation is durably recorded (either
@@ -80,8 +79,7 @@ def run_greenhouse_scenario(
             daemon_api_base_url,
             agent_token,
             device_action_id,
-            forward,
-            read_state,
+            params,
         )
 
         return {

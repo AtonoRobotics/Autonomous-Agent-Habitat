@@ -18,8 +18,9 @@ func TestApprovalGateLifecycle_CreateApproveStatus(t *testing.T) {
 
 	// 1. Agent requests a ticket for an irreversible action.
 	createBody, _ := json.Marshal(map[string]any{
-		"action": map[string]string{"device_action_id": "nutrient-doser.dispense_ml"},
-		"risk":   "irreversible",
+		"device_action_id": "nutrient-doser.dispense_ml",
+		"params":           map[string]string{"ml": "5"},
+		"risk":             "irreversible",
 	})
 	resp := postJSON(t, ts.URL+"/v1/approval-gates", testAgentToken, createBody)
 	if resp.StatusCode != http.StatusCreated {
@@ -71,7 +72,7 @@ func TestApprovalGateApprove_RejectsAgentToken(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	createBody, _ := json.Marshal(map[string]any{"action": map[string]string{"x": "y"}, "risk": "irreversible"})
+	createBody, _ := json.Marshal(map[string]any{"device_action_id": "x", "params": map[string]string{"x": "y"}, "risk": "irreversible"})
 	resp := postJSON(t, ts.URL+"/v1/approval-gates", testAgentToken, createBody)
 	var created createTicketResponse
 	json.NewDecoder(resp.Body).Decode(&created)
@@ -103,7 +104,7 @@ func TestApprovalGateApprove_RejectsDoubleApproval(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	createBody, _ := json.Marshal(map[string]any{"action": map[string]string{"x": "y"}, "risk": "irreversible"})
+	createBody, _ := json.Marshal(map[string]any{"device_action_id": "x", "params": map[string]string{"x": "y"}, "risk": "irreversible"})
 	resp := postJSON(t, ts.URL+"/v1/approval-gates", testAgentToken, createBody)
 	var created createTicketResponse
 	json.NewDecoder(resp.Body).Decode(&created)
@@ -130,7 +131,7 @@ func TestApprovalGateCreateTicket_RejectsInvalidRisk(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	body, _ := json.Marshal(map[string]any{"action": map[string]string{"x": "y"}, "risk": "not-a-real-risk"})
+	body, _ := json.Marshal(map[string]any{"device_action_id": "x", "params": map[string]string{"x": "y"}, "risk": "not-a-real-risk"})
 	resp := postJSON(t, ts.URL+"/v1/approval-gates", testAgentToken, body)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusBadRequest {
@@ -159,7 +160,7 @@ func TestIrreversibleActuation_RequiresApprovalCreatedAndApprovedOverHTTP(t *tes
 
 	// No ticket at all: fail closed. (Agent identity, as it will be for
 	// every actuate call here — actuation is routine agent work.)
-	noTicketBody, _ := json.Marshal(map[string]string{"forward": "dose 5ml"})
+	noTicketBody, _ := json.Marshal(map[string]any{"params": map[string]string{"ml": "5"}})
 	resp := postJSON(t, actuateURL, testAgentToken, noTicketBody)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
@@ -168,8 +169,9 @@ func TestIrreversibleActuation_RequiresApprovalCreatedAndApprovedOverHTTP(t *tes
 
 	// Agent creates a ticket over HTTP.
 	createBody, _ := json.Marshal(map[string]any{
-		"action": map[string]string{"device_action_id": "nutrient-doser.dispense_ml"},
-		"risk":   "irreversible",
+		"device_action_id": "nutrient-doser.dispense_ml",
+		"params":           map[string]string{"ml": "5"},
+		"risk":             "irreversible",
 	})
 	createResp := postJSON(t, ts.URL+"/v1/approval-gates", testAgentToken, createBody)
 	var created createTicketResponse
@@ -177,7 +179,7 @@ func TestIrreversibleActuation_RequiresApprovalCreatedAndApprovedOverHTTP(t *tes
 	createResp.Body.Close()
 
 	// Unapproved ticket: still fail closed.
-	unapprovedBody, _ := json.Marshal(map[string]string{"forward": "dose 5ml", "ticket_id": created.TicketID})
+	unapprovedBody, _ := json.Marshal(map[string]any{"params": map[string]string{"ml": "5"}, "ticket_id": created.TicketID})
 	resp2 := postJSON(t, actuateURL, testAgentToken, unapprovedBody)
 	resp2.Body.Close()
 	if resp2.StatusCode != http.StatusForbidden {

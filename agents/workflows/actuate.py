@@ -35,8 +35,7 @@ def actuate_device(
     daemon_api_base_url: str,
     agent_token: str,
     device_action_id: str,
-    forward: str,
-    read_state: str = "",
+    params: dict[str, str] | None = None,
     ticket_id: str = "",
 ) -> str:
     """POSTs to the daemon's /v1/device-actions/{id}/actuate and returns
@@ -45,14 +44,21 @@ def actuate_device(
     enforced by daemon/actuation.Execute (no verified inverse + no
     approved SafetyCase + no approved ticket, surfaced as HTTP 403).
 
+    params carries only named parameter values (e.g. {"open_pct": "60"}),
+    never shell text — the daemon renders the actual forward/read-state
+    commands server-side from the target device_action's own stored
+    templates (daemon/actuation's forward_template/read_state_template).
+    This module never sends, and the daemon never accepts, a raw shell
+    command from the caller: see daemon/actuation/actuate.go's package
+    doc comment for why (PR #3's review found that trusting caller-sent
+    shell text decoupled "verified reversible" from what actually ran).
+
     agent_token authenticates as daemon/authn's agent role — sufficient
     to actuate and to create/check approval tickets, but the daemon
     mechanically refuses this role on the approve endpoint (see
     approval.py's module docstring: there is no approve() function here,
     on purpose, and no token this module holds could use one anyway)."""
-    body: dict[str, str] = {"forward": forward}
-    if read_state:
-        body["read_state"] = read_state
+    body: dict[str, object] = {"params": params or {}}
     if ticket_id:
         body["ticket_id"] = ticket_id
 

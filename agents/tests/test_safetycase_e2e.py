@@ -40,8 +40,9 @@ def seed_nutrient_doser(db_path: str, host: str, port: int, host_key_authorized_
         "INSERT INTO device (id, kind, connector_id) VALUES ('nutrient-doser', 'doser', 'nutrient-doser-connector')"
     )
     conn.execute(
-        """INSERT INTO device_action (id, device_id, name, reversible)
-           VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0)"""
+        """INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+           VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0,
+                   '{"shell_template": "dose {{ml}}ml"}')"""
     )
     conn.commit()
     conn.close()
@@ -72,7 +73,7 @@ def test_safety_case_grants_standing_autonomy_with_no_ticket(fake_device, daemon
 
     # No case at all: fails closed, same as the no-ApprovalGate-ticket case.
     with pytest.raises(ActuationError):
-        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml")
+        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", {"ml": "5"})
 
     # Agent opens a case and submits evidence.
     case_id = create_safety_case(
@@ -90,7 +91,7 @@ def test_safety_case_grants_standing_autonomy_with_no_ticket(fake_device, daemon
 
     # Still no approval: still fails closed, still no ticket needed to try.
     with pytest.raises(ActuationError):
-        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml")
+        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", {"ml": "5"})
 
     # The agent cannot approve its own case.
     self_approve = _approve_case_as(daemon, case_id, daemon.agent_token, approved_by="not-the-agent-itself")
@@ -106,7 +107,7 @@ def test_safety_case_grants_standing_autonomy_with_no_ticket(fake_device, daemon
 
     # NOW the agent can actuate with NO ticket_id at all — the standing
     # SafetyCase grant is sufficient, distinct from a per-call ticket.
-    result = actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml")
+    result = actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", {"ml": "5"})
     assert result == "ok"
 
     conn = sqlite3.connect(db_path)

@@ -18,8 +18,10 @@ func TestExecute_ApprovedSafetyCaseGrantsAutonomyWithoutTicket(t *testing.T) {
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
-	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
+	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
@@ -34,7 +36,7 @@ func TestExecute_ApprovedSafetyCaseGrantsAutonomyWithoutTicket(t *testing.T) {
 	act := &fakeActuator{responses: map[string]string{"dose 5ml": "ok"}}
 	gate := interlocks.New(db)
 
-	result, err := Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, nil)
+	result, err := Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "5"}}, nil)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -70,8 +72,10 @@ func TestExecute_SafetyCaseWithoutIndependentReviewDoesNotGrantAutonomy(t *testi
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
-	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
+	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
@@ -86,7 +90,7 @@ func TestExecute_SafetyCaseWithoutIndependentReviewDoesNotGrantAutonomy(t *testi
 	act := &fakeActuator{}
 	gate := interlocks.New(db)
 
-	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, nil)
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "5"}}, nil)
 	if err != ErrNoAutonomyPath {
 		t.Fatalf("expected ErrNoAutonomyPath (independent_review=0 must not grant autonomy), got %v", err)
 	}
@@ -103,8 +107,10 @@ func TestExecute_LowRiskSafetyCaseGrantsAutonomyWithoutIndependentReview(t *test
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
-	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('vent-actuator.log_status', 'vent-actuator', 'log_status', 0)`)
+	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.log_status', 'vent-actuator', 'log_status', 0, ?)`,
+		`{"shell_template": "log-status"}`,
+	)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
@@ -119,7 +125,7 @@ func TestExecute_LowRiskSafetyCaseGrantsAutonomyWithoutIndependentReview(t *test
 	act := &fakeActuator{responses: map[string]string{"log-status": "ok"}}
 	gate := interlocks.New(db)
 
-	result, err := Execute(ctx, db, act, gate, "vent-actuator.log_status", Command{Forward: "log-status"}, nil)
+	result, err := Execute(ctx, db, act, gate, "vent-actuator.log_status", Command{}, nil)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
 	}
@@ -133,8 +139,10 @@ func TestExecute_RevokedSafetyCaseDoesNotGrantAutonomy(t *testing.T) {
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
-	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
+	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
@@ -149,7 +157,7 @@ func TestExecute_RevokedSafetyCaseDoesNotGrantAutonomy(t *testing.T) {
 	act := &fakeActuator{}
 	gate := interlocks.New(db)
 
-	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, nil)
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "5"}}, nil)
 	if err != ErrNoAutonomyPath {
 		t.Fatalf("expected ErrNoAutonomyPath for a revoked safety_case, got %v", err)
 	}

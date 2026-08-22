@@ -3,6 +3,7 @@ package actuation
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -53,9 +54,11 @@ func TestExecuteReversibleVerified_NoGateNeeded(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action
-		(id, device_id, name, reversible, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
+		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		"vent-actuator.set_open_pct",
+		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
+		`{"shell_template": "vent-ctl get-open-pct"}`,
 		`{"shell_template": "vent-ctl set-open-pct {{prior}}"}`,
 	)
 	if err != nil {
@@ -69,8 +72,7 @@ func TestExecuteReversibleVerified_NoGateNeeded(t *testing.T) {
 	gate := interlocks.New(db)
 
 	result, err := Execute(ctx, db, act, gate, "vent-actuator.set_open_pct", Command{
-		Forward:   "vent-ctl set-open-pct 60",
-		ReadState: "vent-ctl get-open-pct",
+		Params: map[string]string{"open_pct": "60"},
 	}, nil /* no ticket needed: verified inverse */)
 	if err != nil {
 		t.Fatalf("Execute: %v", err)
@@ -89,8 +91,47 @@ func TestExecuteReversibleVerified_NoGateNeeded(t *testing.T) {
 	if outcome != "success" {
 		t.Fatalf("expected outcome success, got %q", outcome)
 	}
+	if forward != `{"shell":"vent-ctl set-open-pct 60"}` {
+		t.Fatalf("expected forward command rendered server-side from the template, got %q", forward)
+	}
 	if inverse != `{"shell":"vent-ctl set-open-pct 40"}` {
 		t.Fatalf("expected inverse built from prior state 40, got %q", inverse)
+	}
+}
+
+// TestExecute_ParamValueRejectsShellMetacharacters guards against command
+// injection through a caller-supplied parameter: since forward/read-state
+// commands are now rendered server-side from a template, the only
+// attacker-controlled input left is a parameter value — it must never be
+// allowed to smuggle in shell syntax the template's author didn't intend.
+func TestExecute_ParamValueRejectsShellMetacharacters(t *testing.T) {
+	db := testDB(t)
+	seedConnectorAndDevice(t, db)
+	ctx := context.Background()
+
+	_, err := db.Exec(`INSERT INTO device_action
+		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
+		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		"vent-actuator.set_open_pct",
+		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
+		`{"shell_template": "vent-ctl get-open-pct"}`,
+		`{"shell_template": "vent-ctl set-open-pct {{prior}}"}`,
+	)
+	if err != nil {
+		t.Fatalf("seed device_action: %v", err)
+	}
+
+	act := &fakeActuator{responses: map[string]string{"vent-ctl get-open-pct": "40"}}
+	gate := interlocks.New(db)
+
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.set_open_pct", Command{
+		Params: map[string]string{"open_pct": "60; rm -rf /"},
+	}, nil)
+	if !errors.Is(err, ErrInvalidParam) {
+		t.Fatalf("expected ErrInvalidParam for a shell-metacharacter param value, got %v", err)
+	}
+	if len(act.calls) != 0 {
+		t.Fatalf("actuator must never be invoked when a param value fails validation, got calls: %v", act.calls)
 	}
 }
 
@@ -107,9 +148,11 @@ func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action
-		(id, device_id, name, reversible, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
+		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		"vent-actuator.set_open_pct",
+		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
+		`{"shell_template": "vent-ctl get-open-pct"}`,
 		`{"not_shell_template": "oops"}`, // missing the required shell_template field
 	)
 	if err != nil {
@@ -123,8 +166,7 @@ func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t
 	gate := interlocks.New(db)
 
 	_, err = Execute(ctx, db, act, gate, "vent-actuator.set_open_pct", Command{
-		Forward:   "vent-ctl set-open-pct 60",
-		ReadState: "vent-ctl get-open-pct",
+		Params: map[string]string{"open_pct": "60"},
 	}, nil)
 	if err == nil {
 		t.Fatalf("expected Execute to fail on a malformed inverse_template")
@@ -145,32 +187,80 @@ func TestExecuteReversibleVerified_MalformedInverseTemplateNeverInvokesForward(t
 	}
 }
 
+// TestExecute_JournalWriteFailureBlocksForwardCommand guards against the
+// other real bug PR #3's review found: previously, the device_effect
+// journal row was written AFTER the forward command ran, so a DB-write
+// failure left an unrecorded physical effect with no idempotency record.
+// Now the row is written first, so any DB-write failure on the path to
+// running the forward command (the journal write, or consuming the
+// ticket) blocks it entirely — proven here by forcing every write to fail
+// with PRAGMA query_only.
+func TestExecute_JournalWriteFailureBlocksForwardCommand(t *testing.T) {
+	db := testDB(t)
+	seedConnectorAndDevice(t, db)
+	ctx := context.Background()
+
+	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	); err != nil {
+		t.Fatalf("seed device_action: %v", err)
+	}
+
+	act := &fakeActuator{}
+	gate := interlocks.New(db)
+	params := map[string]string{"ml": "5"}
+	ticket, err := gate.Require(ctx, "vent-actuator.dispense_ml", params, "test", interlocks.Irreversible)
+	if err != nil {
+		t.Fatalf("Require: %v", err)
+	}
+	if err := gate.Approve(ctx, ticket, "operator:jane"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	if _, err := db.Exec(`PRAGMA query_only = ON`); err != nil {
+		t.Fatalf("set query_only: %v", err)
+	}
+	defer db.Exec(`PRAGMA query_only = OFF`)
+
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: params}, &ticket)
+	if err == nil {
+		t.Fatalf("expected Execute to fail when the device_effect journal write fails")
+	}
+	if len(act.calls) != 0 {
+		t.Fatalf("forward command must never run when the journal write fails, got calls: %v", act.calls)
+	}
+}
+
 func TestExecuteUnverified_RequiresApprovedTicket(t *testing.T) {
 	db := testDB(t)
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
-	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
+	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
 
 	act := &fakeActuator{}
 	gate := interlocks.New(db)
+	params := map[string]string{"ml": "5"}
 
 	// No ticket at all: must fail closed.
-	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, nil)
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: params}, nil)
 	if err != ErrNoAutonomyPath {
 		t.Fatalf("expected ErrNoAutonomyPath with no ticket, got %v", err)
 	}
 
 	// Unapproved ticket: must still fail closed.
-	ticket, err := gate.Require(ctx, map[string]string{"action": "dispense_ml"}, interlocks.Irreversible)
+	ticket, err := gate.Require(ctx, "vent-actuator.dispense_ml", params, "test", interlocks.Irreversible)
 	if err != nil {
 		t.Fatalf("Require: %v", err)
 	}
-	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, &ticket)
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: params}, &ticket)
 	if err == nil {
 		t.Fatalf("expected Execute to fail with an unapproved ticket")
 	}
@@ -182,11 +272,15 @@ func TestExecuteUnverified_RequiresApprovedTicket(t *testing.T) {
 	if err := gate.Approve(ctx, ticket, "operator:jane"); err != nil {
 		t.Fatalf("Approve: %v", err)
 	}
-	result, err := Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, &ticket)
+	result, err := Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: params}, &ticket)
 	if err != nil {
 		t.Fatalf("Execute after approval: %v", err)
 	}
 	_ = result
+
+	if len(act.calls) != 1 || act.calls[0] != "dose 5ml" {
+		t.Fatalf("expected the forward command rendered server-side from the template, got calls: %v", act.calls)
+	}
 
 	var inverse sql.NullString
 	err = db.QueryRow(`SELECT inverse_payload FROM device_effect WHERE device_action_id = ?`,
@@ -196,6 +290,55 @@ func TestExecuteUnverified_RequiresApprovedTicket(t *testing.T) {
 	}
 	if inverse.Valid {
 		t.Fatalf("expected no recorded inverse for an irreversible action, got %q", inverse.String)
+	}
+}
+
+// TestExecute_TicketCannotAuthorizeADifferentAction guards against the
+// exact replay bug PR #3's review found: an approved ticket must not
+// authorize an action other than the one it was requested for.
+func TestExecute_TicketCannotAuthorizeADifferentAction(t *testing.T) {
+	db := testDB(t)
+	seedConnectorAndDevice(t, db)
+	ctx := context.Background()
+
+	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	); err != nil {
+		t.Fatalf("seed device_action: %v", err)
+	}
+
+	act := &fakeActuator{}
+	gate := interlocks.New(db)
+
+	// Ticket approved for 5ml.
+	ticket, err := gate.Require(ctx, "vent-actuator.dispense_ml", map[string]string{"ml": "5"}, "test", interlocks.Irreversible)
+	if err != nil {
+		t.Fatalf("Require: %v", err)
+	}
+	if err := gate.Approve(ctx, ticket, "operator:jane"); err != nil {
+		t.Fatalf("Approve: %v", err)
+	}
+
+	// Attempting to actuate 500ml with the ticket approved for 5ml must fail.
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "500"}}, &ticket)
+	if !errors.Is(err, interlocks.ErrActionMismatch) {
+		t.Fatalf("expected ErrActionMismatch, got %v", err)
+	}
+	if len(act.calls) != 0 {
+		t.Fatalf("actuator must never be invoked for a mismatched action, got calls: %v", act.calls)
+	}
+
+	// The actual approved action still succeeds, and consumes the ticket.
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "5"}}, &ticket)
+	if err != nil {
+		t.Fatalf("expected Execute to succeed for the exact approved action, got %v", err)
+	}
+
+	// Replaying the same ticket for the same action must now fail too.
+	_, err = Execute(ctx, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "5"}}, &ticket)
+	if !errors.Is(err, interlocks.ErrTicketAlreadyUsed) {
+		t.Fatalf("expected ErrTicketAlreadyUsed on replay, got %v", err)
 	}
 }
 

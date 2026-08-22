@@ -40,9 +40,8 @@ import (
 )
 
 type actuateRequest struct {
-	Forward   string `json:"forward"`
-	ReadState string `json:"read_state,omitempty"`
-	TicketID  string `json:"ticket_id,omitempty"`
+	Params   map[string]string `json:"params"`
+	TicketID string            `json:"ticket_id,omitempty"`
 }
 
 type actuateResponse struct {
@@ -51,8 +50,10 @@ type actuateResponse struct {
 }
 
 type createTicketRequest struct {
-	Action any    `json:"action"`
-	Risk   string `json:"risk"`
+	DeviceActionID string            `json:"device_action_id"`
+	Params         map[string]string `json:"params"`
+	Reason         string            `json:"reason,omitempty"`
+	Risk           string            `json:"risk"`
 }
 
 type createTicketResponse struct {
@@ -301,10 +302,6 @@ func (s *Server) handleActuate(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, actuateResponse{Error: "invalid request body: " + err.Error()})
 		return
 	}
-	if req.Forward == "" {
-		writeJSON(w, http.StatusBadRequest, actuateResponse{Error: "forward is required"})
-		return
-	}
 
 	act, err := s.Registry.ResolveActuator(r.Context(), deviceActionID)
 	if err != nil {
@@ -322,13 +319,18 @@ func (s *Server) handleActuate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	result, err := actuation.ExecuteTraced(r.Context(), s.Tracer, s.DB, act, s.Gate, deviceActionID, actuation.Command{
-		Forward:   req.Forward,
-		ReadState: req.ReadState,
+		Params: req.Params,
 	}, ticket)
 	if err != nil {
 		status := http.StatusInternalServerError
-		if errors.Is(err, actuation.ErrNoAutonomyPath) || errors.Is(err, interlocks.ErrNotSatisfied) {
+		switch {
+		case errors.Is(err, actuation.ErrNoAutonomyPath),
+			errors.Is(err, interlocks.ErrNotSatisfied),
+			errors.Is(err, interlocks.ErrActionMismatch),
+			errors.Is(err, interlocks.ErrTicketAlreadyUsed):
 			status = http.StatusForbidden
+		case errors.Is(err, actuation.ErrInvalidParam):
+			status = http.StatusBadRequest
 		}
 		writeJSON(w, status, actuateResponse{Error: err.Error()})
 		return
@@ -355,8 +357,12 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, createTicketResponse{Error: "risk must be 'reversible' or 'irreversible'"})
 		return
 	}
+	if req.DeviceActionID == "" {
+		writeJSON(w, http.StatusBadRequest, createTicketResponse{Error: "device_action_id is required"})
+		return
+	}
 
-	ticket, err := s.Gate.Require(r.Context(), req.Action, risk)
+	ticket, err := s.Gate.Require(r.Context(), req.DeviceActionID, req.Params, req.Reason, risk)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, createTicketResponse{Error: err.Error()})
 		return

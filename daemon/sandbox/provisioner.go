@@ -20,6 +20,30 @@
 //     external process reaping a zombie on its own schedule — exactly the
 //     kind of unverifiable inverse this package exists to avoid.
 //
+// Process isolation hardening (PR #3's review): a bare `unshare --mount`
+// gives the target command its own mount namespace, but that namespace
+// initially still has the SAME view of the host filesystem — fully
+// writable, running as the daemon's own (root) identity. That is not a
+// sandboxed view of the workdir, it is real root access to the host. Per
+// launchProcess's own doc comment, this package deliberately does not
+// build a full chroot jail (an empty chroot root has no /bin, /lib, /usr —
+// nothing a real command needs; populating one is a container runtime's
+// job, which is exactly what the "container" isolation mode already
+// provides via docker). Instead, inside the new mount namespace and
+// before the target command execs: the mount propagation is privatized
+// (`mount --make-rprivate /`), the computer's own workdir is bind-mounted
+// over itself (so it can independently stay read-write), the rest of the
+// namespace's root is remounted read-only, and the target command then
+// execs as the unprivileged nobody:nogroup identity (via `setpriv`, the
+// same util-linux package `unshare` itself comes from — not a new
+// dependency category). Net effect: the target command can still see and
+// read the host's real binaries and libraries (needed to run anything at
+// all), can still write inside its own workdir, and can no longer modify
+// or delete anything else on the host, nor act as root. This is still not
+// container-grade isolation — no network or cgroup isolation, no PID
+// namespace (see above) — a caller that needs that must use container
+// isolation instead.
+//
 // Create/Destroy is the reversible pair, by the same discipline as
 // daemon/actuation and daemon/extensions: provisioning a computer is
 // autonomous because destroying it is a verified, always-available
@@ -118,6 +142,17 @@ func (p *Provisioner) Create(ctx context.Context, agentID string, isolation Isol
 	workdir := filepath.Join(p.BaseDir, id)
 	if err := os.MkdirAll(workdir, 0o700); err != nil {
 		return nil, fmt.Errorf("sandbox: create workdir %s: %w", workdir, err)
+	}
+	if isolation == IsolationProcess {
+		// The target command execs as the unprivileged nobody:nogroup
+		// identity (see launchProcess/launchProcessInit) — its own workdir
+		// must actually be owned by that identity, or the 0700 directory
+		// just created (owned by the daemon's own root identity) would be
+		// unwritable to the very process meant to use it.
+		if err := os.Chown(workdir, unprivilegedUIDInt, unprivilegedGIDInt); err != nil {
+			os.RemoveAll(workdir)
+			return nil, fmt.Errorf("sandbox: chown workdir %s to unprivileged owner: %w", workdir, err)
+		}
 	}
 
 	limitsJSON, err := json.Marshal(resourceLimits)
@@ -244,6 +279,35 @@ func launch(ctx context.Context, id string, isolation Isolation, image, workdir 
 	}
 }
 
+// unprivilegedUID/GID is the standard nobody:nogroup identity every
+// mainstream Linux distribution ships — see launchProcessInit's doc
+// comment for why the target command execs as this identity rather than
+// the daemon's own (root) one.
+const (
+	unprivilegedUID    = "65534"
+	unprivilegedGID    = "65534"
+	unprivilegedUIDInt = 65534
+	unprivilegedGIDInt = 65534
+)
+
+// launchProcessInit is the shell script that runs inside the new mount
+// namespace, before the target command, to harden process isolation (see
+// this package's doc comment): privatize mount propagation, keep the
+// computer's own workdir independently writable, remount everything else
+// read-only, then exec the target command as an unprivileged identity.
+// $1 is the workdir; the target command and its arguments are "$@" from
+// $2 onward (see launchProcess's argv construction).
+const launchProcessInit = `set -e
+workdir="$1"
+shift
+mount --make-rprivate /
+mount --bind "$workdir" "$workdir"
+mount -o remount,ro,bind /
+cd "$workdir"
+export HOME="$workdir"
+exec setpriv --reuid=` + unprivilegedUID + ` --regid=` + unprivilegedGID + ` --clear-groups -- "$@"
+`
+
 // launchProcess starts image (a shell command) inside a fresh mount
 // namespace via unshare, in its own process group so the whole tree can be
 // reaped by one signal, and workdir as its current directory. `unshare
@@ -259,7 +323,16 @@ func launchProcess(ctx context.Context, id, image, workdir string) (string, erro
 	if len(fields) == 0 {
 		return "", fmt.Errorf("empty image/command for process isolation")
 	}
-	args := append([]string{"--mount", "--"}, fields...)
+	// argv: unshare --mount -- sh -c <script> sh <workdir> <target command
+	// and args...> — "sh" after the script is $0 inside the script (a
+	// placeholder, never used), and everything after that lands in "$@"
+	// exactly as launchProcessInit expects: $1=workdir, then the target
+	// command's own argv untouched by shell re-parsing (each field reaches
+	// the script as its own positional parameter, not concatenated shell
+	// text) — the same shell-injection concern this package's actuation
+	// sibling (daemon/actuation) guards against with paramValuePattern.
+	scriptArgs := append([]string{"sh", workdir}, fields...)
+	args := append([]string{"--mount", "--", "sh", "-c", launchProcessInit}, scriptArgs...)
 	// Deliberately exec.Command, not exec.CommandContext(ctx, ...): ctx is
 	// the triggering HTTP request's context, cancelled the moment that
 	// request finishes — a CommandContext'd computer would be SIGKILL'd

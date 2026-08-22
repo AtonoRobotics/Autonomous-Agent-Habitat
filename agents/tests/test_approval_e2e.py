@@ -46,8 +46,9 @@ def seed_nutrient_doser(db_path: str, host: str, port: int, host_key_authorized_
         "INSERT INTO device (id, kind, connector_id) VALUES ('nutrient-doser', 'doser', 'nutrient-doser-connector')"
     )
     conn.execute(
-        """INSERT INTO device_action (id, device_id, name, reversible)
-           VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0)"""
+        """INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+           VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0,
+                   '{"shell_template": "dose {{ml}}ml"}')"""
     )
     conn.commit()
     conn.close()
@@ -81,24 +82,28 @@ def test_irreversible_action_requires_approval_over_http(fake_device, daemon, db
     host, port, host_key_authorized_key = fake_device
     seed_nutrient_doser(db_path, host, port, host_key_authorized_key, tmp_path)
 
+    params = {"ml": "5"}
+
     # No ticket at all: fails closed with the daemon's fail-closed error.
     with pytest.raises(ActuationError):
-        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml")
+        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", params)
 
     # Request approval — a real ticket, created via the daemon's API,
-    # using only the agent token.
+    # using only the agent token, bound to this exact action.
     ticket_id = request_approval(
         daemon.base_url,
         daemon.agent_token,
-        action={"device_action_id": "nutrient-doser.dispense_ml", "reason": "scheduled feeding"},
+        device_action_id="nutrient-doser.dispense_ml",
+        params=params,
         risk="irreversible",
+        reason="scheduled feeding",
     )
     assert ticket_id
 
     # Unapproved ticket: still fails closed.
     assert is_approved(daemon.base_url, daemon.agent_token, ticket_id) is False
     with pytest.raises(ActuationError):
-        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml", ticket_id=ticket_id)
+        actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", params, ticket_id=ticket_id)
 
     # The agent CANNOT approve its own ticket — the daemon refuses the
     # agent token on this endpoint regardless of what approved_by claims.
@@ -112,7 +117,7 @@ def test_irreversible_action_requires_approval_over_http(fake_device, daemon, db
 
     # Now it proceeds.
     assert is_approved(daemon.base_url, daemon.agent_token, ticket_id) is True
-    result = actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", "dose 5ml", ticket_id=ticket_id)
+    result = actuate_device(daemon.base_url, daemon.agent_token, "nutrient-doser.dispense_ml", params, ticket_id=ticket_id)
     assert result == "ok"
 
     # An irreversible action's effect must record no inverse — nothing to

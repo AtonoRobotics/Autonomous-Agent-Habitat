@@ -18,9 +18,11 @@ func TestExecuteTracedRecordsSuccessSpan(t *testing.T) {
 	ctx := context.Background()
 
 	_, err := db.Exec(`INSERT INTO device_action
-		(id, device_id, name, reversible, inverse_template, verified_at)
-		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
+		(id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
+		VALUES (?, 'vent-actuator', 'set_open_pct', 1, ?, ?, ?, strftime('%Y-%m-%dT%H:%M:%fZ','now'))`,
 		"vent-actuator.set_open_pct",
+		`{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}`,
+		`{"shell_template": "vent-ctl get-open-pct"}`,
 		`{"shell_template": "vent-ctl set-open-pct {{prior}}"}`,
 	)
 	if err != nil {
@@ -37,8 +39,7 @@ func TestExecuteTracedRecordsSuccessSpan(t *testing.T) {
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 
 	result, err := ExecuteTraced(ctx, tp, db, act, gate, "vent-actuator.set_open_pct", Command{
-		Forward:   "vent-ctl set-open-pct 60",
-		ReadState: "vent-ctl get-open-pct",
+		Params: map[string]string{"open_pct": "60"},
 	}, nil)
 	if err != nil {
 		t.Fatalf("ExecuteTraced: %v", err)
@@ -76,8 +77,10 @@ func TestExecuteTracedRecordsErrorSpan(t *testing.T) {
 	seedConnectorAndDevice(t, db)
 	ctx := context.Background()
 
-	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
+	_, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, ?)`,
+		`{"shell_template": "dose {{ml}}ml"}`,
+	)
 	if err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
@@ -88,7 +91,7 @@ func TestExecuteTracedRecordsErrorSpan(t *testing.T) {
 	exporter := tracetest.NewInMemoryExporter()
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
 
-	_, err = ExecuteTraced(ctx, tp, db, act, gate, "vent-actuator.dispense_ml", Command{Forward: "dose 5ml"}, nil)
+	_, err = ExecuteTraced(ctx, tp, db, act, gate, "vent-actuator.dispense_ml", Command{Params: map[string]string{"ml": "5"}}, nil)
 	if err != ErrNoAutonomyPath {
 		t.Fatalf("expected ErrNoAutonomyPath, got %v", err)
 	}

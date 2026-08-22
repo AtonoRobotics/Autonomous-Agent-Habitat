@@ -1,7 +1,9 @@
 package store
 
 import (
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -31,7 +33,27 @@ func TestOpenAppliesMigrationsAndIsIdempotent(t *testing.T) {
 	if err := db2.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if applied != 2 {
-		t.Fatalf("expected exactly 2 recorded migrations, got %d", applied)
+	want := countSQLFiles(t, migrationsDir)
+	if applied != want {
+		t.Fatalf("expected exactly %d recorded migrations (one per *.sql file in %s), got %d — re-opening must not re-apply or skip any", want, migrationsDir, applied)
 	}
+}
+
+// countSQLFiles counts *.sql files directly rather than hardcoding a
+// literal count, so this test keeps proving idempotency (not "re-applying
+// migrations" and not "silently dropping one") without needing an edit
+// every time a new migration file is added.
+func countSQLFiles(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read migrations dir: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".sql") {
+			n++
+		}
+	}
+	return n
 }

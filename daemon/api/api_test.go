@@ -158,8 +158,10 @@ func seedVentDeviceAction(t *testing.T, db *sql.DB, device ...string) string {
 	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')"); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	_, err = db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, inverse_template, verified_at)
+	_, err = db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
 		VALUES ('vent-actuator.set_open_pct', 'vent-actuator', 'set_open_pct', 1,
+		        '{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}',
+		        '{"shell_template": "vent-ctl get-open-pct"}',
 		        '{"shell_template": "vent-ctl set-open-pct {{prior}}"}',
 		        strftime('%Y-%m-%dT%H:%M:%fZ','now'))`)
 	if err != nil {
@@ -204,8 +206,8 @@ func seedIrreversibleDeviceAction(t *testing.T, db *sql.DB) string {
 	if _, err := db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('nutrient-doser', 'doser', 'nutrient-doser-connector')"); err != nil {
 		t.Fatalf("seed device: %v", err)
 	}
-	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible)
-		VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0)`); err != nil {
+	if _, err := db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template)
+		VALUES ('nutrient-doser.dispense_ml', 'nutrient-doser', 'dispense_ml', 0, '{"shell_template": "dose {{ml}}ml"}')`); err != nil {
 		t.Fatalf("seed device_action: %v", err)
 	}
 	return "nutrient-doser.dispense_ml"
@@ -220,9 +222,8 @@ func TestHandleActuate_RealSSHRoundTripOverHTTP(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	reqBody, _ := json.Marshal(map[string]string{
-		"forward":    "vent-ctl set-open-pct 60",
-		"read_state": "vent-ctl get-open-pct",
+	reqBody, _ := json.Marshal(map[string]any{
+		"params": map[string]string{"open_pct": "60"},
 	})
 	resp := postJSON(t, ts.URL+"/v1/device-actions/"+deviceActionID+"/actuate", testAgentToken, reqBody)
 	defer resp.Body.Close()
@@ -264,14 +265,14 @@ func TestHandleActuate_UnreversibleWithoutTicketIsForbidden(t *testing.T) {
 	configJSON, _ := json.Marshal(cfg)
 	db.Exec("INSERT INTO connector (id, type, auth, config) VALUES ('greenhouse-vent', 'ssh', 'none', ?)", string(configJSON))
 	db.Exec("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')")
-	db.Exec(`INSERT INTO device_action (id, device_id, name, reversible) VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0)`)
+	db.Exec(`INSERT INTO device_action (id, device_id, name, reversible, forward_template) VALUES ('vent-actuator.dispense_ml', 'vent-actuator', 'dispense_ml', 0, '{"shell_template": "dose {{ml}}ml"}')`)
 
 	tp := sdktrace.NewTracerProvider()
 	server := New("", db, tp, testAuth(t), nil, t.TempDir(), nil)
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	reqBody, _ := json.Marshal(map[string]string{"forward": "dose 5ml"})
+	reqBody, _ := json.Marshal(map[string]any{"params": map[string]string{"ml": "5"}})
 	resp := postJSON(t, ts.URL+"/v1/device-actions/vent-actuator.dispense_ml/actuate", testAgentToken, reqBody)
 	defer resp.Body.Close()
 
@@ -289,7 +290,7 @@ func TestHandleActuate_RejectsRequestsWithNoToken(t *testing.T) {
 	ts := httptest.NewServer(server.Handler())
 	defer ts.Close()
 
-	reqBody, _ := json.Marshal(map[string]string{"forward": "vent-ctl set-open-pct 60", "read_state": "vent-ctl get-open-pct"})
+	reqBody, _ := json.Marshal(map[string]any{"params": map[string]string{"open_pct": "60"}})
 	resp := postJSON(t, ts.URL+"/v1/device-actions/"+deviceActionID+"/actuate", "", reqBody)
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusUnauthorized {

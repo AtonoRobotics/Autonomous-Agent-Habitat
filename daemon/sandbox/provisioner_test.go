@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
 )
@@ -69,6 +71,92 @@ func TestCreate_ProcessIsolation_LaunchesRealNamespacedProcess(t *testing.T) {
 	}
 	if _, err := os.Stat(c.Workdir); err != nil {
 		t.Fatalf("expected workdir to survive Destroy (artifacts outlive the compute instance): %v", err)
+	}
+}
+
+// TestCreate_ProcessIsolation_HardensFilesystemAndDropsPrivileges guards
+// against the real gap PR #3's review found: a process-isolated computer
+// used to run its target command with the daemon's own full root
+// identity and an unrestricted view of the host filesystem — `unshare
+// --mount` alone gives a new mount namespace, not a sandboxed one. This
+// proves both halves of the fix hold in a real launched process, not
+// just in the script's own text: the command executes as an unprivileged
+// UID (never 0), and a write that would otherwise succeed for root
+// (writing into /tmp, world-writable, on the same filesystem as / in
+// this test environment) is refused once the mount namespace's root is
+// read-only — while the computer's own workdir remains fully writable.
+func TestCreate_ProcessIsolation_HardensFilesystemAndDropsPrivileges(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("this test proves root-level access is actually restricted — meaningless unless the test process itself runs as root, matching this package's documented deployment assumption")
+	}
+
+	db := testDB(t)
+	seedAgent(t, db, "agent-1")
+	// Deliberately not t.TempDir(): its parent directories are created
+	// 0700, which would block the unprivileged "nobody" identity from
+	// even traversing down to baseDir regardless of baseDir's own mode —
+	// a permission-chain problem this test needs to avoid, not exercise.
+	// os.MkdirTemp("", ...) creates directly under os.TempDir() (/tmp),
+	// which is itself world-traversable.
+	baseDir, err := os.MkdirTemp("", "amh-sandbox-hardening-test-")
+	if err != nil {
+		t.Fatalf("create base dir: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(baseDir) })
+	if err := os.Chmod(baseDir, 0o755); err != nil {
+		t.Fatalf("chmod base dir: %v", err)
+	}
+
+	probePath := filepath.Join(baseDir, "probe.sh")
+	outsideTarget := filepath.Join(os.TempDir(), "amh-sandbox-hardening-probe-"+t.Name())
+	os.Remove(outsideTarget) // best-effort: a leftover from a prior failed run must not produce a false pass
+	script := "#!/bin/sh\n" +
+		`id -u > "$PWD/uid.txt"` + "\n" +
+		`if echo blocked > ` + outsideTarget + ` 2>/dev/null; then echo WROTE > "$PWD/write-result.txt"; else echo BLOCKED > "$PWD/write-result.txt"; fi` + "\n" +
+		`echo ready > "$PWD/ready.txt"` + "\n" +
+		`exec sleep 300` + "\n"
+	if err := os.WriteFile(probePath, []byte(script), 0o755); err != nil {
+		t.Fatalf("write probe script: %v", err)
+	}
+	t.Cleanup(func() { os.Remove(outsideTarget) })
+
+	p := New(db, baseDir)
+	ctx := context.Background()
+	c, err := p.Create(ctx, "agent-1", IsolationProcess, probePath, nil)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	t.Cleanup(func() { p.Destroy(ctx, c.ID, "test cleanup") })
+
+	readyPath := filepath.Join(c.Workdir, "ready.txt")
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, err := os.Stat(readyPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("probe script never finished (no %s within 5s)", readyPath)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	uidBytes, err := os.ReadFile(filepath.Join(c.Workdir, "uid.txt"))
+	if err != nil {
+		t.Fatalf("read uid.txt: %v", err)
+	}
+	if got := strings.TrimSpace(string(uidBytes)); got != unprivilegedUID {
+		t.Fatalf("expected the target command to run as uid %s (nobody), got %q", unprivilegedUID, got)
+	}
+
+	writeResult, err := os.ReadFile(filepath.Join(c.Workdir, "write-result.txt"))
+	if err != nil {
+		t.Fatalf("read write-result.txt: %v", err)
+	}
+	if got := strings.TrimSpace(string(writeResult)); got != "BLOCKED" {
+		t.Fatalf("expected the write outside the workdir to be blocked by the read-only remount, got %q", got)
+	}
+	if _, err := os.Stat(outsideTarget); err == nil {
+		t.Fatalf("the target command actually wrote %s on the host — isolation did not hold", outsideTarget)
 	}
 }
 

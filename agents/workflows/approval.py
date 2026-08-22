@@ -39,17 +39,35 @@ class ApprovalError(Exception):
 
 
 @DBOS.step()
-def request_approval(daemon_api_base_url: str, agent_token: str, action: dict, risk: str) -> str:
-    """Creates an approval_gate ticket and returns its ID. risk must be
+def request_approval(
+    daemon_api_base_url: str,
+    agent_token: str,
+    device_action_id: str,
+    params: dict[str, str],
+    risk: str,
+    reason: str = "",
+) -> str:
+    """Creates an approval_gate ticket bound to one exact
+    (device_action_id, params) action and returns its ID. risk must be
     'reversible' or 'irreversible' (mirrors interlocks.Risk on the Go
-    side)."""
+    side). reason is free-text audit context only — it has no bearing on
+    what the ticket actually authorizes (see daemon/interlocks.Require's
+    doc comment): a caller must later actuate with this exact
+    device_action_id and params, or the daemon refuses the ticket
+    (interlocks.ErrActionMismatch), and the ticket is consumed on its
+    first successful use (interlocks.ErrTicketAlreadyUsed on replay)."""
     if risk not in ("reversible", "irreversible"):
         raise ValueError(f"risk must be 'reversible' or 'irreversible', got {risk!r}")
 
     url = f"{daemon_api_base_url}/v1/approval-gates"
     request = urllib.request.Request(
         url,
-        data=json.dumps({"action": action, "risk": risk}).encode("utf-8"),
+        data=json.dumps({
+            "device_action_id": device_action_id,
+            "params": params,
+            "reason": reason,
+            "risk": risk,
+        }).encode("utf-8"),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {agent_token}"},
         method="POST",
     )

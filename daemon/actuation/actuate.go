@@ -12,6 +12,16 @@
 // (docs/AMH-SPECIFICATION.md §8, §13, §16), this entire package —
 // physical device actuation — belongs in a separate Physical AI
 // extension, not AMH core; it has not yet been moved there.
+//
+// Command provenance: a caller supplies only named parameter values
+// (Command.Params), never shell text. The actual forward and read-state
+// shell commands are rendered server-side from the target device_action's
+// own forward_template/read_state_template — the same design
+// inverse_template already used. This is deliberate, not incidental: it's
+// what makes "verified reversible" and "ticket approved for this action"
+// mean something concrete tied to what the daemon will actually execute,
+// rather than trusting whatever shell text a caller happened to send in
+// that particular request.
 package actuation
 
 import (
@@ -20,6 +30,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/google/uuid"
@@ -38,20 +49,44 @@ type Actuator interface {
 	RunShell(ctx context.Context, command string) (string, error)
 }
 
-// Command carries the rendered shell command(s) for one actuation. ReadState
-// is only used (and only required) when the target DeviceAction is
-// reversible and verified — it supplies the prior value the inverse is
-// built from.
+// Command carries the caller-supplied parameter values for one actuation
+// — never shell text. Values are substituted into the target
+// device_action's own forward_template/read_state_template (see
+// renderTemplate) after passing paramValuePattern, so a parameter can
+// never inject shell metacharacters into the command the daemon actually
+// runs; the template's author, not the caller, controls the command's
+// structure.
 type Command struct {
-	Forward   string
-	ReadState string
+	Params map[string]string
+}
+
+// paramValuePattern is deliberately restrictive: letters, digits, and a
+// small set of punctuation common to IDs, percentages, and paths — never
+// shell metacharacters (;|&`$(){}<>'"\ or whitespace). A device_action
+// that genuinely needs a richer parameter value is better served by a
+// more specific template than by loosening this.
+var paramValuePattern = regexp.MustCompile(`^[A-Za-z0-9_.:/=-]*$`)
+
+// ErrInvalidParam is returned when a caller-supplied parameter value
+// fails paramValuePattern.
+var ErrInvalidParam = errors.New("actuation: parameter value contains disallowed characters")
+
+func validateParams(params map[string]string) error {
+	for k, v := range params {
+		if !paramValuePattern.MatchString(v) {
+			return fmt.Errorf("%w: param %q", ErrInvalidParam, k)
+		}
+	}
+	return nil
 }
 
 type deviceAction struct {
-	id              string
-	reversible      bool
-	inverseTemplate sql.NullString
-	verifiedAt      sql.NullString
+	id                string
+	reversible        bool
+	forwardTemplate   sql.NullString
+	readStateTemplate sql.NullString
+	inverseTemplate   sql.NullString
+	verifiedAt        sql.NullString
 }
 
 // ErrNoAutonomyPath is returned when a DeviceAction has no verified
@@ -83,38 +118,46 @@ func ExecuteTraced(ctx context.Context, tp oteltrace.TracerProvider, db *sql.DB,
 // same order as Artifact F:
 //  1. verified inverse -> autonomous, inverse recorded, no gate
 //  2. approved & unrevoked SafetyCase -> autonomous, monitored, no gate
-//  3. otherwise -> the supplied ticket must already be approved
+//  3. otherwise -> the supplied ticket must already be approved for this
+//     exact (deviceActionID, params) action, and is consumed on success
+//
+// Every path follows the same journal-first discipline: a 'pending'
+// device_effect row is durably recorded BEFORE the forward command runs,
+// then transitioned to 'success' or 'unknown' afterward. A journal-write
+// failure therefore blocks the physical effect (fails closed) instead of
+// following a physical effect that already happened with nothing to show
+// for it — the gap PR #3's review found.
 func Execute(ctx context.Context, db *sql.DB, act Actuator, gate *interlocks.Gate, deviceActionID string, cmd Command, ticket *interlocks.Ticket) (string, error) {
+	if err := validateParams(cmd.Params); err != nil {
+		return "", err
+	}
+
 	da, err := loadDeviceAction(ctx, db, deviceActionID)
 	if err != nil {
 		return "", err
 	}
+	forwardShell, err := renderTemplate(da.forwardTemplate.String, cmd.Params)
+	if err != nil {
+		return "", fmt.Errorf("actuation: render forward command: %w", err)
+	}
 
 	if da.reversible && da.verifiedAt.Valid {
-		if cmd.ReadState == "" {
-			return "", fmt.Errorf("actuation: %s is reversible+verified but no ReadState command was supplied", deviceActionID)
+		readStateShell, err := renderTemplate(da.readStateTemplate.String, cmd.Params)
+		if err != nil {
+			return "", fmt.Errorf("actuation: render read-state command: %w", err)
 		}
-		priorState, err := act.RunShell(ctx, cmd.ReadState)
+		priorState, err := act.RunShell(ctx, readStateShell)
 		if err != nil {
 			return "", fmt.Errorf("actuation: read prior state: %w", err)
 		}
 		// Render and validate the inverse from priorState before invoking
 		// the forward command — a malformed inverse_template must be
-		// caught before the physical effect happens, not after, so a
-		// rendering failure never leaves an unrecorded, un-reversible
-		// effect on the device.
-		inverseShell, err := renderInverse(da.inverseTemplate.String, priorState)
+		// caught before the physical effect happens, not after.
+		inverseShell, err := renderTemplate(da.inverseTemplate.String, map[string]string{"prior": priorState})
 		if err != nil {
 			return "", fmt.Errorf("actuation: render inverse: %w", err)
 		}
-		result, err := act.RunShell(ctx, cmd.Forward)
-		if err != nil {
-			return "", fmt.Errorf("actuation: invoke: %w", err)
-		}
-		if err := recordEffect(ctx, db, da.id, cmd.Forward, &inverseShell, "success"); err != nil {
-			return "", err
-		}
-		return result, nil
+		return runJournaled(ctx, db, act, da.id, forwardShell, &inverseShell)
 	}
 
 	approved, err := hasApprovedSafetyCase(ctx, db, deviceActionID)
@@ -122,29 +165,43 @@ func Execute(ctx context.Context, db *sql.DB, act Actuator, gate *interlocks.Gat
 		return "", err
 	}
 	if approved {
-		result, err := act.RunShell(ctx, cmd.Forward)
-		if err != nil {
-			return "", fmt.Errorf("actuation: invoke: %w", err)
-		}
-		if err := recordEffect(ctx, db, da.id, cmd.Forward, nil, "success"); err != nil {
-			return "", err
-		}
-		return result, nil
+		return runJournaled(ctx, db, act, da.id, forwardShell, nil)
 	}
 
 	if ticket == nil {
 		return "", ErrNoAutonomyPath
 	}
-	if err := gate.Enforce(ctx, *ticket); err != nil {
+	if err := gate.Enforce(ctx, *ticket, deviceActionID, cmd.Params); err != nil {
 		return "", fmt.Errorf("actuation: %w", err)
 	}
-	result, err := act.RunShell(ctx, cmd.Forward)
+	return runJournaled(ctx, db, act, da.id, forwardShell, nil)
+}
+
+// runJournaled persists a 'pending' device_effect row, runs the forward
+// command, and transitions that row to 'success' or 'unknown' — never
+// leaving a physical effect that ran with no durable record of it, and
+// never running the forward command if the pending row can't be written
+// in the first place (see Execute's doc comment).
+func runJournaled(ctx context.Context, db *sql.DB, act Actuator, deviceActionID, forwardShell string, inverseShell *string) (string, error) {
+	effectID, err := recordPendingEffect(ctx, db, deviceActionID, forwardShell, inverseShell)
 	if err != nil {
-		return "", fmt.Errorf("actuation: invoke: %w", err)
-	}
-	if err := recordEffect(ctx, db, da.id, cmd.Forward, nil, "success"); err != nil {
 		return "", err
 	}
+	result, err := act.RunShell(ctx, forwardShell)
+	if err != nil {
+		// The command errored, but per the SSH exec channel's own
+		// semantics that doesn't prove the device never received it —
+		// record 'unknown', never silently drop back to 'pending' or
+		// assume nothing happened.
+		markEffectOutcome(ctx, db, effectID, "unknown")
+		return "", fmt.Errorf("actuation: invoke: %w", err)
+	}
+	// Best-effort: the physical effect already genuinely succeeded, so a
+	// failure updating this row to 'success' must not be reported to the
+	// caller as an actuation failure (that's the exact bug being fixed) —
+	// the row is left durably 'pending', which is itself a legitimate
+	// signal for reconciliation to pick up, rather than lost entirely.
+	markEffectOutcome(ctx, db, effectID, "success")
 	return result, nil
 }
 
@@ -200,8 +257,8 @@ func loadDeviceAction(ctx context.Context, db *sql.DB, id string) (*deviceAction
 	da := &deviceAction{id: id}
 	var reversible int
 	err := db.QueryRowContext(ctx,
-		`SELECT reversible, inverse_template, verified_at FROM device_action WHERE id = ?`, id,
-	).Scan(&reversible, &da.inverseTemplate, &da.verifiedAt)
+		`SELECT reversible, forward_template, read_state_template, inverse_template, verified_at FROM device_action WHERE id = ?`, id,
+	).Scan(&reversible, &da.forwardTemplate, &da.readStateTemplate, &da.inverseTemplate, &da.verifiedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("actuation: device_action %s not found", id)
 	}
@@ -237,47 +294,61 @@ func hasApprovedSafetyCase(ctx context.Context, db *sql.DB, subjectID string) (b
 	return n > 0, nil
 }
 
-// renderInverse substitutes {{prior}} in the stored template's "shell_template"
-// JSON field with the observed prior state. One substitution variable is
-// what every currently-supported reversible device_action needs; a
-// device type whose inverse depends on more than the single prior-state
-// read would need this template grammar extended.
-func renderInverse(templateJSON, priorState string) (string, error) {
+// renderTemplate substitutes each {{key}} in templateJSON's
+// "shell_template" field with vars[key]. Used for forward_template and
+// read_state_template (vars = the caller's validated Command.Params) and
+// for inverse_template (vars = {"prior": <observed prior state>}) — one
+// substitution grammar for every template a device_action owns.
+func renderTemplate(templateJSON string, vars map[string]string) (string, error) {
 	if templateJSON == "" {
-		return "", fmt.Errorf("device_action has reversible=true but no inverse_template")
+		return "", fmt.Errorf("template is not configured")
 	}
 	var tmpl struct {
 		ShellTemplate string `json:"shell_template"`
 	}
 	if err := json.Unmarshal([]byte(templateJSON), &tmpl); err != nil {
-		return "", fmt.Errorf("parse inverse_template: %w", err)
+		return "", fmt.Errorf("parse template: %w", err)
 	}
 	if tmpl.ShellTemplate == "" {
-		return "", fmt.Errorf("inverse_template missing shell_template")
+		return "", fmt.Errorf("template missing shell_template")
 	}
-	return strings.ReplaceAll(tmpl.ShellTemplate, "{{prior}}", priorState), nil
+	rendered := tmpl.ShellTemplate
+	for k, v := range vars {
+		rendered = strings.ReplaceAll(rendered, "{{"+k+"}}", v)
+	}
+	return rendered, nil
 }
 
-func recordEffect(ctx context.Context, db *sql.DB, deviceActionID, forwardShell string, inverseShell *string, outcome string) error {
+// recordPendingEffect durably records the intent to run forwardShell
+// BEFORE it runs — see runJournaled and Execute's doc comment.
+func recordPendingEffect(ctx context.Context, db *sql.DB, deviceActionID, forwardShell string, inverseShell *string) (string, error) {
 	forwardPayload, err := json.Marshal(map[string]string{"shell": forwardShell})
 	if err != nil {
-		return fmt.Errorf("actuation: marshal forward_payload: %w", err)
+		return "", fmt.Errorf("actuation: marshal forward_payload: %w", err)
 	}
 	var inversePayload any
 	if inverseShell != nil {
 		b, err := json.Marshal(map[string]string{"shell": *inverseShell})
 		if err != nil {
-			return fmt.Errorf("actuation: marshal inverse_payload: %w", err)
+			return "", fmt.Errorf("actuation: marshal inverse_payload: %w", err)
 		}
 		inversePayload = string(b)
 	}
+	id := uuid.NewString()
 	_, err = db.ExecContext(ctx,
 		`INSERT INTO device_effect (id, device_action_id, forward_payload, inverse_payload, outcome)
-		 VALUES (?, ?, ?, ?, ?)`,
-		uuid.NewString(), deviceActionID, string(forwardPayload), inversePayload, outcome,
+		 VALUES (?, ?, ?, ?, 'pending')`,
+		id, deviceActionID, string(forwardPayload), inversePayload,
 	)
 	if err != nil {
-		return fmt.Errorf("actuation: insert device_effect: %w", err)
+		return "", fmt.Errorf("actuation: insert pending device_effect: %w", err)
 	}
-	return nil
+	return id, nil
+}
+
+func markEffectOutcome(ctx context.Context, db *sql.DB, effectID, outcome string) {
+	// Best-effort by design (see runJournaled): a failure here must not
+	// turn into an actuation error for an already-successful physical
+	// effect. The row is left at its last durable state either way.
+	db.ExecContext(ctx, `UPDATE device_effect SET outcome = ? WHERE id = ?`, outcome, effectID)
 }

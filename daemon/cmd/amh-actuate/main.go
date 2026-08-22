@@ -44,21 +44,24 @@ func main() {
 	host := flag.String("host", "127.0.0.1", "SSH device host")
 	port := flag.Int("port", 22, "SSH device port")
 	user := flag.String("user", "amh", "SSH user")
-	forward := flag.String("forward", "", "forward shell command")
-	readState := flag.String("read-state", "", "read-state shell command (required for verified-reversible actions)")
+	params := flag.String("params", "{}", `JSON object of named parameter values substituted into the device_action's own forward_template/read_state_template — e.g. '{"open_pct":"60"}'. Never raw shell text: the daemon renders the actual command server-side from the device_action's stored template.`)
 	ticketID := flag.String("ticket-id", "", "approval_gate ticket ID (required unless the action is verified-reversible or has an approved SafetyCase)")
 	insecure := flag.Bool("insecure-skip-host-key-verify", false, "TEST FIXTURE ONLY: skip host key verification")
 	flag.Parse()
 
-	if err := run(*dbPath, *migrationsDir, *deviceActionID, *host, *port, *user, *forward, *readState, *ticketID, *insecure); err != nil {
+	if err := run(*dbPath, *migrationsDir, *deviceActionID, *host, *port, *user, *params, *ticketID, *insecure); err != nil {
 		json.NewEncoder(os.Stdout).Encode(output{Error: err.Error()})
 		os.Exit(1)
 	}
 }
 
-func run(dbPath, migrationsDir, deviceActionID, host string, port int, user, forward, readState, ticketID string, insecure bool) error {
-	if dbPath == "" || deviceActionID == "" || forward == "" {
-		return fmt.Errorf("--db, --device-action-id, and --forward are required")
+func run(dbPath, migrationsDir, deviceActionID, host string, port int, user, paramsJSON, ticketID string, insecure bool) error {
+	if dbPath == "" || deviceActionID == "" {
+		return fmt.Errorf("--db and --device-action-id are required")
+	}
+	var params map[string]string
+	if err := json.Unmarshal([]byte(paramsJSON), &params); err != nil {
+		return fmt.Errorf("--params is not a valid JSON object: %w", err)
 	}
 
 	db, err := store.Open(dbPath, migrationsDir)
@@ -103,8 +106,7 @@ func run(dbPath, migrationsDir, deviceActionID, host string, port int, user, for
 
 	ctx := context.Background()
 	result, err := actuation.ExecuteTraced(ctx, tp, db, conn, gate, deviceActionID, actuation.Command{
-		Forward:   forward,
-		ReadState: readState,
+		Params: params,
 	}, ticket)
 	if err != nil {
 		return err

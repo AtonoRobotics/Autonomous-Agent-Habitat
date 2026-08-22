@@ -10,7 +10,9 @@ package interlocks
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -31,9 +33,20 @@ type Ticket struct {
 	ID string
 }
 
-// ErrNotSatisfied is returned by Enforce when a ticket has not yet been
-// approved — the caller must not proceed with the gated action.
-var ErrNotSatisfied = errors.New("interlocks: approval not satisfied")
+var (
+	// ErrNotSatisfied is returned by Enforce when a ticket has not yet
+	// been approved — the caller must not proceed with the gated action.
+	ErrNotSatisfied = errors.New("interlocks: approval not satisfied")
+	// ErrActionMismatch is returned by Enforce when the ticket was
+	// approved for a different device_action or a different set of
+	// parameters than the one actually being requested — an approved
+	// ticket authorizes only the exact action it was requested for.
+	ErrActionMismatch = errors.New("interlocks: ticket does not match the requested action")
+	// ErrTicketAlreadyUsed is returned by Enforce on a ticket that has
+	// already been consumed by a prior successful Enforce call — a
+	// ticket authorizes exactly one actuation, not unlimited replays.
+	ErrTicketAlreadyUsed = errors.New("interlocks: ticket has already been used")
+)
 
 type Gate struct {
 	DB *sql.DB
@@ -43,19 +56,44 @@ func New(db *sql.DB) *Gate {
 	return &Gate{DB: db}
 }
 
-// Require persists a new approval_gate row for the given action and
-// returns a ticket. It does not block — approval is granted out-of-band
-// (an operator, or later an agent-external reviewer for a SafetyCase) by
-// calling Approve with the same ticket ID.
-func (g *Gate) Require(ctx context.Context, action any, risk Risk) (Ticket, error) {
-	actionJSON, err := json.Marshal(action)
+// actionDigest is a deterministic fingerprint of exactly what a ticket
+// covers: one device_action, with one specific set of rendered
+// parameters. Require stores it at approval-request time; Enforce
+// recomputes it from the actual actuation request and refuses to proceed
+// on a mismatch — an approved ticket authorizes only the one action it
+// was requested for, never a substitute. json.Marshal of a Go map is
+// deterministic (keys sorted), so the same (deviceActionID, params) pair
+// always produces the same digest regardless of map iteration order.
+func actionDigest(deviceActionID string, params map[string]string) string {
+	payload, _ := json.Marshal(struct {
+		DeviceActionID string            `json:"device_action_id"`
+		Params         map[string]string `json:"params"`
+	}{deviceActionID, params})
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+// Require persists a new approval_gate row scoped to one device action and
+// its exact parameters, and returns a ticket. reason is free-text audit
+// context only (e.g. "scheduled feeding") — it has no bearing on
+// action_digest, so it never affects what Enforce will accept. It does
+// not block — approval is granted out-of-band (an operator, or later an
+// agent-external reviewer for a SafetyCase) by calling Approve with the
+// same ticket ID.
+func (g *Gate) Require(ctx context.Context, deviceActionID string, params map[string]string, reason string, risk Risk) (Ticket, error) {
+	digest := actionDigest(deviceActionID, params)
+	actionJSON, err := json.Marshal(struct {
+		DeviceActionID string            `json:"device_action_id"`
+		Params         map[string]string `json:"params"`
+		Reason         string            `json:"reason,omitempty"`
+	}{deviceActionID, params, reason})
 	if err != nil {
 		return Ticket{}, fmt.Errorf("interlocks: marshal action: %w", err)
 	}
 	id := uuid.NewString()
 	_, err = g.DB.ExecContext(ctx,
-		`INSERT INTO approval_gate (id, action, risk) VALUES (?, ?, ?)`,
-		id, string(actionJSON), string(risk),
+		`INSERT INTO approval_gate (id, action, risk, action_digest) VALUES (?, ?, ?, ?)`,
+		id, string(actionJSON), string(risk), digest,
 	)
 	if err != nil {
 		return Ticket{}, fmt.Errorf("interlocks: insert approval_gate: %w", err)
@@ -100,16 +138,49 @@ func (g *Gate) IsSatisfied(ctx context.Context, ticket Ticket) (bool, error) {
 	return approvedAt.Valid, nil
 }
 
-// Enforce is a convenience that returns ErrNotSatisfied unless the ticket
-// has been approved — callers use this immediately before executing a
-// gated action.
-func (g *Gate) Enforce(ctx context.Context, ticket Ticket) error {
-	ok, err := g.IsSatisfied(ctx, ticket)
-	if err != nil {
-		return err
+// Enforce checks that ticket has been approved for exactly this
+// (deviceActionID, params) action — not merely approved for something —
+// and atomically consumes it (single-use) so it cannot be replayed for a
+// later, unrelated actuation. Callers use this immediately before
+// executing a gated action; the caller must pass the actual action about
+// to run, not a value it merely hopes matches what was approved.
+func (g *Gate) Enforce(ctx context.Context, ticket Ticket, deviceActionID string, params map[string]string) error {
+	var approvedAt, usedAt sql.NullString
+	var storedDigest string
+	err := g.DB.QueryRowContext(ctx,
+		`SELECT approved_at, used_at, action_digest FROM approval_gate WHERE id = ?`, ticket.ID,
+	).Scan(&approvedAt, &usedAt, &storedDigest)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("interlocks: ticket %s not found", ticket.ID)
 	}
-	if !ok {
+	if err != nil {
+		return fmt.Errorf("interlocks: query ticket: %w", err)
+	}
+	if !approvedAt.Valid {
 		return fmt.Errorf("%w: ticket %s", ErrNotSatisfied, ticket.ID)
+	}
+	if usedAt.Valid {
+		return fmt.Errorf("%w: ticket %s", ErrTicketAlreadyUsed, ticket.ID)
+	}
+	if storedDigest != actionDigest(deviceActionID, params) {
+		return fmt.Errorf("%w: ticket %s was approved for a different action", ErrActionMismatch, ticket.ID)
+	}
+
+	res, err := g.DB.ExecContext(ctx,
+		`UPDATE approval_gate SET used_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ? AND used_at IS NULL`,
+		ticket.ID,
+	)
+	if err != nil {
+		return fmt.Errorf("interlocks: consume ticket: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("interlocks: consume ticket rows affected: %w", err)
+	}
+	if n == 0 {
+		// Lost a race with a concurrent Enforce call between the SELECT
+		// above and this UPDATE — the other caller consumed it first.
+		return fmt.Errorf("%w: ticket %s", ErrTicketAlreadyUsed, ticket.ID)
 	}
 	return nil
 }

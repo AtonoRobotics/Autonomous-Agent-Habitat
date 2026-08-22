@@ -45,8 +45,10 @@ def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, 
     )
     conn.execute("INSERT INTO device (id, kind, connector_id) VALUES ('vent-actuator', 'vent', 'greenhouse-vent')")
     conn.execute(
-        """INSERT INTO device_action (id, device_id, name, reversible, inverse_template, verified_at)
+        """INSERT INTO device_action (id, device_id, name, reversible, forward_template, read_state_template, inverse_template, verified_at)
            VALUES ('vent-actuator.set_open_pct', 'vent-actuator', 'set_open_pct', 1,
+                   '{"shell_template": "vent-ctl set-open-pct {{open_pct}}"}',
+                   '{"shell_template": "vent-ctl get-open-pct"}',
                    '{"shell_template": "vent-ctl set-open-pct {{prior}}"}',
                    strftime('%Y-%m-%dT%H:%M:%fZ','now'))"""
     )
@@ -74,8 +76,7 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_pat
             daemon.base_url,
             daemon.agent_token,
             "vent-actuator.set_open_pct",
-            forward="vent-ctl set-open-pct 60",
-            read_state="vent-ctl get-open-pct",
+            {"open_pct": "60"},
         )
     finally:
         DBOS.destroy()
@@ -139,7 +140,7 @@ def test_greenhouse_scenario_survives_process_restart(fake_device, daemon, db_pa
                 run_greenhouse_scenario,
                 {goal_id!r}, {goal_text!r}, {db_path!r}, {daemon.base_url!r}, {daemon.agent_token!r},
                 "vent-actuator.set_open_pct",
-                "vent-ctl set-open-pct 60", "vent-ctl get-open-pct",
+                {{"open_pct": "60"}},
             )
         import os
         os._exit(1)  # crash before get_result() — simulates the agent process dying mid-flight

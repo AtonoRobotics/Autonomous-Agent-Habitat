@@ -22,6 +22,8 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/mcp"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/scheduler"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/supervisor"
@@ -80,6 +82,19 @@ func main() {
 	}
 	defer db.Close()
 	log.Info("store ready", "migrations", migrationsDir)
+
+	// Acceptance invariant #2 (§15): a crash between DISPATCHED and
+	// OBSERVED must not silently lose the effect — it enters
+	// reconciliation and can remain OUTCOME_UNKNOWN. Run this before
+	// anything else touches operations, so restart is what actually
+	// makes that true, not merely what the code claims. See
+	// daemon/operations.ReconcileInterrupted's doc comment.
+	if reconciled, err := operations.New(db, policy.New(db)).ReconcileInterrupted(context.Background()); err != nil {
+		log.Error("failed to reconcile interrupted effects on startup", "error", err)
+		os.Exit(1)
+	} else if len(reconciled) > 0 {
+		log.Warn("marked interrupted effects outcome_unknown on startup", "count", len(reconciled))
+	}
 
 	sched := scheduler.New(time.Duration(tickMs)*time.Millisecond, log)
 	sched.AddRoutine(func(ctx context.Context, tick time.Time) {

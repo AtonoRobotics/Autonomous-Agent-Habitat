@@ -77,4 +77,3 @@ func TestRestore_RejectsCorruptSnapshot(t *testing.T) {
 		t.Fatalf("expected 400 for a corrupt snapshot, got %d", resp.StatusCode)
 	}
 }
-

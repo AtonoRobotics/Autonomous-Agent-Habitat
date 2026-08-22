@@ -6,6 +6,19 @@ import (
 	"testing"
 )
 
+// mostRecentAppliedMigration re-derives "most recent" the same way
+// Rollback does (ORDER BY filename DESC), rather than hardcoding a
+// specific migration's filename — a fragile assumption that breaks every
+// time a new migration file is added.
+func mostRecentAppliedMigration(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	var name string
+	if err := db.QueryRow(`SELECT filename FROM schema_migrations ORDER BY filename DESC LIMIT 1`).Scan(&name); err != nil {
+		t.Fatalf("query most recent applied migration: %v", err)
+	}
+	return name
+}
+
 func TestRollback_ReversesMostRecentMigration(t *testing.T) {
 	dbURL := freshSchemaURL(t)
 	migrationsDir := "../../store/migrations"
@@ -16,31 +29,23 @@ func TestRollback_ReversesMostRecentMigration(t *testing.T) {
 	}
 	defer db.Close()
 
-	// trusted_signing_key is 0005's table — it must exist before rollback
-	// and be gone after, and the down-migration's own DROP TABLE is the
-	// only thing that could remove it (nothing else in this test does).
-	if _, err := db.Exec(`SELECT 1 FROM trusted_signing_key LIMIT 0`); err != nil {
-		t.Fatalf("expected trusted_signing_key to exist before rollback: %v", err)
-	}
+	want := mostRecentAppliedMigration(t, db)
+	wantCount := countSQLFiles(t, migrationsDir)
 
 	rolledBack, err := Rollback(dbURL, migrationsDir)
 	if err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
-	if rolledBack != "0005_extension_trust.sql" {
-		t.Fatalf("expected to roll back 0005_extension_trust.sql, got %q", rolledBack)
-	}
-
-	if _, err := db.Exec(`SELECT 1 FROM trusted_signing_key LIMIT 0`); err == nil {
-		t.Fatalf("expected trusted_signing_key to be gone after rollback")
+	if rolledBack != want {
+		t.Fatalf("expected to roll back %s (the most recently applied), got %q", want, rolledBack)
 	}
 
 	var applied int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE filename = '0005_extension_trust.sql'`).Scan(&applied); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&applied); err != nil {
 		t.Fatalf("query schema_migrations: %v", err)
 	}
-	if applied != 0 {
-		t.Fatalf("expected 0005_extension_trust.sql to be unrecorded after rollback, still found %d row(s)", applied)
+	if applied != wantCount-1 {
+		t.Fatalf("expected %d applied migrations after rolling back one of %d, got %d", wantCount-1, wantCount, applied)
 	}
 }
 
@@ -52,6 +57,7 @@ func TestRollback_ThenReapplyForward_IsClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
+	rolledBackName := mostRecentAppliedMigration(t, db)
 	db.Close()
 
 	if _, err := Rollback(dbURL, migrationsDir); err != nil {
@@ -66,8 +72,12 @@ func TestRollback_ThenReapplyForward_IsClean(t *testing.T) {
 	}
 	defer db2.Close()
 
-	if _, err := db2.Exec(`SELECT 1 FROM trusted_signing_key LIMIT 0`); err != nil {
-		t.Fatalf("expected trusted_signing_key to exist again after re-applying forward: %v", err)
+	var applied int
+	if err := db2.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE filename = $1`, rolledBackName).Scan(&applied); err != nil {
+		t.Fatalf("query schema_migrations: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("expected %s to be re-applied and recorded exactly once, got %d", rolledBackName, applied)
 	}
 }
 

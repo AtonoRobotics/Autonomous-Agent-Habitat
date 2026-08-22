@@ -258,15 +258,15 @@ The core ontology contains only domain-neutral records:
 
 Memory projections:
 
-- working: active task/context projection;
-- episodic: event projection;
-- semantic: bi-temporal claim graph;
-- procedural: versioned skills and playbooks;
-- entity: profiles assembled from claims and evidence.
+- working: active task/context projection, derived at query time from the core ontology (goal/task/run/event) in PostgreSQL — not a separate store;
+- episodic: event projection, backed by Hindsight (self-hosted, schema-isolated within the same PostgreSQL cluster as the rest of AMH's authoritative state);
+- semantic: bi-temporal claim graph, backed by Neo4j via Graphiti;
+- procedural: versioned skills and playbooks, the core ontology's `skill` table in PostgreSQL;
+- entity: profiles assembled from claims and evidence, backed by Neo4j via Graphiti (entity nodes and their edges).
 
-Semantic claims SHALL preserve both valid time and transaction time, provenance, confidence meaning, contradiction/supersession links, and extraction version.
+Semantic claims SHALL preserve both valid time and transaction time, provenance, confidence meaning, contradiction/supersession links, and extraction version — Graphiti's bi-temporal edges (`created_at`/`expired_at`/`valid_at`/`invalid_at`) and LLM-driven contradiction resolution satisfy this directly.
 
-Knowledge retrieval SHALL combine lexical, vector, and graph retrieval behind ports. SQLite FTS5 and sqlite-vec are V1 implementations, not public contracts. Embedding identity, dimension, model version, chunk version, source digest, and ACL/visibility metadata SHALL be stored with every vector.
+Knowledge retrieval SHALL combine lexical, vector, and graph retrieval behind ports. PostgreSQL (authoritative state) and Neo4j (semantic/entity graph) are the permanent backends behind those ports, not placeholders staged for later replacement: Hindsight's `recall`/`reflect` operations provide lexical+vector retrieval over episodic memory, and Graphiti's `search` provides graph retrieval over the semantic/entity graph, fused at the retrieval port. Embedding identity, dimension, model version, chunk version, source digest, and ACL/visibility metadata SHALL be stored with every vector.
 
 Domain extensions MAY register namespaced entity schemas, relations, indexes, retrieval enrichers, and consolidation rules. Physical geometry and spatial indexes belong to the Physical AI extension.
 
@@ -352,7 +352,7 @@ The extension uses AMH durable workflows, generic action envelope, policy hook, 
 
 - Go daemon as Linux systemd and Windows Service;
 - Python cognition workers managed by `uv` and packaged per target OS;
-- DBOS/SQLite durability qualification;
+- DBOS/PostgreSQL durability qualification;
 - scoped artifact/VFS service and context budget manager;
 - one model provider and one MCP 2026-07-28 client;
 - extension resolver and reversible software effect journal;

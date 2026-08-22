@@ -36,7 +36,9 @@ from dbos import DBOS, Queue
 
 from context.llm import from_env
 from context.observability import agent_run_span, inject_trace_context
+from memory.working import project_working_memory
 from . import ontology
+from .memory_hooks import recall_context, retain_outcome
 
 # Bounded concurrency for subordinate-agent fan-out (docs/AMH-SPECIFICATION.md
 # §14, V1: "isolated subordinate-agent workflows with bounded concurrency").
@@ -69,19 +71,26 @@ to a single-element array. Do not include any text outside the JSON array."""
 
 
 @DBOS.step()
-def decompose_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, agent_token: str) -> list[dict[str, str]]:
+def decompose_goal(
+    goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, agent_token: str, memory_context: str = ""
+) -> list[dict[str, str]]:
     """Decomposes goal_text into tasks via a real model call through the
     daemon's inference seam, parses the model's JSON response, and
     persists each task. Raises context.llm.ModelNotConfiguredError if no
     model provider is registered on the daemon, or ValueError if the
     model's response is not the requested JSON shape — never silently
-    falls back to a fake decomposition."""
+    falls back to a fake decomposition.
+
+    memory_context, when non-empty, is recalled episodic/semantic memory
+    (workflows/memory_hooks.recall_context) prepended to the user message
+    — past goals and known facts relevant to this one, if any were found."""
     ontology.ensure_goal(db_path, goal_id, goal_text)
 
+    user_content = f"{memory_context}\n\n{goal_text}" if memory_context else goal_text
     client = from_env(daemon_api_base_url, agent_token)
     response_text = client.complete(
         system=_DECOMPOSE_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": goal_text}],
+        messages=[{"role": "user", "content": user_content}],
     )
     try:
         parsed = json.loads(response_text)
@@ -114,12 +123,23 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
     context_ref/trace_ref design: the manager never sees the child's full
     transcript unless it asks). This is a single-turn completion, not yet
     an agentic tool-calling loop — see this module's top-level doc
-    comment."""
+    comment.
+
+    Working memory (memory.working.project_working_memory) surfaces the
+    parent goal's text as context — without it, a subagent sees only its
+    own isolated objective and never learns what larger goal it serves."""
     ontology.log_event(db_path, run_id, "subagent.work", {"task_id": task_id, "objective": objective})
+
+    working_memory = project_working_memory(db_path, run_id)
+    if working_memory and working_memory.goal_text:
+        user_content = f"Overall goal: {working_memory.goal_text}\n\nYour task: {objective}"
+    else:
+        user_content = objective
+
     client = from_env(daemon_api_base_url, agent_token)
     result_text = client.complete(
         system=_SUBAGENT_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": objective}],
+        messages=[{"role": "user", "content": user_content}],
     )
     return {"task_id": task_id, "status": "done", "summary": result_text}
 
@@ -186,11 +206,19 @@ def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url:
     child workflows, gathers, synthesizes. If the process dies mid-flight,
     restarting it (with the same DBOS system database) resumes exactly
     where it left off — decompose_goal and any already-completed
-    run_subagent children are not re-run."""
+    run_subagent children are not re-run.
+
+    Recalls episodic/semantic memory (workflows/memory_hooks.recall_context)
+    before decomposing, and retains the outcome (retain_outcome) after
+    synthesizing — best-effort, a no-op when Hindsight/Graphiti aren't
+    configured (see memory_hooks's module docstring)."""
     with agent_run_span(agent_id=goal_id):
-        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token)
+        memory_context = recall_context(goal_text, daemon_api_base_url, agent_token)
+        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token, memory_context)
 
         handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, agent_token) for t in tasks]
         gathered = [h.get_result() for h in handles]
 
-        return synthesize(goal_id, gathered, db_path)
+        summary = synthesize(goal_id, gathered, db_path)
+        retain_outcome(goal_text, summary, daemon_api_base_url, agent_token)
+        return summary

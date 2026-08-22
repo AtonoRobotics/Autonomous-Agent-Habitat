@@ -44,6 +44,25 @@ def test_pursue_goal_runs_to_completion(db_path, daemon, fake_model_server):
     conn.close()
 
 
+def test_do_subagent_work_includes_the_parent_goal_via_working_memory(db_path, daemon, fake_model_server):
+    """do_subagent_work used to see only its own isolated objective — the
+    subagent never learned what larger goal it was contributing to.
+    project_working_memory(db_path, run_id) now surfaces the parent
+    goal's text as real context, not a stand-in string."""
+    from workflows import ontology
+    from workflows.goal import do_subagent_work
+
+    goal_id = str(uuid.uuid4())
+    ontology.ensure_goal(db_path, goal_id, "keep the greenhouse healthy overnight")
+    task_id = ontology.create_task(db_path, goal_id, "open the vent")
+    run_id = ontology.create_run(db_path, task_id)
+
+    result = do_subagent_work(task_id, "open the vent", db_path, run_id, daemon.base_url, daemon.agent_token)
+
+    assert "keep the greenhouse healthy overnight" in result["summary"]
+    assert "open the vent" in result["summary"]
+
+
 def test_pursue_goal_survives_process_restart(db_path, tmp_path, daemon, fake_model_server):
     """Starts pursue_goal *asynchronously* (DBOS.start_workflow) under a
     fixed workflow ID in a subprocess that crashes (os._exit, skipping all

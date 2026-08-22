@@ -28,6 +28,7 @@ from context.compactor import Compactor
 from context.observability import agent_run_span
 from .actuate import actuate_device
 from .goal import decompose_goal, start_subagent, synthesize
+from .memory_hooks import recall_context, retain_outcome
 
 
 def simulate_overnight_polling(poll_count: int = 12) -> dict[str, Any]:
@@ -64,11 +65,15 @@ def run_greenhouse_scenario(
     remaining steps — see test_greenhouse_e2e.py's restart-survival test.
     """
     with agent_run_span(agent_id=goal_id):
-        # Steps 1-2: decompose + isolated sub-agent execution
-        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token)
+        # Steps 1-2: decompose + isolated sub-agent execution, informed by
+        # recalled episodic/semantic memory (best-effort — see
+        # workflows/memory_hooks's module docstring)
+        memory_context = recall_context(goal_text, daemon_api_base_url, agent_token)
+        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token, memory_context)
         handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, agent_token) for t in tasks]
         gathered = [h.get_result() for h in handles]
         summary = synthesize(goal_id, gathered, db_path)
+        retain_outcome(goal_text, summary, daemon_api_base_url, agent_token)
 
         # Step 3: context compaction under sustained polling (in-process, not durable —
         # see module docstring)

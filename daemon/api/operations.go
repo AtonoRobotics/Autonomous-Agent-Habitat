@@ -169,12 +169,21 @@ func (s *Server) handleListEffects(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+type markDispatchPendingRequest struct {
+	Payload any `json:"payload"`
+}
+
 func (s *Server) handleMarkDispatchPending(w http.ResponseWriter, r *http.Request) {
 	effectID := r.PathValue("effectID")
 	if !s.authorizeEffectMutation(w, r, effectID) {
 		return
 	}
-	eff, err := s.Operations.MarkDispatchPending(r.Context(), effectID)
+	var req markDispatchPendingRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, effectResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	eff, err := s.Operations.MarkDispatchPending(r.Context(), effectID, req.Payload)
 	if err != nil {
 		writeJSON(w, operationsErrorStatus(err), effectResponse{Error: err.Error()})
 		return

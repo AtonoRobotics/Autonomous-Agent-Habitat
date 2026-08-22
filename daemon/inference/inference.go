@@ -605,7 +605,7 @@ func trackEffect[T any](ctx context.Context, ops *operations.Engine, effectType,
 	if err != nil {
 		return zero, fmt.Errorf("inference: propose operation: %w", err)
 	}
-	if eff, err = ops.MarkDispatchPending(ctx, eff.EffectID); err != nil {
+	if eff, err = ops.MarkDispatchPending(ctx, eff.EffectID, payload); err != nil {
 		return zero, fmt.Errorf("inference: mark dispatch_pending: %w", err)
 	}
 	if eff, err = ops.MarkDispatched(ctx, eff.EffectID, provider); err != nil {

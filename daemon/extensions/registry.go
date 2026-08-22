@@ -559,7 +559,7 @@ func (r *Registry) trackedLaunch(ctx context.Context, effectType string, payload
 	if err != nil {
 		return "", fmt.Errorf("extensions: propose operation: %w", err)
 	}
-	if eff, err = r.Operations.MarkDispatchPending(ctx, eff.EffectID); err != nil {
+	if eff, err = r.Operations.MarkDispatchPending(ctx, eff.EffectID, payload); err != nil {
 		return "", fmt.Errorf("extensions: mark dispatch_pending: %w", err)
 	}
 	if eff, err = r.Operations.MarkDispatched(ctx, eff.EffectID, ""); err != nil {

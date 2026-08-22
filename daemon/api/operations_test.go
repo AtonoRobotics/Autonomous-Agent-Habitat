@@ -36,6 +36,16 @@ func proposeEffect(t *testing.T, ts *httptest.Server, operationID, reversibility
 	return eff
 }
 
+// dispatchPendingBody is the /dispatch-pending request body — §15
+// invariant #6 means the daemon now hashes whatever payload it's given
+// fresh rather than trusting the digest Propose already stored, so a
+// test walking the real happy path must send back the exact payload
+// that was admitted.
+func dispatchPendingBody(payload any) []byte {
+	body, _ := json.Marshal(map[string]any{"payload": payload})
+	return body
+}
+
 func TestPropose_AdmitsOverHTTP(t *testing.T) {
 	ts := newTestServer(t, false)
 	eff := proposeEffect(t, ts, "op-1", "verified")
@@ -56,7 +66,7 @@ func TestFullHappyPath_OverHTTP(t *testing.T) {
 	ts := newTestServer(t, false)
 	eff := proposeEffect(t, ts, "op-1", "verified")
 
-	dp := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, nil)
+	dp := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, dispatchPendingBody(map[string]any{"op": "op-1"}))
 	if dp.StatusCode != http.StatusOK {
 		t.Fatalf("dispatch-pending: expected 200, got %d", dp.StatusCode)
 	}
@@ -98,10 +108,41 @@ func TestMarkDispatchPending_RejectsNonAdmittedOverHTTP(t *testing.T) {
 	ts := newTestServer(t, false)
 	eff := proposeEffect(t, ts, "op-1", "none")
 
-	resp := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, nil)
+	resp := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, dispatchPendingBody(map[string]any{"op": "op-1"}))
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusConflict {
 		t.Fatalf("expected 409 for a needs_approval effect, got %d", resp.StatusCode)
+	}
+}
+
+// TestMarkDispatchPending_PayloadMutatedAfterAdmission_FailsClosedOverHTTP
+// is §15 acceptance invariant #6 exercised over the real HTTP boundary —
+// the one place a Propose-time payload and a dispatch-time payload can
+// genuinely diverge (two separate requests, potentially different
+// processes), unlike the Go-internal call sites where the same in-memory
+// value is passed to both in one function.
+func TestMarkDispatchPending_PayloadMutatedAfterAdmission_FailsClosedOverHTTP(t *testing.T) {
+	ts := newTestServer(t, false)
+	eff := proposeEffect(t, ts, "op-1", "verified")
+
+	mutated := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, dispatchPendingBody(map[string]any{"op": "op-1", "amount": 1_000_000}))
+	defer mutated.Body.Close()
+	if mutated.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 for a payload that differs from the admitted one, got %d", mutated.StatusCode)
+	}
+
+	got := getJSON(t, ts.URL+"/v1/operations/"+eff.EffectID, testAgentToken)
+	defer got.Body.Close()
+	var gotEff effectResponse
+	json.NewDecoder(got.Body).Decode(&gotEff)
+	if gotEff.State != "admitted" {
+		t.Fatalf("expected the effect to remain admitted after a digest mismatch, got %+v", gotEff)
+	}
+
+	real := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, dispatchPendingBody(map[string]any{"op": "op-1"}))
+	defer real.Body.Close()
+	if real.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 dispatching with the real, unmutated payload, got %d", real.StatusCode)
 	}
 }
 
@@ -287,7 +328,7 @@ func TestMarkDispatchPending_NonCoreOwner_RequiresTheOwningExtensionsToken(t *te
 	}
 	withoutToken.Body.Close()
 
-	withToken := postJSONWithExtensionToken(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, token, nil)
+	withToken := postJSONWithExtensionToken(t, ts.URL+"/v1/operations/"+eff.EffectID+"/dispatch-pending", testAgentToken, token, dispatchPendingBody(map[string]any{"x": 1}))
 	defer withToken.Body.Close()
 	if withToken.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200 marking dispatch-pending with the owning extension's own token, got %d", withToken.StatusCode)

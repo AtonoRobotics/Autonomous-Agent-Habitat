@@ -349,6 +349,46 @@ func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension,
 	return r.Get(ctx, id, version)
 }
 
+// Rollback reverts id from fromVersion to a prior toVersion, composing
+// Quiesce/Dispose/Activate into the one operation this package's own
+// doc comment already claims (§2.1: "extension discovery, dependency
+// resolution, activation, quiescence, disposal, and rollback") rather
+// than requiring an operator to script the three calls by hand — the
+// real fix for §15 acceptance invariant #11 ("rollback restores the
+// prior capability binding").
+//
+// "Restores the prior capability binding" means toVersion is trusted
+// and active again under its own genuinely fresh credential — Dispose
+// unconditionally revokes fromVersion's token, and Activate mints
+// toVersion a brand new one (see capability.go). It does not mean
+// toVersion's old, already-revoked token bytes are replayed: reusing a
+// previously-revoked credential would be the wrong direction for a
+// capability system, not a feature.
+//
+// Not atomic across the three steps: if Activate(toVersion) fails after
+// fromVersion is already disposed, the daemon is left with neither
+// version active — inspectable via Get, not silently reactivated or
+// papered over, the same "fails visible, not automatically healed"
+// posture daemon/operations.MarkDispatchPending's own documented
+// two-transaction gap already takes. And only the capability-binding
+// half of invariant #11 is this package's to give: "compatible
+// persisted state" is an extension's own domain-specific concern core
+// has no visibility into, the same "AMH SHALL NOT ... construct a
+// domain recovery action" posture §4 takes for external effects.
+func (r *Registry) Rollback(ctx context.Context, id, fromVersion, toVersion string) (*Extension, error) {
+	if _, err := r.Quiesce(ctx, id, fromVersion); err != nil {
+		return nil, fmt.Errorf("extensions: rollback %s@%s -> %s: quiesce %s: %w", id, fromVersion, toVersion, fromVersion, err)
+	}
+	if _, err := r.Dispose(ctx, id, fromVersion); err != nil {
+		return nil, fmt.Errorf("extensions: rollback %s@%s -> %s: dispose %s: %w", id, fromVersion, toVersion, fromVersion, err)
+	}
+	restored, err := r.Activate(ctx, id, toVersion)
+	if err != nil {
+		return nil, fmt.Errorf("extensions: rollback %s@%s -> %s: activate %s: %w", id, fromVersion, toVersion, toVersion, err)
+	}
+	return restored, nil
+}
+
 // Get loads one extension row by id/version.
 func (r *Registry) Get(ctx context.Context, id, version string) (*Extension, error) {
 	var e Extension

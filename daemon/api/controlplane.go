@@ -133,6 +133,31 @@ func (s *Server) handleDisposeExtension(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, toExtensionResponse(ext))
 }
 
+type extensionRollbackRequest struct {
+	ID          string `json:"id"`
+	FromVersion string `json:"from_version"`
+	ToVersion   string `json:"to_version"`
+}
+
+// handleRollbackExtension is §15 acceptance invariant #11 ("rollback
+// restores the prior capability binding") over the operator surface —
+// one call in place of an operator scripting
+// quiesce+dispose+activate(prior version) by hand through the three
+// routes above.
+func (s *Server) handleRollbackExtension(w http.ResponseWriter, r *http.Request) {
+	var req extensionRollbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, extensionResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	ext, err := s.Extensions.Rollback(r.Context(), req.ID, req.FromVersion, req.ToVersion)
+	if err != nil {
+		writeJSON(w, extensionErrorStatus(err), extensionResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, toExtensionResponse(ext))
+}
+
 func (s *Server) handleGetExtension(w http.ResponseWriter, r *http.Request) {
 	id, version := r.URL.Query().Get("id"), r.URL.Query().Get("version")
 	ext, err := s.Extensions.Get(r.Context(), id, version)

@@ -501,6 +501,219 @@ func TestDispose_RefusesWithoutQuiesceFirst(t *testing.T) {
 	}
 }
 
+// TestRollback_DisposesFromVersionAndActivatesToVersion is §15 acceptance
+// invariant #11 ("rollback restores the prior capability binding") at
+// the state-transition level: rolling back from a bad new version to a
+// known-good prior one must leave exactly the prior version active and
+// the bad one disposed — one call, not three unaudited ones.
+func TestRollback_DisposesFromVersionAndActivatesToVersion(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	v1 := baseManifest("amh.test/widget", "1.0.0")
+	if _, err := reg.Discover(ctx, v1); err != nil {
+		t.Fatalf("Discover v1: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("Activate v1: %v", err)
+	}
+	if _, err := reg.Quiesce(ctx, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("Quiesce v1: %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("Dispose v1: %v", err)
+	}
+
+	v2 := baseManifest("amh.test/widget", "1.1.0")
+	if _, err := reg.Discover(ctx, v2); err != nil {
+		t.Fatalf("Discover v2: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/widget", "1.1.0"); err != nil {
+		t.Fatalf("Activate v2: %v", err)
+	}
+
+	restored, err := reg.Rollback(ctx, "amh.test/widget", "1.1.0", "1.0.0")
+	if err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	if restored.Version != "1.0.0" || restored.Status != StatusActive {
+		t.Fatalf("expected v1.0.0 active after rollback, got version=%s status=%s", restored.Version, restored.Status)
+	}
+
+	badVersion, err := reg.Get(ctx, "amh.test/widget", "1.1.0")
+	if err != nil {
+		t.Fatalf("Get v2: %v", err)
+	}
+	if badVersion.Status != StatusDisposed {
+		t.Fatalf("expected v1.1.0 disposed after rollback, got %s", badVersion.Status)
+	}
+}
+
+// TestRollback_ProcessIsolation_RestoresARealWorkingCapabilityToken proves
+// the capability-binding half of invariant #11 for real, over an actual
+// launched process: the disposed version's token stops verifying, and
+// the restored version gets a genuinely fresh, working token — not the
+// old (already-revoked) token bytes replayed.
+func TestRollback_ProcessIsolation_RestoresARealWorkingCapabilityToken(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	v1TokenFile := filepath.Join(dir, "v1-token")
+	v1Script := filepath.Join(dir, "v1.sh")
+	script := "#!/bin/sh\nprintenv AMH_EXTENSION_TOKEN > " + v1TokenFile + "\nexec sleep 300\n"
+	if err := os.WriteFile(v1Script, []byte(script), 0o755); err != nil {
+		t.Fatalf("write v1 script: %v", err)
+	}
+	v2TokenFile := filepath.Join(dir, "v2-token")
+	v2Script := filepath.Join(dir, "v2.sh")
+	if err := os.WriteFile(v2Script, []byte("#!/bin/sh\nprintenv AMH_EXTENSION_TOKEN > "+v2TokenFile+"\nexec sleep 300\n"), 0o755); err != nil {
+		t.Fatalf("write v2 script: %v", err)
+	}
+
+	killWhenDone := func(handle string) {
+		if pid, err := parsePID(handle); err == nil {
+			t.Cleanup(func() { syscall.Kill(pid, syscall.SIGKILL) })
+		}
+	}
+
+	v1 := baseManifest("amh.test/token-widget", "1.0.0")
+	v1.Spec.Isolation = IsolationProcess
+	v1.Spec.Entrypoint = v1Script
+	reg.Discover(ctx, v1)
+	activeV1, err := reg.Activate(ctx, "amh.test/token-widget", "1.0.0")
+	if err != nil {
+		t.Fatalf("Activate v1: %v", err)
+	}
+	killWhenDone(activeV1.RuntimeHandle)
+	v1Token := waitForToken(t, v1TokenFile)
+	if id, ok, err := reg.VerifyCapabilityToken(ctx, v1Token); err != nil || !ok || id != "amh.test/token-widget" {
+		t.Fatalf("expected v1's token to verify before rollback: id=%q ok=%v err=%v", id, ok, err)
+	}
+	reg.Quiesce(ctx, "amh.test/token-widget", "1.0.0")
+	reg.Dispose(ctx, "amh.test/token-widget", "1.0.0")
+	// v1's process is dead post-Dispose; the file it wrote stays on disk
+	// with v1's own (now-revoked) token — remove it so the next write,
+	// from the process Rollback launches, is unambiguously a fresh one.
+	os.Remove(v1TokenFile)
+
+	v2 := baseManifest("amh.test/token-widget", "1.1.0")
+	v2.Spec.Isolation = IsolationProcess
+	v2.Spec.Entrypoint = v2Script
+	reg.Discover(ctx, v2)
+	activeV2, err := reg.Activate(ctx, "amh.test/token-widget", "1.1.0")
+	if err != nil {
+		t.Fatalf("Activate v2: %v", err)
+	}
+	killWhenDone(activeV2.RuntimeHandle)
+	v2Token := waitForToken(t, v2TokenFile)
+
+	restored, err := reg.Rollback(ctx, "amh.test/token-widget", "1.1.0", "1.0.0")
+	if err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+	killWhenDone(restored.RuntimeHandle)
+
+	if _, ok, err := reg.VerifyCapabilityToken(ctx, v2Token); err != nil || ok {
+		t.Fatalf("expected v1.1.0's token to stop verifying after rollback: ok=%v err=%v", ok, err)
+	}
+
+	restoredToken := waitForToken(t, v1TokenFile)
+	if restoredToken == v1Token {
+		t.Fatalf("expected the restored version to receive a genuinely fresh token, not the old one replayed")
+	}
+	if id, ok, err := reg.VerifyCapabilityToken(ctx, restoredToken); err != nil || !ok || id != "amh.test/token-widget" {
+		t.Fatalf("expected the restored version's fresh token to verify: id=%q ok=%v err=%v", id, ok, err)
+	}
+}
+
+// TestRollback_RefusesWhileActiveDependentsExist proves Rollback doesn't
+// bypass invariant #4's teardown ordering — it must propagate Quiesce's
+// own dependents check, not silently force a disposal out from under an
+// active consumer.
+func TestRollback_RefusesWhileActiveDependentsExist(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	producerV1 := baseManifest("amh.test/producer", "1.0.0")
+	producerV1.Spec.Provides = []CapabilityRef{{ID: "amh.test/producer-cap", Version: "1.0.0"}}
+	reg.Discover(ctx, producerV1)
+	reg.Activate(ctx, "amh.test/producer", "1.0.0")
+	reg.Quiesce(ctx, "amh.test/producer", "1.0.0")
+	reg.Dispose(ctx, "amh.test/producer", "1.0.0")
+
+	producerV2 := baseManifest("amh.test/producer", "1.1.0")
+	producerV2.Spec.Provides = []CapabilityRef{{ID: "amh.test/producer-cap", Version: "1.1.0"}}
+	reg.Discover(ctx, producerV2)
+	reg.Activate(ctx, "amh.test/producer", "1.1.0")
+
+	consumer := baseManifest("amh.test/consumer", "1.0.0")
+	consumer.Spec.Requires = []Requirement{{Capability: "amh.test/producer-cap", VersionRange: ">=1.0.0", Optional: false}}
+	reg.Discover(ctx, consumer)
+	if _, err := reg.Activate(ctx, "amh.test/consumer", "1.0.0"); err != nil {
+		t.Fatalf("Activate consumer: %v", err)
+	}
+
+	if _, err := reg.Rollback(ctx, "amh.test/producer", "1.1.0", "1.0.0"); err == nil {
+		t.Fatalf("expected Rollback to be refused while an active dependent needs the producer's capability")
+	}
+
+	stillActive, err := reg.Get(ctx, "amh.test/producer", "1.1.0")
+	if err != nil {
+		t.Fatalf("Get producer v1.1.0: %v", err)
+	}
+	if stillActive.Status != StatusActive {
+		t.Fatalf("a refused rollback must not have mutated the producer's status, got %s", stillActive.Status)
+	}
+}
+
+// TestRollback_ToVersionActivateFailure_LeavesFromVersionDisposed
+// documents the honest, non-atomic edge this composition has: if the
+// prior version can no longer activate (e.g. a requirement it depended
+// on is gone), the daemon is left with neither version active —
+// inspectable, not silently reactivated or papered over.
+func TestRollback_ToVersionActivateFailure_LeavesFromVersionDisposed(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	v1 := baseManifest("amh.test/widget", "1.0.0")
+	v1.Spec.Requires = []Requirement{{Capability: "amh.test/gone-cap", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, v1); err != nil {
+		t.Fatalf("Discover v1: %v", err)
+	}
+	// v1 can never Activate (its required capability is never provided) —
+	// insert it directly as 'disposed' so it stands in for "a version
+	// that used to work but can no longer activate," without needing a
+	// real prior activation this test doesn't otherwise care about.
+	if _, err := db.ExecContext(ctx, `UPDATE extension SET status = 'disposed' WHERE id = $1 AND version = $2`, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("force v1 disposed: %v", err)
+	}
+
+	v2 := baseManifest("amh.test/widget", "1.1.0")
+	if _, err := reg.Discover(ctx, v2); err != nil {
+		t.Fatalf("Discover v2: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/widget", "1.1.0"); err != nil {
+		t.Fatalf("Activate v2: %v", err)
+	}
+
+	if _, err := reg.Rollback(ctx, "amh.test/widget", "1.1.0", "1.0.0"); err == nil {
+		t.Fatalf("expected Rollback to fail when the prior version can no longer activate")
+	}
+
+	fromVersion, err := reg.Get(ctx, "amh.test/widget", "1.1.0")
+	if err != nil {
+		t.Fatalf("Get v1.1.0: %v", err)
+	}
+	if fromVersion.Status != StatusDisposed {
+		t.Fatalf("expected v1.1.0 to remain disposed (already quiesced+disposed before the failed activate), got %s", fromVersion.Status)
+	}
+}
+
 func TestSemverRanges(t *testing.T) {
 	cases := []struct {
 		version, rangeExpr string
@@ -531,4 +744,25 @@ func TestSemverRanges(t *testing.T) {
 // parsePID extracts the numeric PID from a "pid:<n>" runtime handle.
 func parsePID(handle string) (int, error) {
 	return strconv.Atoi(strings.TrimPrefix(handle, "pid:"))
+}
+
+// waitForToken polls path for a real launched process to have written
+// its AMH_EXTENSION_TOKEN there, the same pattern
+// TestActivate_ProcessIsolation_RealProcessReceivesAWorkingCapabilityToken
+// established — factored out here since Rollback's own tests need it
+// more than once.
+func waitForToken(t *testing.T, path string) string {
+	t.Helper()
+	var raw []byte
+	var err error
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err = os.ReadFile(path)
+		if err == nil && len(raw) > 0 {
+			return strings.TrimSpace(string(raw))
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("expected a real launched process to have written its AMH_EXTENSION_TOKEN to %s: %v", path, err)
+	return ""
 }

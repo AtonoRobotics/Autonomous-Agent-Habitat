@@ -121,6 +121,56 @@ func TestExtensionLifecycle_DiscoverActivateQuiesceDispose_ViaHTTP(t *testing.T)
 	}
 }
 
+// TestExtensionRollback_ViaHTTP is §15 acceptance invariant #11 over the
+// operator surface: one call replaces an operator scripting
+// quiesce+dispose+activate(prior version) through three separate routes.
+func TestExtensionRollback_ViaHTTP(t *testing.T) {
+	ts := newTestServer(t, false)
+
+	v1Body, _ := json.Marshal(baseTestManifest("amh.test/widget", "1.0.0"))
+	postJSON(t, ts.URL+"/v1/extensions", testOperatorToken, v1Body).Body.Close()
+	v1Ref, _ := json.Marshal(map[string]string{"id": "amh.test/widget", "version": "1.0.0"})
+	postJSON(t, ts.URL+"/v1/extensions/activate", testOperatorToken, v1Ref).Body.Close()
+	postJSON(t, ts.URL+"/v1/extensions/quiesce", testOperatorToken, v1Ref).Body.Close()
+	postJSON(t, ts.URL+"/v1/extensions/dispose", testOperatorToken, v1Ref).Body.Close()
+
+	v2Body, _ := json.Marshal(baseTestManifest("amh.test/widget", "1.1.0"))
+	postJSON(t, ts.URL+"/v1/extensions", testOperatorToken, v2Body).Body.Close()
+	v2Ref, _ := json.Marshal(map[string]string{"id": "amh.test/widget", "version": "1.1.0"})
+	activateV2 := postJSON(t, ts.URL+"/v1/extensions/activate", testOperatorToken, v2Ref)
+	activateV2.Body.Close()
+
+	rollbackBody, _ := json.Marshal(map[string]string{"id": "amh.test/widget", "from_version": "1.1.0", "to_version": "1.0.0"})
+	rollback := postJSON(t, ts.URL+"/v1/extensions/rollback", testOperatorToken, rollbackBody)
+	if rollback.StatusCode != http.StatusOK {
+		t.Fatalf("rollback: expected 200, got %d", rollback.StatusCode)
+	}
+	var restored extensionResponse
+	json.NewDecoder(rollback.Body).Decode(&restored)
+	rollback.Body.Close()
+	if restored.Version != "1.0.0" || restored.Status != "active" {
+		t.Fatalf("expected v1.0.0 active after rollback, got version=%s status=%s", restored.Version, restored.Status)
+	}
+
+	badVersion := getJSON(t, ts.URL+"/v1/extensions/get?id=amh.test%2Fwidget&version=1.1.0", testAgentToken)
+	var badExt extensionResponse
+	json.NewDecoder(badVersion.Body).Decode(&badExt)
+	badVersion.Body.Close()
+	if badExt.Status != "disposed" {
+		t.Fatalf("expected v1.1.0 disposed after rollback, got %s", badExt.Status)
+	}
+}
+
+func TestExtensionRollback_RejectsAgentToken(t *testing.T) {
+	ts := newTestServer(t, false)
+	body, _ := json.Marshal(map[string]string{"id": "amh.test/widget", "from_version": "1.1.0", "to_version": "1.0.0"})
+	resp := postJSON(t, ts.URL+"/v1/extensions/rollback", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for an agent token rolling back an extension, got %d", resp.StatusCode)
+	}
+}
+
 func TestExtensionMutations_RejectAgentToken(t *testing.T) {
 	ts := newTestServer(t, false)
 

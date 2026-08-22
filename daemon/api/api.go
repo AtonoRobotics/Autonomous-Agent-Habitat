@@ -125,6 +125,8 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleQuiesceExtension, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/extensions/dispose",
 		s.Auth.RequireRole(s.handleDisposeExtension, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/rollback",
+		s.Auth.RequireRole(s.handleRollbackExtension, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/extensions",
 		s.Auth.RequireRole(s.handleListExtensions, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/extensions/get",

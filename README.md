@@ -27,6 +27,8 @@ daemon/                Go control-plane daemon (single binary)
 ├── inference/                  model-provider seam: agents get real inference through
 │                                the daemon using only their agent token, never a
 │                                model-provider credential of their own
+├── policy/                     generic policy/approval seam: fail-closed action
+│                                admission, bound to an exact action digest
 ├── observability/              OpenTelemetry tracing
 └── store/                      PostgreSQL open + migration runner
 
@@ -68,6 +70,7 @@ Everything below is working code with tests that exercise it against real proces
 - **Context management.** Per-tool-result token cap, budget tracking, compaction triggered at a configurable threshold, trace-context propagation across DBOS worker-thread boundaries so a subordinate agent's span nests under its parent's.
 - **MCP client.** stdio transport, tested against a real third-party MCP server (pinned, not `npx`-refetched per run).
 - **Model-provider inference (`daemon/inference`).** Agents call `POST /v1/inference/{complete,count-tokens}` on the daemon using only their agent bearer token; the daemon holds the actual provider credential (registered once as a `daemon/credentials` account) and makes the real call. An `anthropic` kind speaks the native Messages API (API key or OAuth bearer); an `openai_compatible` kind speaks chat completions — between the two, Anthropic, OpenAI, Grok/SuperGrok, GLM/Z.ai's Coding Plan, and self-hosted vLLM/Ollama are all covered without per-vendor code. OAuth subscription tokens refresh and rotate back into the credential store automatically. `agents/context/llm.py` is a pure HTTP client to this seam — it holds no model-provider credential of its own. `agents/context/budget.py`'s token counting is a real tokenizer, not a `chars // 4` approximation.
+- **Generic policy and approval seam (`daemon/policy`).** The core's one domain-neutral policy: admit iff a proposed action declares a verified, attested reversibility; everything else needs an operator's Approve/Deny. A `PolicyDecision` is bound to an exact action digest (recomputed server-side from the payload, never trusted from the caller) and single-use — `Consume` atomically fails closed on expiry, a digest mismatch, or reuse. Approving a `needs_approval` decision mints a fresh, freshly-bound decision rather than mutating the original, so every decision's decided-at/expiry stays internally consistent. An agent token is mechanically refused on Approve/Deny — the same anti-self-approval property as every other operator-only route.
 
 ## What's declared but not yet built
 

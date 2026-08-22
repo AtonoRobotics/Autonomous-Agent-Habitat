@@ -1,7 +1,8 @@
 // Package api is the daemon-resident HTTP surface the Python agent layer
 // calls for durable workflow control-plane operations: extension
 // lifecycle, per-agent compute sandboxes, account/credential management,
-// and the model-provider inference seam.
+// the model-provider inference seam, and the generic policy/approval
+// seam.
 //
 // Every route requires a bearer token (daemon/authn) — there is no
 // unauthenticated mode. Which role a route accepts is the whole
@@ -22,6 +23,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
 )
 
@@ -36,6 +38,7 @@ type Server struct {
 	Sandbox     *sandbox.Provisioner
 	Credentials *credentials.Store
 	Inference   *inference.Router
+	Policy      *policy.Engine
 	Tracer      trace.TracerProvider
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
@@ -65,6 +68,7 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 		Sandbox:     sandbox.New(db, sandboxBaseDir),
 		Credentials: creds,
 		Inference:   inferenceRouter,
+		Policy:      policy.New(db),
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,
@@ -155,6 +159,28 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleOpenAIChatCompletions, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/openai/embeddings",
 		s.Auth.RequireRole(s.handleOpenAIEmbeddings, authn.RoleAgent, authn.RoleOperator))
+
+	// Policy and approval (§6): agent-or-operator for decide/consume — an
+	// agent proposing an action and, once admitted, dispatching it is the
+	// core "agents propose" half of decision 9. Approve/deny are
+	// operator-only — the "deterministic services commit" half, and the
+	// same anti-self-approval property every other operator-only route
+	// enforces (see daemon/authn's doc comment). See daemon/policy and
+	// policy.go for handler bodies.
+	mux.HandleFunc("POST /v1/policy/decide",
+		s.Auth.RequireRole(s.handleDecide, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/policy/decisions/{decisionID}",
+		s.Auth.RequireRole(s.handleGetDecision, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/policy/decisions/{decisionID}/consume",
+		s.Auth.RequireRole(s.handleConsumeDecision, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/policy/approvals",
+		s.Auth.RequireRole(s.handleListPendingApprovals, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/policy/approvals/{approvalID}",
+		s.Auth.RequireRole(s.handleGetApprovalRequest, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/policy/approvals/{approvalID}/approve",
+		s.Auth.RequireRole(s.handleApproveApprovalRequest, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/policy/approvals/{approvalID}/deny",
+		s.Auth.RequireRole(s.handleDenyApprovalRequest, authn.RoleOperator))
 
 	return mux
 }

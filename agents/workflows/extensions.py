@@ -8,13 +8,11 @@ computers.py), which is a verified inverse pair an agent may perform
 itself.
 
 This module has no function that mutates the registry and no function
-that could plausibly accept an operator credential — same structural
-security posture as approval.py and safetycase.py, just with a stricter
-result here: agents get read access only, full stop. An agent that needs
-a harness/connector/model-provider extension installed has to ask an
-operator; this module gives it the read side of that conversation (what's
-already active, what capability a given extension provides) but no path
-to act on it alone.
+that could plausibly accept an operator credential: agents get read
+access only, full stop. An agent that needs a harness/connector/model-
+provider extension installed has to ask an operator; this module gives it
+the read side of that conversation (what's already active, what
+capability a given extension provides) but no path to act on it alone.
 """
 
 from __future__ import annotations

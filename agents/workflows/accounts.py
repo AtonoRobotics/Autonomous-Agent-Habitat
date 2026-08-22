@@ -6,8 +6,7 @@ are exactly what §1 decision 9 reserves from autonomous agent action.
 
 This module never sees, requests, or could transmit a secret — the
 underlying daemon/credentials.Account type it deserializes into never
-carries one, and no function here accepts anything secret-shaped, mirroring
-approval.py and safetycase.py's structural security posture.
+carries one, and no function here accepts anything secret-shaped.
 """
 
 from __future__ import annotations

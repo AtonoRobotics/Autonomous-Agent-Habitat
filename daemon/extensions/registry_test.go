@@ -8,6 +8,8 @@ import (
 	"syscall"
 	"testing"
 
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
@@ -131,16 +133,6 @@ func TestActivateThenDispose_InProcess_RoundTrips(t *testing.T) {
 		t.Fatalf("expected disposed, got %s", disposed.Status)
 	}
 
-	// The dispose effect must be recorded as activation's verified inverse.
-	var effectType, outcome string
-	err = db.QueryRow(`SELECT effect_type, outcome FROM extension_effect WHERE extension_id = $1 AND effect_type = 'dispose'`, "amh.test/widget").Scan(&effectType, &outcome)
-	if err != nil {
-		t.Fatalf("query dispose effect: %v", err)
-	}
-	if outcome != "success" {
-		t.Fatalf("expected dispose effect outcome success, got %s", outcome)
-	}
-
 	// A disposed extension can be reactivated — reversibility runs both ways.
 	reactivated, err := reg.Activate(ctx, "amh.test/widget", "1.0.0")
 	if err != nil {
@@ -149,6 +141,123 @@ func TestActivateThenDispose_InProcess_RoundTrips(t *testing.T) {
 	if reactivated.Status != StatusActive {
 		t.Fatalf("expected active after reactivation, got %s", reactivated.Status)
 	}
+}
+
+func TestActivateThenDispose_WithOperationsWired_RecordsConfirmedEffects(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	pol := policy.New(db)
+	ops := operations.New(db, pol)
+	reg.Operations = ops
+	ctx := context.Background()
+
+	m := baseManifest("amh.test/widget", "1.0.0")
+	if _, err := reg.Discover(ctx, m); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	if _, err := reg.Activate(ctx, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	activateEffects, err := effectsByType(ctx, ops, db, "extension_activate")
+	if err != nil {
+		t.Fatalf("query activate effects: %v", err)
+	}
+	if len(activateEffects) != 1 {
+		t.Fatalf("expected exactly one extension_activate effect, got %d", len(activateEffects))
+	}
+	if activateEffects[0].OwnerExtensionID != "amh.core/extensions" {
+		t.Fatalf("expected owner_extension_id amh.core/extensions, got %s", activateEffects[0].OwnerExtensionID)
+	}
+	if activateEffects[0].State != operations.StateConfirmed {
+		t.Fatalf("expected activate effect state confirmed, got %s", activateEffects[0].State)
+	}
+
+	if _, err := reg.Quiesce(ctx, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("Quiesce: %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/widget", "1.0.0"); err != nil {
+		t.Fatalf("Dispose: %v", err)
+	}
+	disposeEffects, err := effectsByType(ctx, ops, db, "extension_dispose")
+	if err != nil {
+		t.Fatalf("query dispose effects: %v", err)
+	}
+	if len(disposeEffects) != 1 {
+		t.Fatalf("expected exactly one extension_dispose effect, got %d", len(disposeEffects))
+	}
+	if disposeEffects[0].State != operations.StateConfirmed {
+		t.Fatalf("expected dispose effect state confirmed, got %s", disposeEffects[0].State)
+	}
+}
+
+func TestActivate_WithOperationsWired_FailedLaunchRecordsFailedEffect(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ops := operations.New(db, policy.New(db))
+	reg.Operations = ops
+	ctx := context.Background()
+
+	m := baseManifest("amh.test/broken", "1.0.0")
+	m.Spec.Isolation = IsolationProcess
+	m.Spec.Entrypoint = "/no/such/executable-amh-test"
+	reg.Discover(ctx, m)
+
+	if _, err := reg.Activate(ctx, "amh.test/broken", "1.0.0"); err == nil {
+		t.Fatalf("expected activation of a nonexistent entrypoint to fail")
+	}
+
+	effects, err := effectsByType(ctx, ops, db, "extension_activate")
+	if err != nil {
+		t.Fatalf("query activate effects: %v", err)
+	}
+	if len(effects) != 1 {
+		t.Fatalf("expected exactly one extension_activate effect, got %d", len(effects))
+	}
+	if effects[0].State != operations.StateFailed {
+		t.Fatalf("expected activate effect state failed, got %s", effects[0].State)
+	}
+	if effects[0].ErrorCode == "" {
+		t.Fatalf("expected a recorded error code on the failed effect")
+	}
+}
+
+// effectsByType finds every effect_record row of effectType.
+// Registry.Operations/operations.Engine give no "list all" method (by
+// design: daemon/operations has no domain knowledge of what an
+// operation_id means to its caller), so this test helper reads
+// effect_record directly, the same way daemon/inference's own
+// operations_test.go does for its analogous assertions. Each test using
+// this runs against its own fresh schema (storetest.Open), so filtering
+// by effect_type alone — without also needing an extension_id, which
+// effect_record does not store (only its payload's digest) — is
+// sufficient to isolate that test's own effects.
+func effectsByType(ctx context.Context, ops *operations.Engine, db *sql.DB, effectType string) ([]*operations.Effect, error) {
+	rows, err := db.QueryContext(ctx, `SELECT effect_id FROM effect_record WHERE effect_type = $1`, effectType)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	var out []*operations.Effect
+	for _, id := range ids {
+		eff, err := ops.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, eff)
+	}
+	return out, nil
 }
 
 func TestActivate_RefusesMissingRequirement(t *testing.T) {

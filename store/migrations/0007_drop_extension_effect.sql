@@ -1,0 +1,12 @@
+-- extension_effect (0001_init.sql) is superseded by effect_record
+-- (0006_operations.sql): daemon/extensions.Registry.Activate/Dispose now
+-- record their launch/teardown as real daemon/operations Effects
+-- (owner_extension_id 'amh.core/extensions', reversibility 'verified' —
+-- Dispose really is Activate's tested inverse), which gets extension
+-- activation the crash-recovery reconciliation extension_effect never
+-- had (nothing ever reconciled an extension stuck 'activating' after a
+-- daemon crash mid-launch) and real HTTP-queryable effect history
+-- (GET /v1/operations) that extension_effect, write-only and never read
+-- back by anything, never had either. Dropped, not left as a second,
+-- unread audit trail alongside the one that replaces it.
+DROP TABLE extension_effect;

@@ -10,6 +10,9 @@ import (
 	"fmt"
 
 	"github.com/google/uuid"
+
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 )
 
 var (
@@ -85,6 +88,15 @@ type Registry struct {
 	// and README's "What's declared but not yet built" for why this
 	// defaults to false rather than being mandatory from day one.
 	RequireSignatures bool
+
+	// Operations, when set, wraps Activate/Dispose's real launch/teardown
+	// in a durable daemon/operations Effect (§4) — see trackedLaunch's doc
+	// comment. Nil is a testing/embedding convenience only, not a real
+	// production soft-disable the way inference.Router.Operations's nil
+	// case is: the one real constructor (daemon/api.New) always wires
+	// this, since it always constructs an operations.Engine regardless of
+	// any other optional dependency.
+	Operations *operations.Engine
 }
 
 func New(db *sql.DB) *Registry {
@@ -200,9 +212,9 @@ func (r *Registry) Discover(ctx context.Context, m Manifest) (*Extension, error)
 // Activate resolves spatial composability (every non-optional requirement
 // must be provided by some currently-active extension, within the
 // declared version range) and, only if resolution succeeds, launches the
-// extension per its isolation and records activation as a durable effect.
-// A launch failure rolls the extension back to "failed" — never left
-// half-active.
+// extension per its isolation and records activation as a durable
+// daemon/operations Effect (§4) via trackedLaunch. A launch failure rolls
+// the extension back to "failed" — never left half-active.
 func (r *Registry) Activate(ctx context.Context, id, version string) (*Extension, error) {
 	ext, err := r.Get(ctx, id, version)
 	if err != nil {
@@ -230,40 +242,21 @@ func (r *Registry) Activate(ctx context.Context, id, version string) (*Extension
 	}
 
 	spec := Spec{Entrypoint: ext.Entrypoint, Isolation: ext.Isolation}
-	runtimeHandle, launchErr := r.l.launch(ctx, id, version, spec)
-	if launchErr != nil {
-		_ = r.setStatus(ctx, id, version, StatusFailed, launchErr.Error())
-		_ = r.recordEffect(ctx, id, version, "activate", map[string]string{"isolation": string(ext.Isolation)}, nil, "failed")
-		return nil, fmt.Errorf("extensions: activate %s@%s: %w", id, version, launchErr)
+	payload := map[string]string{"extension_id": id, "extension_version": version, "isolation": string(ext.Isolation)}
+	runtimeHandle, err := r.trackedLaunch(ctx, "extension_activate", payload, func(ctx context.Context) (string, error) {
+		return r.l.launch(ctx, id, version, spec)
+	})
+	if err != nil {
+		_ = r.setStatus(ctx, id, version, StatusFailed, err.Error())
+		return nil, fmt.Errorf("extensions: activate %s@%s: %w", id, version, err)
 	}
 
-	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil {
-		_ = r.l.teardown(ctx, id, version, runtimeHandle)
-		return nil, fmt.Errorf("extensions: begin activate-commit tx: %w", err)
-	}
-	_, err = tx.ExecContext(ctx, `
+	if _, err := r.DB.ExecContext(ctx, `
 		UPDATE extension SET status = 'active', runtime_handle = $1, activated_at = iso8601_now(), status_reason = NULL
-		WHERE id = $2 AND version = $3`, runtimeHandle, id, version)
-	if err != nil {
-		tx.Rollback()
+		WHERE id = $2 AND version = $3`, runtimeHandle, id, version,
+	); err != nil {
 		_ = r.l.teardown(ctx, id, version, runtimeHandle)
 		return nil, fmt.Errorf("extensions: mark active: %w", err)
-	}
-	forward, _ := json.Marshal(map[string]string{"isolation": string(ext.Isolation), "runtime_handle": runtimeHandle})
-	inverse, _ := json.Marshal(map[string]string{"action": "dispose", "runtime_handle": runtimeHandle})
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO extension_effect (id, extension_id, extension_version, effect_type, forward_payload, inverse_payload, outcome)
-		VALUES ($1, $2, $3, 'activate', $4, $5, 'success')`,
-		uuid.NewString(), id, version, string(forward), string(inverse),
-	); err != nil {
-		tx.Rollback()
-		_ = r.l.teardown(ctx, id, version, runtimeHandle)
-		return nil, fmt.Errorf("extensions: record activate effect: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		_ = r.l.teardown(ctx, id, version, runtimeHandle)
-		return nil, fmt.Errorf("extensions: commit activate: %w", err)
 	}
 
 	return r.Get(ctx, id, version)
@@ -301,9 +294,10 @@ func (r *Registry) Quiesce(ctx context.Context, id, version string) (*Extension,
 	return r.Get(ctx, id, version)
 }
 
-// Dispose tears down a quiescing extension and records disposal as the
-// verified inverse of its activation — the property that makes an
-// extension a reversible module, not just a deletable row.
+// Dispose tears down a quiescing extension and records disposal as a
+// durable daemon/operations Effect (§4) via trackedLaunch — the same
+// tracking Activate gets, over the pair that makes an extension a
+// reversible module, not just a deletable row.
 func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension, error) {
 	ext, err := r.Get(ctx, id, version)
 	if err != nil {
@@ -313,34 +307,19 @@ func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension,
 		return nil, fmt.Errorf("%w: %s@%s is %s, not quiescing (call Quiesce first)", ErrInvalidState, id, version, ext.Status)
 	}
 
-	if err := r.l.teardown(ctx, id, version, ext.RuntimeHandle); err != nil {
+	payload := map[string]string{"extension_id": id, "extension_version": version, "runtime_handle": ext.RuntimeHandle}
+	if _, err := r.trackedLaunch(ctx, "extension_dispose", payload, func(ctx context.Context) (string, error) {
+		return ext.RuntimeHandle, r.l.teardown(ctx, id, version, ext.RuntimeHandle)
+	}); err != nil {
 		_ = r.setStatus(ctx, id, version, StatusFailed, err.Error())
-		_ = r.recordEffect(ctx, id, version, "dispose", map[string]string{"runtime_handle": ext.RuntimeHandle}, nil, "failed")
 		return nil, fmt.Errorf("extensions: dispose %s@%s: %w", id, version, err)
 	}
 
-	tx, err := r.DB.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("extensions: begin dispose-commit tx: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `
+	if _, err := r.DB.ExecContext(ctx, `
 		UPDATE extension SET status = 'disposed', disposed_at = iso8601_now()
 		WHERE id = $1 AND version = $2`, id, version,
 	); err != nil {
 		return nil, fmt.Errorf("extensions: mark disposed: %w", err)
-	}
-	forward, _ := json.Marshal(map[string]string{"runtime_handle": ext.RuntimeHandle})
-	inverse, _ := json.Marshal(map[string]string{"action": "activate", "isolation": string(ext.Isolation)})
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO extension_effect (id, extension_id, extension_version, effect_type, forward_payload, inverse_payload, outcome)
-		VALUES ($1, $2, $3, 'dispose', $4, $5, 'success')`,
-		uuid.NewString(), id, version, string(forward), string(inverse),
-	); err != nil {
-		return nil, fmt.Errorf("extensions: record dispose effect: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("extensions: commit dispose: %w", err)
 	}
 	return r.Get(ctx, id, version)
 }
@@ -510,23 +489,68 @@ func (r *Registry) setStatus(ctx context.Context, id, version string, status Sta
 	return nil
 }
 
-func (r *Registry) recordEffect(ctx context.Context, id, version, effectType string, forward map[string]string, inverse map[string]string, outcome string) error {
-	fj, err := json.Marshal(forward)
+// trackedLaunch runs fn (the actual external launch/teardown call)
+// wrapped in a durable daemon/operations Effect (§4) — the same
+// propose -> dispatch_pending -> dispatched -> [call] -> observed ->
+// resolve shape daemon/inference's trackEffect already established
+// (see inference.go's trackEffect for the identical rationale). Not
+// shared as a common cross-package generic helper: Activate/Dispose's
+// two call sites don't share a result type with inference's three, so a
+// forced common abstraction would cost more clarity than the ~15 lines
+// it would save.
+//
+// Reversibility is declared "verified": Dispose really is Activate's
+// tested inverse (the property Activate/Dispose's own doc comments
+// already describe), the same "reversible by construction" category
+// daemon/sandbox's Create/Destroy pair uses — so this always resolves
+// admitted, never needs_approval.
+//
+// fn's own outcome (result, err) is authoritative for the caller
+// regardless of whether the tracking calls around it succeed: a
+// launch/teardown that genuinely succeeded must never be reported as
+// failed just because recording it afterward (MarkObserved/Resolve)
+// hit an error — that would either strand a real, running extension
+// instance as untracked (if treated as a failure) or silently corrupt
+// what actually happened (if papered over). So propose/dispatch_pending/
+// dispatched failures (before fn ever runs) do abort — fn is never
+// called, so aborting is safe — but MarkObserved/Resolve failures after
+// a successful fn are swallowed, not surfaced: an effect stuck at
+// 'dispatched' from a tracking failure here is exactly what
+// ReconcileInterrupted already exists to catch and mark
+// 'outcome_unknown' on the next daemon startup, the same reconciliation
+// path a genuine mid-launch crash would hit.
+func (r *Registry) trackedLaunch(ctx context.Context, effectType string, payload any, fn func(context.Context) (string, error)) (string, error) {
+	if r.Operations == nil {
+		return fn(ctx)
+	}
+
+	eff, err := r.Operations.Propose(ctx, operations.ProposeRequest{
+		OperationID:      uuid.NewString(),
+		OwnerExtensionID: "amh.core/extensions",
+		EffectType:       effectType,
+		Payload:          payload,
+		Reversibility:    policy.ReversibilityVerified,
+	})
 	if err != nil {
-		return err
+		return "", fmt.Errorf("extensions: propose operation: %w", err)
 	}
-	var ij any
-	if inverse != nil {
-		b, err := json.Marshal(inverse)
-		if err != nil {
-			return err
-		}
-		ij = string(b)
+	if eff, err = r.Operations.MarkDispatchPending(ctx, eff.EffectID); err != nil {
+		return "", fmt.Errorf("extensions: mark dispatch_pending: %w", err)
 	}
-	_, err = r.DB.ExecContext(ctx, `
-		INSERT INTO extension_effect (id, extension_id, extension_version, effect_type, forward_payload, inverse_payload, outcome)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		uuid.NewString(), id, version, effectType, string(fj), ij, outcome,
-	)
-	return err
+	if eff, err = r.Operations.MarkDispatched(ctx, eff.EffectID, ""); err != nil {
+		return "", fmt.Errorf("extensions: mark dispatched: %w", err)
+	}
+
+	result, fnErr := fn(ctx)
+
+	_, _ = r.Operations.MarkObserved(ctx, eff.EffectID, result)
+	terminal := operations.StateConfirmed
+	var effErr *operations.EffectError
+	if fnErr != nil {
+		terminal = operations.StateFailed
+		effErr = &operations.EffectError{Code: "LAUNCH_FAILED", Retryable: true, Message: fnErr.Error()}
+	}
+	_, _ = r.Operations.Resolve(ctx, eff.EffectID, terminal, effErr)
+
+	return result, fnErr
 }

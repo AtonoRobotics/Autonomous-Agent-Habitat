@@ -78,6 +78,7 @@ func New(addr string, db *sql.DB, dbURL string, tp trace.TracerProvider, auth *a
 	}
 	ext := extensions.New(db)
 	ext.RequireSignatures = requireSignatures
+	ext.Operations = ops
 	return &Server{
 		Addr:        addr,
 		DB:          db,

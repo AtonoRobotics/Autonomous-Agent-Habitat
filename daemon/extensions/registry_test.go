@@ -403,7 +403,7 @@ func TestActivate_ProcessIsolation_RealProcessReceivesAWorkingCapabilityToken(t 
 	}
 	token := strings.TrimSpace(string(raw))
 
-	id, ok, err := reg.VerifyCapabilityToken(ctx, token)
+	id, _, ok, err := reg.VerifyCapabilityToken(ctx, token)
 	if err != nil {
 		t.Fatalf("VerifyCapabilityToken: %v", err)
 	}
@@ -416,7 +416,7 @@ func TestActivate_ProcessIsolation_RealProcessReceivesAWorkingCapabilityToken(t 
 		t.Fatalf("Dispose: %v", err)
 	}
 
-	if _, ok, err := reg.VerifyCapabilityToken(ctx, token); err != nil || ok {
+	if _, _, ok, err := reg.VerifyCapabilityToken(ctx, token); err != nil || ok {
 		t.Fatalf("expected the token to stop verifying after Dispose: ok=%v err=%v", ok, err)
 	}
 }
@@ -589,7 +589,7 @@ func TestRollback_ProcessIsolation_RestoresARealWorkingCapabilityToken(t *testin
 	}
 	killWhenDone(activeV1.RuntimeHandle)
 	v1Token := waitForToken(t, v1TokenFile)
-	if id, ok, err := reg.VerifyCapabilityToken(ctx, v1Token); err != nil || !ok || id != "amh.test/token-widget" {
+	if id, _, ok, err := reg.VerifyCapabilityToken(ctx, v1Token); err != nil || !ok || id != "amh.test/token-widget" {
 		t.Fatalf("expected v1's token to verify before rollback: id=%q ok=%v err=%v", id, ok, err)
 	}
 	reg.Quiesce(ctx, "amh.test/token-widget", "1.0.0")
@@ -616,7 +616,7 @@ func TestRollback_ProcessIsolation_RestoresARealWorkingCapabilityToken(t *testin
 	}
 	killWhenDone(restored.RuntimeHandle)
 
-	if _, ok, err := reg.VerifyCapabilityToken(ctx, v2Token); err != nil || ok {
+	if _, _, ok, err := reg.VerifyCapabilityToken(ctx, v2Token); err != nil || ok {
 		t.Fatalf("expected v1.1.0's token to stop verifying after rollback: ok=%v err=%v", ok, err)
 	}
 
@@ -624,7 +624,7 @@ func TestRollback_ProcessIsolation_RestoresARealWorkingCapabilityToken(t *testin
 	if restoredToken == v1Token {
 		t.Fatalf("expected the restored version to receive a genuinely fresh token, not the old one replayed")
 	}
-	if id, ok, err := reg.VerifyCapabilityToken(ctx, restoredToken); err != nil || !ok || id != "amh.test/token-widget" {
+	if id, _, ok, err := reg.VerifyCapabilityToken(ctx, restoredToken); err != nil || !ok || id != "amh.test/token-widget" {
 		t.Fatalf("expected the restored version's fresh token to verify: id=%q ok=%v err=%v", id, ok, err)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -168,6 +169,87 @@ func TestExtensionRollback_RejectsAgentToken(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("expected 403 for an agent token rolling back an extension, got %d", resp.StatusCode)
+	}
+}
+
+// TestContextEffect_RegisterDisposeAndDisposeExtension_ViaHTTP_RealProcess
+// is the direct proof of §15 acceptance invariant #3 / §5.1 over the
+// real HTTP boundary a launched extension process actually uses: it
+// registers a core-mediated effect with its own capability token,
+// Dispose is refused while that effect is outstanding, disposing the
+// effect (in reverse order) is what makes Dispose succeed afterward.
+func TestContextEffect_RegisterDisposeAndDisposeExtension_ViaHTTP_RealProcess(t *testing.T) {
+	ts := newTestServer(t, false)
+	id, token := activateRealProcessExtension(t, ts, "amh.test/context-widget")
+
+	registerBody, _ := json.Marshal(map[string]string{"id": id, "version": "1.0.0", "kind": "tool", "ref": "search"})
+	register := postJSONWithExtensionToken(t, ts.URL+"/v1/extensions/context-effects", testAgentToken, token, registerBody)
+	if register.StatusCode != http.StatusCreated {
+		t.Fatalf("register: expected 201, got %d", register.StatusCode)
+	}
+	var eff contextEffectResponse
+	json.NewDecoder(register.Body).Decode(&eff)
+	register.Body.Close()
+	if eff.ID == "" || eff.Sequence != 1 {
+		t.Fatalf("expected a real registered effect with sequence 1, got %+v", eff)
+	}
+
+	outstanding := getJSON(t, ts.URL+"/v1/extensions/context-effects?id="+url.QueryEscape(id)+"&version=1.0.0", testAgentToken)
+	var outList []contextEffectResponse
+	json.NewDecoder(outstanding.Body).Decode(&outList)
+	outstanding.Body.Close()
+	if len(outList) != 1 || outList[0].ID != eff.ID {
+		t.Fatalf("expected exactly the registered effect outstanding, got %+v", outList)
+	}
+
+	ref, _ := json.Marshal(map[string]string{"id": id, "version": "1.0.0"})
+	postJSON(t, ts.URL+"/v1/extensions/quiesce", testOperatorToken, ref).Body.Close()
+
+	refused := postJSON(t, ts.URL+"/v1/extensions/dispose", testOperatorToken, ref)
+	if refused.StatusCode == http.StatusOK {
+		t.Fatalf("expected Dispose to be refused while a core-mediated effect is still outstanding")
+	}
+	refused.Body.Close()
+
+	disposeEffectBody, _ := json.Marshal(map[string]string{"id": id, "version": "1.0.0"})
+	disposeEffect := postJSONWithExtensionToken(t, ts.URL+"/v1/extensions/context-effects/"+eff.ID+"/dispose", testAgentToken, token, disposeEffectBody)
+	if disposeEffect.StatusCode != http.StatusOK {
+		t.Fatalf("dispose context effect: expected 200, got %d", disposeEffect.StatusCode)
+	}
+	disposeEffect.Body.Close()
+
+	disposed := postJSON(t, ts.URL+"/v1/extensions/dispose", testOperatorToken, ref)
+	if disposed.StatusCode != http.StatusOK {
+		t.Fatalf("dispose extension: expected 200 once the effect is disposed, got %d", disposed.StatusCode)
+	}
+	disposed.Body.Close()
+}
+
+func TestRegisterContextEffect_WrongExtensionToken_Is403(t *testing.T) {
+	ts := newTestServer(t, false)
+	_, tokenA := activateRealProcessExtension(t, ts, "amh.test/context-widget-a")
+	idB, _ := activateRealProcessExtension(t, ts, "amh.test/context-widget-b")
+
+	// tokenA presenting itself as idB's registration must be refused —
+	// the same cross-extension-ownership property invariant #5 already
+	// enforces for operations effects.
+	body, _ := json.Marshal(map[string]string{"id": idB, "version": "1.0.0", "kind": "tool", "ref": "search"})
+	resp := postJSONWithExtensionToken(t, ts.URL+"/v1/extensions/context-effects", testAgentToken, tokenA, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 registering under another extension's identity, got %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterContextEffect_NoExtensionToken_Is403(t *testing.T) {
+	ts := newTestServer(t, false)
+	id, _ := activateRealProcessExtension(t, ts, "amh.test/context-widget")
+
+	body, _ := json.Marshal(map[string]string{"id": id, "version": "1.0.0", "kind": "tool", "ref": "search"})
+	resp := postJSON(t, ts.URL+"/v1/extensions/context-effects", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 registering with no extension token, got %d", resp.StatusCode)
 	}
 }
 

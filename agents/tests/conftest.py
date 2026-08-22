@@ -4,14 +4,17 @@ test_approval_e2e.py. See daemon/cmd/amh-daemon and
 daemon/cmd/amh-fake-device.
 
 Also provides fake_model_server: a real local HTTP server standing in for
-a model provider, so workflows.goal's real model calls (context/llm.py's
-openai_compatible path) can be tested end-to-end — genuine HTTP request/
-response handling, real JSON parsing — without a live API key. This is
-the same "real protocol, fake remote counterpart" pattern amh-fake-device
-already uses for SSH: the decomposition/completion logic this server
-returns is deliberately test-fixture logic, standing in for what a real
-model would answer for these specific deterministic test inputs — it does
-not reintroduce placeholder logic into workflows/goal.py itself.
+a model provider, registered as a real account against a real running
+daemon (daemon/inference, daemon/credentials) exactly the way an operator
+would register a real provider — so workflows.goal's real model calls
+travel the actual path (agent token -> daemon -> provider account
+credential -> HTTP call) end to end, not a shortcut through the agent
+process's own environment. This is the same "real protocol, fake remote
+counterpart" pattern amh-fake-device already uses for SSH: the
+decomposition/completion logic this server returns is deliberately
+test-fixture logic, standing in for what a real model would answer for
+these specific deterministic test inputs — it does not reintroduce
+placeholder logic into workflows/goal.py or daemon/inference itself.
 """
 
 from __future__ import annotations
@@ -140,19 +143,41 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def fake_model_server(monkeypatch):
-    """Starts the fake model HTTP server, points ADAPTER_MODEL/
-    ADAPTER_BASE_URL/ANTHROPIC_API_KEY at it (inherited by any subprocess
-    spawned after this fixture runs, since subprocess.run with no env=
-    inherits the current os.environ), tears down on exit."""
+def fake_model_server(daemon, monkeypatch):
+    """Starts the fake model HTTP server, registers it as a real
+    "test-fake" provider account on the real running daemon (the same
+    two calls an operator makes through the control-plane UI's Accounts
+    tab), and points ADAPTER_MODEL/ADAPTER_PROVIDER at it — the only
+    things workflows.goal's from_env() reads from this process's own
+    environment now; daemon_api_base_url/agent_token flow explicitly
+    through the workflow call graph instead (see workflows/goal.py)."""
     port = _find_free_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), _FakeModelHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
 
+    envelope = json.dumps({"kind": "openai_compatible", "api_key": "test-fake-key", "base_url": f"http://127.0.0.1:{port}"})
+    create_req = urllib.request.Request(
+        f"{daemon.base_url}/v1/accounts",
+        data=json.dumps({"provider": "test-fake", "display_name": "fake model server"}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {daemon.operator_token}"},
+        method="POST",
+    )
+    with urllib.request.urlopen(create_req, timeout=10) as resp:
+        account = json.loads(resp.read())
+    # /v1/accounts/{id}/credential takes {"secret": "<opaque string>"} —
+    # the envelope JSON travels as that string's value, decrypted and
+    # handed back byte-for-byte by daemon/inference, which parses it.
+    credential_req = urllib.request.Request(
+        f"{daemon.base_url}/v1/accounts/{account['id']}/credential",
+        data=json.dumps({"secret": envelope}).encode(),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {daemon.operator_token}"},
+        method="POST",
+    )
+    urllib.request.urlopen(credential_req, timeout=10).close()
+
     monkeypatch.setenv("ADAPTER_MODEL", "test-fake-model")
-    monkeypatch.setenv("ADAPTER_BASE_URL", f"http://127.0.0.1:{port}")
-    monkeypatch.setenv("ADAPTER_API_KEY", "test-fake-key")
+    monkeypatch.setenv("ADAPTER_PROVIDER", "test-fake")
 
     try:
         yield f"http://127.0.0.1:{port}"

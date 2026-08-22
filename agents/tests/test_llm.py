@@ -1,163 +1,130 @@
-"""Tests for context/llm.py's real model client. No live API key exists
-in this environment, so these verify the real request/response handling
-logic against a stand-in transport — not that Anthropic's actual servers
-are reachable. What's under test is that this module makes a real call
-with the right shape and parses a real response correctly, and that it
-never substitutes a fake result when configuration or the call itself
-fails.
+"""Tests for context/llm.py's ModelClient — an HTTP client to the daemon's
+inference seam. These verify the real request/response handling against a
+stand-in HTTP server playing the daemon's part (not a live daemon — that's
+what test_control_plane_e2e.py-style fixtures cover via the real Go
+binary); what's under test here is that this module builds the right
+request, sends the right auth header, and never substitutes a fake result
+on failure.
 """
 
 from __future__ import annotations
 
-import io
 import json
-import urllib.error
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from threading import Thread
 
 import pytest
 
 from context.llm import ModelClient, ModelNotConfiguredError, from_env
 
 
-def test_from_env_raises_without_any_configuration(monkeypatch):
+def test_from_env_raises_without_adapter_model(monkeypatch):
     monkeypatch.delenv("ADAPTER_MODEL", raising=False)
-    monkeypatch.delenv("ADAPTER_BASE_URL", raising=False)
-    monkeypatch.delenv("ADAPTER_API_KEY", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     with pytest.raises(ModelNotConfiguredError):
-        from_env()
+        from_env("http://127.0.0.1:9", "agent-token")
 
 
-def test_from_env_raises_with_model_but_no_key(monkeypatch):
+def test_from_env_builds_client_from_model_and_provider_only(monkeypatch):
     monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
-    monkeypatch.delenv("ADAPTER_BASE_URL", raising=False)
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(ModelNotConfiguredError):
-        from_env()
-
-
-def test_from_env_builds_anthropic_client_when_configured(monkeypatch):
-    monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
-    monkeypatch.delenv("ADAPTER_BASE_URL", raising=False)
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-key")
-    client = from_env()
-    assert client.provider == "anthropic"
+    monkeypatch.setenv("ADAPTER_PROVIDER", "anthropic")
+    client = from_env("http://127.0.0.1:9999", "agent-token-xyz")
     assert client.model == "claude-sonnet-5"
-    assert client.api_key == "sk-test-key"
+    assert client.provider == "anthropic"
+    assert client.daemon_api_base_url == "http://127.0.0.1:9999"
+    assert client.agent_token == "agent-token-xyz"
 
 
-def test_from_env_requires_api_key_even_with_base_url(monkeypatch):
-    monkeypatch.setenv("ADAPTER_MODEL", "deepseek-chat")
-    monkeypatch.setenv("ADAPTER_BASE_URL", "https://api.deepseek.com")
-    monkeypatch.delenv("ADAPTER_API_KEY", raising=False)
-    with pytest.raises(ModelNotConfiguredError):
-        from_env()
+def test_from_env_provider_defaults_to_empty_string(monkeypatch):
+    monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
+    monkeypatch.delenv("ADAPTER_PROVIDER", raising=False)
+    client = from_env("http://127.0.0.1:9999", "agent-token")
+    assert client.provider == ""
 
 
-def test_from_env_builds_openai_compatible_client_when_configured(monkeypatch):
-    monkeypatch.setenv("ADAPTER_MODEL", "deepseek-chat")
-    monkeypatch.setenv("ADAPTER_BASE_URL", "https://api.deepseek.com")
-    monkeypatch.setenv("ADAPTER_API_KEY", "sk-test-key")
-    client = from_env()
-    assert client.provider == "openai_compatible"
-    assert client.base_url == "https://api.deepseek.com"
+class _FakeDaemon(BaseHTTPRequestHandler):
+    captured_path = None
+    captured_auth = None
+    captured_body = None
+    response_status = 200
+    response_body = b"{}"
+
+    def log_message(self, format, *args):
+        pass
+
+    def do_POST(self):
+        type(self).captured_path = self.path
+        type(self).captured_auth = self.headers.get("Authorization")
+        length = int(self.headers.get("Content-Length", 0))
+        type(self).captured_body = json.loads(self.rfile.read(length))
+        self.send_response(type(self).response_status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(type(self).response_body)
 
 
-def test_complete_anthropic_returns_real_response_text(monkeypatch):
-    """Mocks only the SDK's network call, not this module's own logic —
-    verifies complete() correctly builds the request and extracts text
-    from a genuine Anthropic response shape."""
-    import anthropic
-
-    class FakeTextBlock:
-        type = "text"
-        text = "the real model's answer"
-
-    class FakeResponse:
-        content = [FakeTextBlock()]
-
-    captured = {}
-
-    def fake_create(self, **kwargs):
-        captured.update(kwargs)
-        return FakeResponse()
-
-    monkeypatch.setattr(anthropic.resources.messages.Messages, "create", fake_create)
-
-    client = ModelClient(provider="anthropic", model="claude-sonnet-5", api_key="sk-test-key")
-    result = client.complete(system="be helpful", messages=[{"role": "user", "content": "hello"}])
-
-    assert result == "the real model's answer"
-    assert captured["model"] == "claude-sonnet-5"
-    assert captured["system"] == "be helpful"
-    assert captured["messages"] == [{"role": "user", "content": "hello"}]
+@pytest.fixture()
+def fake_daemon():
+    server = HTTPServer(("127.0.0.1", 0), _FakeDaemon)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    _FakeDaemon.response_status = 200
+    _FakeDaemon.response_body = b"{}"
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
-def test_complete_anthropic_raises_on_api_error(monkeypatch):
-    import anthropic
+def test_complete_sends_real_request_and_parses_real_response(fake_daemon):
+    _FakeDaemon.response_body = json.dumps({"text": "the real answer"}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="my-agent-token", model="claude-sonnet-5", provider="anthropic")
 
-    def fake_create(self, **kwargs):
-        raise anthropic.APIError("boom", request=None, body=None)
-
-    monkeypatch.setattr(anthropic.resources.messages.Messages, "create", fake_create)
-
-    client = ModelClient(provider="anthropic", model="claude-sonnet-5", api_key="sk-test-key")
-    with pytest.raises(ModelNotConfiguredError):
-        client.complete(system="", messages=[{"role": "user", "content": "hi"}])
-
-
-def test_count_tokens_anthropic_returns_real_count(monkeypatch):
-    import anthropic
-
-    class FakeCountResult:
-        input_tokens = 42
-
-    def fake_count_tokens(self, **kwargs):
-        return FakeCountResult()
-
-    monkeypatch.setattr(anthropic.resources.messages.Messages, "count_tokens", fake_count_tokens)
-
-    client = ModelClient(provider="anthropic", model="claude-sonnet-5", api_key="sk-test-key")
-    assert client.count_tokens(system="", messages=[{"role": "user", "content": "hi"}]) == 42
-
-
-def test_count_tokens_not_implemented_for_openai_compatible():
-    client = ModelClient(provider="openai_compatible", model="deepseek-chat", api_key="k", base_url="https://x")
-    with pytest.raises(ModelNotConfiguredError):
-        client.count_tokens(system="", messages=[])
-
-
-def test_complete_openai_compatible_parses_real_response_shape(monkeypatch):
-    response_body = json.dumps(
-        {"choices": [{"message": {"role": "assistant", "content": "deepseek's answer"}}]}
-    ).encode("utf-8")
-
-    class FakeHTTPResponse(io.BytesIO):
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *a):
-            return False
-
-    def fake_urlopen(request, timeout=None):
-        assert request.full_url == "https://api.deepseek.com/chat/completions"
-        payload = json.loads(request.data)
-        assert payload["model"] == "deepseek-chat"
-        assert payload["messages"][0] == {"role": "system", "content": "be helpful"}
-        return FakeHTTPResponse(response_body)
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
-
-    client = ModelClient(provider="openai_compatible", model="deepseek-chat", api_key="k", base_url="https://api.deepseek.com")
     result = client.complete(system="be helpful", messages=[{"role": "user", "content": "hi"}])
-    assert result == "deepseek's answer"
+
+    assert result == "the real answer"
+    assert _FakeDaemon.captured_path == "/v1/inference/complete"
+    assert _FakeDaemon.captured_auth == "Bearer my-agent-token"
+    assert _FakeDaemon.captured_body["provider"] == "anthropic"
+    assert _FakeDaemon.captured_body["model"] == "claude-sonnet-5"
+    assert _FakeDaemon.captured_body["system"] == "be helpful"
+    assert _FakeDaemon.captured_body["messages"] == [{"role": "user", "content": "hi"}]
 
 
-def test_complete_openai_compatible_raises_on_http_error(monkeypatch):
-    def fake_urlopen(request, timeout=None):
-        raise urllib.error.HTTPError(request.full_url, 401, "Unauthorized", None, io.BytesIO(b'{"error":"bad key"}'))
+def test_count_tokens_sends_real_request_and_parses_real_response(fake_daemon):
+    _FakeDaemon.response_body = json.dumps({"input_tokens": 77}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5")
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    n = client.count_tokens(system="", messages=[{"role": "user", "content": "hi"}])
 
-    client = ModelClient(provider="openai_compatible", model="deepseek-chat", api_key="bad", base_url="https://api.deepseek.com")
+    assert n == 77
+    assert _FakeDaemon.captured_path == "/v1/inference/count-tokens"
+
+
+def test_complete_raises_on_daemon_error_response(fake_daemon):
+    _FakeDaemon.response_status = 404
+    _FakeDaemon.response_body = json.dumps({"error": "no active account for provider \"anthropic\""}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5")
+
     with pytest.raises(ModelNotConfiguredError):
         client.complete(system="", messages=[{"role": "user", "content": "hi"}])
+
+
+def test_complete_raises_when_daemon_unreachable():
+    client = ModelClient(daemon_api_base_url="http://127.0.0.1:1", agent_token="tok", model="claude-sonnet-5")
+    with pytest.raises(ModelNotConfiguredError):
+        client.complete(system="", messages=[{"role": "user", "content": "hi"}])
+
+
+def test_never_sends_a_model_provider_credential():
+    """Structural guardrail: this module has no parameter or attribute
+    shaped like a model-provider secret — only the daemon holds one."""
+    import inspect
+
+    import context.llm as llm_module
+
+    for name in ("ModelClient", "from_env"):
+        obj = getattr(llm_module, name)
+        params = set(inspect.signature(obj).parameters) if inspect.isfunction(obj) else set(inspect.signature(obj.__init__).parameters)
+        for suspicious in ("api_key", "apikey", "secret", "credential"):
+            assert not any(suspicious in p.lower() for p in params), f"{name} accepts a parameter shaped like a model-provider credential: {params}"

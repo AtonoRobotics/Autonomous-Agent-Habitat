@@ -1,24 +1,23 @@
-"""Provider-neutral model client for AMH's cognition layer, per
-docs/AMH-SPECIFICATION.md §1 decision 2 ("Python owns model-facing
-cognition") and §2.1's "model-provider and tool-provider seams" core
-responsibility.
+"""Model client for AMH's cognition layer — an HTTP client to the daemon's
+inference seam (daemon/inference, daemon/api's /v1/inference/* routes),
+per docs/AMH-SPECIFICATION.md §2.1's "model-provider and tool-provider
+seams" core responsibility.
 
-This is the real thing, not a stand-in: complete() and count_tokens() make
-real network calls to a real model provider and return the real result.
-There is no local/offline mode that pretends to succeed — with no
-provider configured, every function here raises ModelNotConfiguredError
-rather than returning a canned response. Same fail-honest posture
-daemon/credentials and daemon/authn already use for their own
-configuration gates: a missing credential is a configuration error the
-caller must handle, not something this module works around.
+This does NOT hold a model-provider credential. That is the point: an
+agent computer (daemon/sandbox) is created and torn down constantly, and
+authenticating each one individually against a real model provider isn't
+viable — especially for a subscription OAuth session (Codex, Grok), which
+is one refreshable login per account, not something to copy into every
+ephemeral process. So the credential lives once, centrally, registered by
+an operator as an account in daemon/credentials (exactly like a GitHub or
+Gmail account — see the control-plane UI's Accounts tab) and this module
+calls the daemon with only the same agent bearer token it already holds
+for actuation, approval, and everything else — matching
+agents/workflows/actuate.py's shape exactly.
 
-Anthropic is the default and only fully-implemented provider (ADAPTER_MODEL,
-.env.example) — ANTHROPIC_API_KEY must be set. ADAPTER_BASE_URL selects an
-OpenAI-compatible chat-completions endpoint instead (e.g. DeepSeek, per
-.env.example's existing comment) via a plain HTTP call, matching this
-codebase's established urllib.request convention (agents/workflows/
-approval.py, safetycase.py, actuate.py) rather than adding a second SDK
-dependency for a secondary path.
+complete() and count_tokens() make a real HTTP call and return the real
+result. No provider registered on the daemon side -> the daemon returns
+404 and this raises ModelNotConfiguredError — never a canned response.
 """
 
 from __future__ import annotations
@@ -31,7 +30,7 @@ from dataclasses import dataclass
 
 
 class ModelNotConfiguredError(Exception):
-    """No usable model provider is configured, or the provider call
+    """No usable model provider is configured on the daemon, or the call
     itself failed. Callers must handle this — propagating a real failure,
     not substituting a fake result — is the entire point of this class
     existing separately from a generic exception."""
@@ -39,113 +38,69 @@ class ModelNotConfiguredError(Exception):
 
 @dataclass
 class ModelClient:
-    """One configured model endpoint. Construct via from_env(), not
-    directly, so ADAPTER_MODEL/ADAPTER_BASE_URL/ANTHROPIC_API_KEY stay the
-    single source of truth for what "configured" means."""
+    """One agent's route to the daemon's inference seam. daemon_api_base_url
+    and agent_token are the same values every other daemon-calling client
+    in this codebase already threads through (see actuate.py, approval.py)
+    — construct via from_env() for the model-name part only; the daemon
+    connection details come from the same place they come from everywhere
+    else in a workflow (the caller, ultimately the habitat that spawned
+    this agent), never from this agent's own environment.
+    """
 
-    provider: str  # "anthropic" | "openai_compatible"
+    daemon_api_base_url: str
+    agent_token: str
     model: str
-    api_key: str
-    base_url: str | None = None
+    provider: str = ""
 
     def complete(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> str:
-        """Returns the model's real text response. Raises
-        ModelNotConfiguredError on any provider-side failure (auth,
-        network, malformed response) — never returns a placeholder."""
-        if self.provider == "anthropic":
-            return self._complete_anthropic(system, messages, max_tokens)
-        return self._complete_openai_compatible(system, messages, max_tokens)
+        """Returns the model's real text response, via the daemon."""
+        payload = {
+            "provider": self.provider,
+            "model": self.model,
+            "system": system,
+            "messages": messages,
+            "max_tokens": max_tokens,
+        }
+        result = self._post("/v1/inference/complete", payload)
+        return result["text"]
 
     def count_tokens(self, system: str, messages: list[dict[str, str]]) -> int:
-        """Returns the provider's real input token count for this
-        system+messages — the actual number the model will see, not an
-        estimate. Only implemented for the anthropic provider: an
-        OpenAI-compatible chat-completions endpoint has no standardized
-        token-count API to call instead."""
-        if self.provider != "anthropic":
-            raise ModelNotConfiguredError(
-                "count_tokens is only implemented for the anthropic provider; "
-                "the configured ADAPTER_BASE_URL endpoint has no standard token-count API"
-            )
-        import anthropic
+        """Returns the provider's real input token count, via the daemon.
+        Only implemented (daemon-side) for the anthropic provider."""
+        payload = {"provider": self.provider, "model": self.model, "system": system, "messages": messages}
+        result = self._post("/v1/inference/count-tokens", payload)
+        return result["input_tokens"]
 
-        client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url)
-        try:
-            result = client.messages.count_tokens(
-                model=self.model,
-                system=system or anthropic.NOT_GIVEN,
-                messages=messages,
-            )
-        except anthropic.APIError as e:
-            raise ModelNotConfiguredError(f"count_tokens call failed: {e}") from e
-        return result.input_tokens
-
-    def _complete_anthropic(self, system: str, messages: list[dict[str, str]], max_tokens: int) -> str:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=self.api_key, base_url=self.base_url)
-        try:
-            response = client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                system=system or anthropic.NOT_GIVEN,
-                messages=messages,
-            )
-        except anthropic.APIError as e:
-            raise ModelNotConfiguredError(f"model call failed: {e}") from e
-        return "".join(block.text for block in response.content if block.type == "text")
-
-    def _complete_openai_compatible(self, system: str, messages: list[dict[str, str]], max_tokens: int) -> str:
-        full_messages = ([{"role": "system", "content": system}] if system else []) + list(messages)
-        body = json.dumps({"model": self.model, "messages": full_messages, "max_tokens": max_tokens}).encode("utf-8")
+    def _post(self, path: str, payload: dict) -> dict:
+        url = f"{self.daemon_api_base_url}{path}"
         request = urllib.request.Request(
-            self.base_url.rstrip("/") + "/chat/completions",
-            data=body,
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"},
+            url,
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.agent_token}"},
             method="POST",
         )
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
-                payload = json.loads(response.read())
+                return json.loads(response.read())
         except urllib.error.HTTPError as e:
             detail = e.read().decode("utf-8", errors="replace")
-            raise ModelNotConfiguredError(f"model provider returned HTTP {e.code}: {detail}") from e
+            raise ModelNotConfiguredError(f"inference call to {path} failed (HTTP {e.code}): {detail}") from e
         except urllib.error.URLError as e:
-            raise ModelNotConfiguredError(f"could not reach model provider at {self.base_url}: {e}") from e
-        try:
-            return payload["choices"][0]["message"]["content"]
-        except (KeyError, IndexError) as e:
-            raise ModelNotConfiguredError(f"unexpected response shape from model provider: {payload}") from e
+            raise ModelNotConfiguredError(f"could not reach the daemon at {url}: {e}") from e
 
 
-def from_env() -> ModelClient:
-    """Builds a ModelClient from ADAPTER_MODEL / ADAPTER_BASE_URL, and
-    whichever credential matches the selected provider (.env.example).
-    Raises ModelNotConfiguredError if nothing usable is configured — every
-    caller in this codebase must let that propagate, not catch it and
-    substitute a fake result.
-
-    ADAPTER_BASE_URL set -> ADAPTER_API_KEY (a generic bearer credential:
-    the endpoint is provider-neutral, e.g. DeepSeek, so naming it
-    ANTHROPIC_API_KEY would be actively wrong). No ADAPTER_BASE_URL ->
-    ANTHROPIC_API_KEY, matching the Anthropic SDK's own convention.
+def from_env(daemon_api_base_url: str, agent_token: str) -> ModelClient:
+    """Builds a ModelClient for the model named by ADAPTER_MODEL (and
+    optionally ADAPTER_PROVIDER — which registered daemon account to use;
+    the daemon defaults to "anthropic" if omitted). Neither of these is a
+    secret: choosing which model to ask for is a normal agent-run
+    parameter, unlike the credential that authenticates the call, which
+    this module never holds. Raises ModelNotConfiguredError if
+    ADAPTER_MODEL is unset — every caller in this codebase must let that
+    propagate, not catch it and substitute a fake result.
     """
     model = os.environ.get("ADAPTER_MODEL", "").strip()
-    base_url = os.environ.get("ADAPTER_BASE_URL", "").strip() or None
-
     if not model:
         raise ModelNotConfiguredError("ADAPTER_MODEL is not set — no model is configured for this agent run")
-
-    if base_url:
-        api_key = os.environ.get("ADAPTER_API_KEY", "").strip()
-        if not api_key:
-            raise ModelNotConfiguredError(
-                "ADAPTER_BASE_URL is set but ADAPTER_API_KEY is empty — an "
-                "OpenAI-compatible endpoint still needs a bearer credential"
-            )
-        return ModelClient(provider="openai_compatible", model=model, api_key=api_key, base_url=base_url)
-
-    api_key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if not api_key:
-        raise ModelNotConfiguredError("ANTHROPIC_API_KEY is not set — cannot call the Anthropic API")
-    return ModelClient(provider="anthropic", model=model, api_key=api_key)
+    provider = os.environ.get("ADAPTER_PROVIDER", "").strip()
+    return ModelClient(daemon_api_base_url=daemon_api_base_url, agent_token=agent_token, model=model, provider=provider)

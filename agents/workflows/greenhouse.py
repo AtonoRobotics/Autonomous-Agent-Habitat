@@ -66,8 +66,8 @@ def run_greenhouse_scenario(
     """
     with agent_run_span(agent_id=goal_id):
         # Steps 1-2: decompose + isolated sub-agent execution
-        tasks = decompose_goal(goal_id, goal_text, db_path)
-        handles = [start_subagent(t["task_id"], t["objective"], db_path) for t in tasks]
+        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token)
+        handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, agent_token) for t in tasks]
         gathered = [h.get_result() for h in handles]
         summary = synthesize(goal_id, gathered, db_path)
 

@@ -20,6 +20,7 @@ import (
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
 )
 
@@ -472,4 +473,113 @@ func (s *Server) handleListAccounts(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toAccountResponse(a))
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// ── Inference (the model-provider seam) ─────────────────────────────────
+//
+// An agent process calls these with only its agent bearer token — it
+// never holds a model-provider credential itself. The daemon resolves
+// Provider to a registered account (created via /v1/accounts +
+// /v1/accounts/{id}/credential, exactly like a GitHub or Gmail account)
+// and makes the real call. See daemon/inference.
+
+type inferenceMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type inferenceCompleteRequest struct {
+	Provider  string             `json:"provider,omitempty"`
+	Model     string             `json:"model"`
+	System    string             `json:"system,omitempty"`
+	Messages  []inferenceMessage `json:"messages"`
+	MaxTokens int                `json:"max_tokens,omitempty"`
+}
+
+type inferenceCompleteResponse struct {
+	Text  string `json:"text,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+type inferenceCountTokensResponse struct {
+	InputTokens int    `json:"input_tokens,omitempty"`
+	Error       string `json:"error,omitempty"`
+}
+
+// inferenceUnavailable mirrors credentialsUnavailable: inference depends
+// on the same credential store, so the same configuration gate applies.
+func (s *Server) inferenceUnavailable(w http.ResponseWriter) bool {
+	if s.Inference != nil {
+		return false
+	}
+	writeJSON(w, http.StatusServiceUnavailable, simpleResponse{Error: "inference is not configured (AMH_CREDENTIAL_KEY unset) — /v1/inference routes are disabled"})
+	return true
+}
+
+func toInferenceMessages(in []inferenceMessage) []inference.Message {
+	out := make([]inference.Message, len(in))
+	for i, m := range in {
+		out[i] = inference.Message{Role: m.Role, Content: m.Content}
+	}
+	return out
+}
+
+func inferenceErrorStatus(err error) int {
+	if errors.Is(err, inference.ErrProviderNotConfigured) {
+		return http.StatusNotFound
+	}
+	return http.StatusBadGateway
+}
+
+func (s *Server) handleInferenceComplete(w http.ResponseWriter, r *http.Request) {
+	if s.inferenceUnavailable(w) {
+		return
+	}
+	var req inferenceCompleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, inferenceCompleteResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if req.Model == "" {
+		writeJSON(w, http.StatusBadRequest, inferenceCompleteResponse{Error: "model is required"})
+		return
+	}
+	text, err := s.Inference.Complete(r.Context(), inference.Request{
+		Provider:  req.Provider,
+		Model:     req.Model,
+		System:    req.System,
+		Messages:  toInferenceMessages(req.Messages),
+		MaxTokens: req.MaxTokens,
+	})
+	if err != nil {
+		writeJSON(w, inferenceErrorStatus(err), inferenceCompleteResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, inferenceCompleteResponse{Text: text})
+}
+
+func (s *Server) handleInferenceCountTokens(w http.ResponseWriter, r *http.Request) {
+	if s.inferenceUnavailable(w) {
+		return
+	}
+	var req inferenceCompleteRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, inferenceCountTokensResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if req.Model == "" {
+		writeJSON(w, http.StatusBadRequest, inferenceCountTokensResponse{Error: "model is required"})
+		return
+	}
+	n, err := s.Inference.CountTokens(r.Context(), inference.Request{
+		Provider: req.Provider,
+		Model:    req.Model,
+		System:   req.System,
+		Messages: toInferenceMessages(req.Messages),
+	})
+	if err != nil {
+		writeJSON(w, inferenceErrorStatus(err), inferenceCountTokensResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, inferenceCountTokensResponse{InputTokens: n})
 }

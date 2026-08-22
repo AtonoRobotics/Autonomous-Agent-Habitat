@@ -33,6 +33,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/safetycase"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/sandbox"
@@ -116,6 +117,7 @@ type Server struct {
 	Extensions  *extensions.Registry
 	Sandbox     *sandbox.Provisioner
 	Credentials *credentials.Store
+	Inference   *inference.Router
 	Tracer      trace.TracerProvider
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
@@ -134,6 +136,10 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 	if log == nil {
 		log = slog.Default()
 	}
+	var inferenceRouter *inference.Router
+	if creds != nil {
+		inferenceRouter = inference.New(creds)
+	}
 	return &Server{
 		Addr:        addr,
 		DB:          db,
@@ -143,6 +149,7 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 		Extensions:  extensions.New(db),
 		Sandbox:     sandbox.New(db, sandboxBaseDir),
 		Credentials: creds,
+		Inference:   inferenceRouter,
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,
@@ -249,6 +256,15 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleListAccounts, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/accounts/{accountID}",
 		s.Auth.RequireRole(s.handleGetAccount, authn.RoleAgent, authn.RoleOperator))
+
+	// Inference: agent OR operator, same tier as actuation — this is the
+	// model-provider seam (docs/AMH-SPECIFICATION.md §2.1) an ephemeral
+	// agent computer calls into instead of holding a model credential
+	// itself. See daemon/inference and controlplane.go's handlers.
+	mux.HandleFunc("POST /v1/inference/complete",
+		s.Auth.RequireRole(s.handleInferenceComplete, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/inference/count-tokens",
+		s.Auth.RequireRole(s.handleInferenceCountTokens, authn.RoleAgent, authn.RoleOperator))
 
 	return mux
 }

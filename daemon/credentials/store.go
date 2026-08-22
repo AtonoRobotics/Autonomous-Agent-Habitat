@@ -164,6 +164,28 @@ func (s *Store) GetAccount(ctx context.Context, id string) (*Account, error) {
 	return &a, nil
 }
 
+// GetActiveAccountByProvider finds the non-revoked account for provider
+// (e.g. "anthropic", "openai-codex", "glm", "grok") — the lookup
+// daemon/inference uses to resolve which credential backs a model call.
+// If more than one non-revoked account shares a provider, the most
+// recently created one wins; a deployment wanting more than one account
+// per provider active at once should give them distinct provider strings
+// (e.g. "anthropic-prod", "anthropic-eval").
+func (s *Store) GetActiveAccountByProvider(ctx context.Context, provider string) (*Account, error) {
+	var id string
+	err := s.DB.QueryRowContext(ctx,
+		`SELECT id FROM account WHERE provider = ? AND status = 'active' ORDER BY created_at DESC LIMIT 1`,
+		provider,
+	).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: no active account for provider %q", ErrNotFound, provider)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("credentials: get account by provider %q: %w", provider, err)
+	}
+	return s.GetAccount(ctx, id)
+}
+
 func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
 	rows, err := s.DB.QueryContext(ctx, `SELECT id FROM account ORDER BY created_at DESC`)
 	if err != nil {

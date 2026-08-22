@@ -301,6 +301,97 @@ func TestAccountRoutes_503WhenCredentialStoreDisabled(t *testing.T) {
 	}
 }
 
+// ── Inference ────────────────────────────────────────────────────────────
+
+func registerFakeModelProvider(t *testing.T, ts *httptest.Server, providerFakeURL string) {
+	t.Helper()
+	createBody, _ := json.Marshal(map[string]string{"provider": "test-fake", "display_name": "fake provider"})
+	create := postJSON(t, ts.URL+"/v1/accounts", testOperatorToken, createBody)
+	var acct accountResponse
+	json.NewDecoder(create.Body).Decode(&acct)
+	create.Body.Close()
+
+	envelope, _ := json.Marshal(map[string]string{"kind": "openai_compatible", "api_key": "test-key", "base_url": providerFakeURL})
+	credBody, _ := json.Marshal(map[string]string{"secret": string(envelope)})
+	putCred := postJSON(t, ts.URL+"/v1/accounts/"+acct.ID+"/credential", testOperatorToken, credBody)
+	if putCred.StatusCode != http.StatusOK {
+		t.Fatalf("register fake provider credential: expected 200, got %d", putCred.StatusCode)
+	}
+	putCred.Body.Close()
+}
+
+func TestInferenceComplete_RealRoundTripThroughRegisteredProvider(t *testing.T) {
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the real answer"}}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProvider(t, ts, fakeProvider.URL)
+
+	body, _ := json.Marshal(map[string]any{
+		"provider": "test-fake", "model": "test-model", "system": "be helpful",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	resp := postJSON(t, ts.URL+"/v1/inference/complete", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result inferenceCompleteResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Text != "the real answer" {
+		t.Fatalf("expected the real provider text, got %q", result.Text)
+	}
+}
+
+func TestInferenceComplete_NoAccountRegistered_Returns404(t *testing.T) {
+	ts := newTestServer(t, true)
+	body, _ := json.Marshal(map[string]any{"provider": "nonexistent", "model": "x", "messages": []map[string]string{{"role": "user", "content": "hi"}}})
+	resp := postJSON(t, ts.URL+"/v1/inference/complete", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unregistered provider, got %d", resp.StatusCode)
+	}
+}
+
+func TestInferenceComplete_OperatorTokenAlsoAllowed(t *testing.T) {
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProvider(t, ts, fakeProvider.URL)
+
+	body, _ := json.Marshal(map[string]any{"provider": "test-fake", "model": "x", "messages": []map[string]string{{"role": "user", "content": "hi"}}})
+	resp := postJSON(t, ts.URL+"/v1/inference/complete", testOperatorToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected operator token to also be allowed, got %d", resp.StatusCode)
+	}
+}
+
+func TestInferenceRoutes_503WhenCredentialStoreDisabled(t *testing.T) {
+	ts := newTestServer(t, false)
+	body, _ := json.Marshal(map[string]any{"model": "x", "messages": []map[string]string{{"role": "user", "content": "hi"}}})
+	resp := postJSON(t, ts.URL+"/v1/inference/complete", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the credential store isn't configured, got %d", resp.StatusCode)
+	}
+}
+
+func TestInferenceComplete_RequiresModel(t *testing.T) {
+	ts := newTestServer(t, true)
+	body, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hi"}}})
+	resp := postJSON(t, ts.URL+"/v1/inference/complete", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when model is missing, got %d", resp.StatusCode)
+	}
+}
+
 func mustReadAll(t *testing.T, r io.Reader) []byte {
 	t.Helper()
 	b, err := io.ReadAll(r)

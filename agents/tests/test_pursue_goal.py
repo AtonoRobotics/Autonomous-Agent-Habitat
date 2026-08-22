@@ -30,7 +30,7 @@ def db_path(tmp_path):
     return path
 
 
-def test_pursue_goal_runs_to_completion(db_path, fake_model_server):
+def test_pursue_goal_runs_to_completion(db_path, daemon, fake_model_server):
     from dbos import DBOS
 
     from workflows.goal import pursue_goal
@@ -40,7 +40,7 @@ def test_pursue_goal_runs_to_completion(db_path, fake_model_server):
     DBOS.launch()
     try:
         goal_id = str(uuid.uuid4())
-        result = pursue_goal(goal_id, "monitor greenhouse temperature; open vent on threshold", db_path)
+        result = pursue_goal(goal_id, "monitor greenhouse temperature; open vent on threshold", db_path, daemon.base_url, daemon.agent_token)
         assert "monitor greenhouse temperature" in result
         assert "open vent on threshold" in result
     finally:
@@ -56,7 +56,7 @@ def test_pursue_goal_runs_to_completion(db_path, fake_model_server):
     conn.close()
 
 
-def test_pursue_goal_survives_process_restart(db_path, tmp_path, fake_model_server):
+def test_pursue_goal_survives_process_restart(db_path, tmp_path, daemon, fake_model_server):
     """Starts pursue_goal *asynchronously* (DBOS.start_workflow) under a
     fixed workflow ID in a subprocess that crashes (os._exit, skipping all
     cleanup and never calling get_result()) immediately after — simulating
@@ -81,7 +81,7 @@ def test_pursue_goal_survives_process_restart(db_path, tmp_path, fake_model_serv
         init_dbos("amh-agents-test", {db_path!r})
         DBOS.launch()
         with SetWorkflowID({workflow_id!r}):
-            DBOS.start_workflow(pursue_goal, {goal_id!r}, {goal_text!r}, {db_path!r})
+            DBOS.start_workflow(pursue_goal, {goal_id!r}, {goal_text!r}, {db_path!r}, {daemon.base_url!r}, {daemon.agent_token!r})
         # Crash immediately: no get_result(), no DBOS.destroy(). The
         # workflow is durably registered as PENDING but has not necessarily
         # run any steps yet — recovery must be able to start it from

@@ -34,6 +34,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/safetycase"
 )
 
 type actuateRequest struct {
@@ -70,14 +71,50 @@ type ticketStatusResponse struct {
 	Error     string `json:"error,omitempty"`
 }
 
+type createSafetyCaseRequest struct {
+	SubjectID   string `json:"subject_id"`
+	SubjectType string `json:"subject_type"`
+	RiskClass   string `json:"risk_class"`
+}
+
+type createSafetyCaseResponse struct {
+	CaseID string `json:"case_id,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
+type submitEvidenceRequest struct {
+	GuardrailProof map[string]any `json:"guardrail_proof"`
+}
+
+type approveSafetyCaseRequest struct {
+	ApprovedBy string `json:"approved_by"`
+}
+
+type revokeSafetyCaseRequest struct {
+	Reason string `json:"reason"`
+}
+
+type safetyCaseStatusResponse struct {
+	CaseID            string `json:"case_id,omitempty"`
+	SubjectID         string `json:"subject_id,omitempty"`
+	SubjectType       string `json:"subject_type,omitempty"`
+	RiskClass         string `json:"risk_class,omitempty"`
+	IndependentReview bool   `json:"independent_review"`
+	Approved          bool   `json:"approved"`
+	Revoked           bool   `json:"revoked"`
+	RevokedReason     string `json:"revoked_reason,omitempty"`
+	Error             string `json:"error,omitempty"`
+}
+
 type Server struct {
-	Addr     string
-	DB       *sql.DB
-	Registry *connectors.Registry
-	Gate     *interlocks.Gate
-	Tracer   trace.TracerProvider
-	Auth     *authn.Authenticator
-	Log      *slog.Logger
+	Addr       string
+	DB         *sql.DB
+	Registry   *connectors.Registry
+	Gate       *interlocks.Gate
+	SafetyCase *safetycase.Registry
+	Tracer     trace.TracerProvider
+	Auth       *authn.Authenticator
+	Log        *slog.Logger
 
 	srv *http.Server
 }
@@ -90,13 +127,14 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 		log = slog.Default()
 	}
 	return &Server{
-		Addr:     addr,
-		DB:       db,
-		Registry: connectors.NewRegistry(db),
-		Gate:     interlocks.New(db),
-		Tracer:   tp,
-		Auth:     auth,
-		Log:      log,
+		Addr:       addr,
+		DB:         db,
+		Registry:   connectors.NewRegistry(db),
+		Gate:       interlocks.New(db),
+		SafetyCase: safetycase.New(db),
+		Tracer:     tp,
+		Auth:       auth,
+		Log:        log,
 	}
 }
 
@@ -110,6 +148,11 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 //   - approve: operator ONLY. An agent token is mechanically refused
 //     (403) here — see daemon/authn's doc comment for why this is the
 //     one property the whole package exists to enforce.
+//   - safety-cases: create/evidence/status are agent OR operator
+//     (routine agent work, same as the ApprovalGate's equivalents);
+//     approve and revoke are operator ONLY — see daemon/safetycase's
+//     doc comment for why the operator-only gate here IS the
+//     independent review §14.7 requires, in V0's collapsed design.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/device-actions/{deviceActionID}/actuate",
@@ -120,6 +163,16 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleApprove, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/approval-gates/{ticketID}",
 		s.Auth.RequireRole(s.handleTicketStatus, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/safety-cases",
+		s.Auth.RequireRole(s.handleCreateSafetyCase, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/safety-cases/{caseID}/evidence",
+		s.Auth.RequireRole(s.handleSubmitSafetyCaseEvidence, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/safety-cases/{caseID}/approve",
+		s.Auth.RequireRole(s.handleApproveSafetyCase, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/safety-cases/{caseID}/revoke",
+		s.Auth.RequireRole(s.handleRevokeSafetyCase, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/safety-cases/{caseID}",
+		s.Auth.RequireRole(s.handleSafetyCaseStatus, authn.RoleAgent, authn.RoleOperator))
 	return mux
 }
 
@@ -253,6 +306,133 @@ func (s *Server) handleTicketStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, ticketStatusResponse{Satisfied: satisfied})
+}
+
+// handleCreateSafetyCase opens a new SafetyCase for a subject that has no
+// verified inverse — the harder evidence path to earned autonomy for
+// irreversible/high-consequence actions (§14.7). Creating a case grants
+// nothing by itself; evidence accumulates via handleSubmitSafetyCaseEvidence
+// and only handleApproveSafetyCase (operator-only) can make it load-bearing.
+func (s *Server) handleCreateSafetyCase(w http.ResponseWriter, r *http.Request) {
+	var req createSafetyCaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, createSafetyCaseResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	caseID, err := s.SafetyCase.Create(r.Context(), req.SubjectID, safetycase.SubjectType(req.SubjectType), safetycase.RiskClass(req.RiskClass))
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, safetycase.ErrInvalidRiskClass) || errors.Is(err, safetycase.ErrInvalidSubjectType) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, createSafetyCaseResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, createSafetyCaseResponse{CaseID: caseID})
+}
+
+func (s *Server) handleSubmitSafetyCaseEvidence(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseID")
+
+	var req submitEvidenceRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+
+	if err := s.SafetyCase.SubmitEvidence(r.Context(), caseID, req.GuardrailProof); err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, safetycase.ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		writeJSON(w, status, simpleResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, simpleResponse{})
+}
+
+// handleApproveSafetyCase is gated to authn.RoleOperator alone (see
+// Handler's routing table) — this IS the independent review §14.7
+// requires in V0's collapsed design; see daemon/safetycase's doc comment.
+func (s *Server) handleApproveSafetyCase(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseID")
+
+	var req approveSafetyCaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if req.ApprovedBy == "" {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "approved_by is required"})
+		return
+	}
+
+	if err := s.SafetyCase.Approve(r.Context(), caseID, req.ApprovedBy); err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, safetycase.ErrNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, safetycase.ErrAlreadyApproved), errors.Is(err, safetycase.ErrAlreadyRevoked):
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, simpleResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, simpleResponse{})
+}
+
+// handleRevokeSafetyCase is gated to authn.RoleOperator alone. Per §14.7
+// this is immediate and final — no rate window, and the revoked row is
+// never re-approved (see daemon/safetycase.Registry.Approve).
+func (s *Server) handleRevokeSafetyCase(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseID")
+
+	var req revokeSafetyCaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if req.Reason == "" {
+		writeJSON(w, http.StatusBadRequest, simpleResponse{Error: "reason is required"})
+		return
+	}
+
+	if err := s.SafetyCase.Revoke(r.Context(), caseID, req.Reason); err != nil {
+		status := http.StatusInternalServerError
+		switch {
+		case errors.Is(err, safetycase.ErrNotFound):
+			status = http.StatusNotFound
+		case errors.Is(err, safetycase.ErrAlreadyRevoked), errors.Is(err, safetycase.ErrNotApproved):
+			status = http.StatusConflict
+		}
+		writeJSON(w, status, simpleResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, simpleResponse{})
+}
+
+func (s *Server) handleSafetyCaseStatus(w http.ResponseWriter, r *http.Request) {
+	caseID := r.PathValue("caseID")
+	status, err := s.SafetyCase.Status(r.Context(), caseID)
+	if err != nil {
+		httpStatus := http.StatusInternalServerError
+		if errors.Is(err, safetycase.ErrNotFound) {
+			httpStatus = http.StatusNotFound
+		}
+		writeJSON(w, httpStatus, safetyCaseStatusResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, safetyCaseStatusResponse{
+		CaseID:            status.ID,
+		SubjectID:         status.SubjectID,
+		SubjectType:       string(status.SubjectType),
+		RiskClass:         string(status.RiskClass),
+		IndependentReview: status.IndependentReview,
+		Approved:          status.Approved,
+		Revoked:           status.Revoked,
+		RevokedReason:     status.RevokedReason,
+	})
 }
 
 func writeJSON(w http.ResponseWriter, status int, body any) {

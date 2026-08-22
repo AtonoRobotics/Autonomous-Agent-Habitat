@@ -205,12 +205,23 @@ func loadDeviceAction(ctx context.Context, db *sql.DB, id string) (*deviceAction
 	return da, nil
 }
 
+// hasApprovedSafetyCase enforces §14.7's evidence floor explicitly:
+// independent_review MUST be true for any risk_class above 'low'. In V0
+// every case that reaches approved_at=NOT NULL also has
+// independent_review=1 (daemon/safetycase.Registry.Approve sets both
+// together, for every risk_class, not only the ones the floor requires
+// it for) — but this query checks the rule directly rather than relying
+// on that invariant holding forever as safetycase.Approve evolves. A
+// case that somehow reached approved_at without independent_review
+// (data migrated from elsewhere, a future code path that doesn't go
+// through Approve) must not silently grant autonomy here.
 func hasApprovedSafetyCase(ctx context.Context, db *sql.DB, subjectID string) (bool, error) {
 	var n int
 	err := db.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM safety_case
 		 WHERE subject_id = ? AND subject_type = 'device_action'
-		   AND approved_at IS NOT NULL AND revoked_at IS NULL`,
+		   AND approved_at IS NOT NULL AND revoked_at IS NULL
+		   AND (risk_class = 'low' OR independent_review = 1)`,
 		subjectID,
 	).Scan(&n)
 	if err != nil {

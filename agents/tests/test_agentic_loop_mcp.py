@@ -32,9 +32,20 @@ pytestmark = pytest.mark.skipif(
 
 
 class _ScriptedDaemon(BaseHTTPRequestHandler):
+    """Stands in for the real daemon on two distinct routes: model
+    completions (any path other than /v1/operations, matching the shape
+    the pre-existing tests already relied on) and the operations-tracking
+    calls agentic_loop.py's MCP call site now also makes against the same
+    daemon_api_base_url. operations_calls records every /v1/operations
+    POST body so tests can assert on what was proposed; operations_status
+    lets a test script a failure response to prove tracking failures don't
+    block the underlying tool call."""
+
     responses: list[str] = []
     call_count = 0
     last_system_prompt = ""
+    operations_calls: list[dict] = []
+    operations_status = 201
 
     def log_message(self, format, *args):
         pass
@@ -43,6 +54,16 @@ class _ScriptedDaemon(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length))
         cls = type(self)
+
+        if self.path.startswith("/v1/operations"):
+            cls.operations_calls.append(body)
+            response = json.dumps({"effect_id": "test-effect", "state": "needs_approval"}).encode()
+            self.send_response(cls.operations_status)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(response)
+            return
+
         cls.last_system_prompt = body.get("system", "")
         text = cls.responses[cls.call_count]
         cls.call_count += 1
@@ -57,6 +78,8 @@ class _ScriptedDaemon(BaseHTTPRequestHandler):
 def scripted_daemon():
     _ScriptedDaemon.responses = []
     _ScriptedDaemon.call_count = 0
+    _ScriptedDaemon.operations_calls = []
+    _ScriptedDaemon.operations_status = 201
     server = HTTPServer(("127.0.0.1", 0), _ScriptedDaemon)
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -137,3 +160,51 @@ def test_mcp_servers_from_env_parses_real_config(monkeypatch):
     )
     specs = mcp_servers_from_env()
     assert specs == [MCPServerSpec(name="fs", command="node", args=["server.js", "/tmp"], env={"FOO": "bar"})]
+
+
+def test_mcp_tool_call_proposes_an_operations_effect(scripted_daemon, tmp_path):
+    """Each MCP tool call is proposed as an external effect (§4) through
+    workflows/operations.py before it runs — asserting the real HTTP POST
+    landed on the daemon, not just that the loop still works."""
+    mcp_root = tmp_path / "mcp-root"
+    mcp_root.mkdir()
+    mcp_server = MCPServerSpec(name="fs", command="node", args=[SERVER_ENTRYPOINT, str(mcp_root)])
+
+    write_path = str(mcp_root / "hello.txt")
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "mcp__fs__write_file", "args": {"path": write_path, "content": "hi"}}),
+        json.dumps({"tool": "done", "result": "wrote it"}),
+    ]
+    vfs = VFS(str(tmp_path / "vfs-root"))
+
+    run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+
+    assert len(_ScriptedDaemon.operations_calls) == 1
+    proposed = _ScriptedDaemon.operations_calls[0]
+    assert proposed["owner_extension_id"] == "amh.core/mcp-client"
+    assert proposed["effect_type"] == "mcp_tool_call:fs:write_file"
+    assert proposed["reversibility"] == "none"
+    assert proposed["payload"] == {"server": "fs", "tool": "write_file", "args": {"path": write_path, "content": "hi"}}
+
+
+def test_mcp_tool_call_still_runs_when_effect_tracking_fails(scripted_daemon, tmp_path):
+    """A daemon-side failure to record the operations effect (e.g. the
+    /v1/operations route erroring) must not block or fail the underlying
+    MCP tool call — tracking is best-effort, never a gate."""
+    _ScriptedDaemon.operations_status = 500
+
+    mcp_root = tmp_path / "mcp-root"
+    mcp_root.mkdir()
+    mcp_server = MCPServerSpec(name="fs", command="node", args=[SERVER_ENTRYPOINT, str(mcp_root)])
+
+    write_path = str(mcp_root / "hello.txt")
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "mcp__fs__write_file", "args": {"path": write_path, "content": "still written"}}),
+        json.dumps({"tool": "done", "result": "wrote it despite tracking failure"}),
+    ]
+    vfs = VFS(str(tmp_path / "vfs-root"))
+
+    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+
+    assert result.result == "wrote it despite tracking failure"
+    assert (mcp_root / "hello.txt").read_text() == "still written"

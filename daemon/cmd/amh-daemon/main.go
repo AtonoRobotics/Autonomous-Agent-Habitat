@@ -112,7 +112,7 @@ func main() {
 	// against a key already registered via
 	// POST /v1/extensions/trusted-keys.
 	requireSignatures := getenv("AMH_EXTENSIONS_REQUIRE_SIGNATURES", "false") == "true"
-	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
+	apiSrv := api.New(host+":"+apiPort, db, dbURL, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
 
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)

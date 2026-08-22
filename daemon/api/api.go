@@ -20,6 +20,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/backup"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
@@ -41,6 +42,7 @@ type Server struct {
 	Inference   *inference.Router
 	Policy      *policy.Engine
 	SelfImprove *selfimprove.Engine
+	Backup      *backup.Backer
 	Tracer      trace.TracerProvider
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
@@ -57,8 +59,11 @@ type Server struct {
 // extension/sandbox surfaces don't depend on it. requireSignatures sets
 // extensions.Registry.RequireSignatures — see that field's doc comment and
 // main.go's AMH_EXTENSIONS_REQUIRE_SIGNATURES for why this defaults to
-// false rather than being mandatory from day one.
-func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store, requireSignatures bool) *Server {
+// false rather than being mandatory from day one. dbURL is the same
+// connection string db was opened from — daemon/backup shells out to
+// pg_dump/pg_restore, which need their own connection string rather than
+// database/sql's *sql.DB handle.
+func New(addr string, db *sql.DB, dbURL string, tp trace.TracerProvider, auth *authn.Authenticator, log *slog.Logger, sandboxBaseDir string, creds *credentials.Store, requireSignatures bool) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
@@ -77,6 +82,7 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 		Inference:   inferenceRouter,
 		Policy:      policy.New(db),
 		SelfImprove: selfimprove.New(db),
+		Backup:      backup.New(dbURL),
 		Tracer:      tp,
 		Auth:        auth,
 		Log:         log,
@@ -240,6 +246,16 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleRollbackCandidate, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/selfimprove/candidates/{candidateID}/reject",
 		s.Auth.RequireRole(s.handleRejectCandidate, authn.RoleOperator))
+
+	// Backup/restore (§14): operator-only, same rationale as extension
+	// mutations and account/credential writes above — running pg_dump/
+	// pg_restore against the daemon's own store is a "deterministic
+	// services commit" action, not something an autonomous agent token
+	// triggers. See daemon/backup and backup.go for the implementation.
+	mux.HandleFunc("POST /v1/backup",
+		s.Auth.RequireRole(s.handleBackup, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/restore",
+		s.Auth.RequireRole(s.handleRestore, authn.RoleOperator))
 
 	return mux
 }

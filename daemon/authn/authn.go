@@ -5,13 +5,14 @@
 // §14.7's anti-reward-hacking discipline — the same DGM cautionary case
 // §10 cites, applied to identity instead of eval logging).
 //
-// V0 scope, stated plainly: two static, long-lived tokens (one per role),
-// configured via environment variables, checked with constant-time
-// comparison. This is not a full identity system — no per-user tokens,
-// no expiry, no revocation list. It is enough to make "the requesting
-// agent literally does not hold the credential needed to approve its own
-// request" a fact enforced by the server, not a hopeful comment. A real
-// multi-operator deployment needs a proper identity provider in front of
+// Two static, long-lived tokens (one per role), configured via
+// environment variables, checked with constant-time comparison. This is
+// deliberately not a full identity system — no per-user tokens, no
+// expiry, no revocation list — because those aren't what the security
+// property here needs: "the requesting agent literally does not hold the
+// credential needed to approve its own request" is a fact enforced by the
+// server, not a hopeful comment. A multi-operator deployment needing
+// per-operator accountability puts a proper identity provider in front of
 // this; see the caveat in docs/AMH-SPECIFICATION.md re: SafetyCase's
 // independent_review role being deployment-specific.
 package authn

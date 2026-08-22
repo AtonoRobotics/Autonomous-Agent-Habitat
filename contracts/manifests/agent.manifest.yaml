@@ -11,7 +11,7 @@ spec:
     write_todos: true   # opt-in upstream (DeepAgents v0.7); on by default in AMH
   tools: [ssh.exec, memory.recall]
   subagents:
-    max_concurrent: 1   # V0: single sub-agent
+    max_concurrent: 1   # this agent runs one sub-agent at a time
     isolation: strict
     return: result_only
     share_trace_to_manager: true

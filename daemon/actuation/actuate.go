@@ -4,12 +4,14 @@
 // earned autonomy (§14.7), and the ApprovalGate (§12) meet the connector
 // layer for physical device actuation.
 //
-// V0 scope note: the specification places actuate_device inside a Python
-// DBOS workflow, calling out to the daemon's connector layer. For V0 this
-// logic lives directly in the Go daemon (which owns device I/O per
-// Artifact A) and is unit-tested here; the DBOS<->daemon RPC bridge
-// (contracts/proto) that lets a Python workflow step invoke this
-// remotely is deferred to a follow-up task.
+// This logic lives directly in the Go daemon, which owns device I/O per
+// Artifact A, and is called over HTTP by the Python agent layer
+// (daemon/api, agents/workflows/actuate.py) rather than through a
+// DBOS<->daemon RPC bridge — no such bridge (contracts/proto) exists;
+// HTTP is the actual transport. Per the v10 core/extension boundary
+// (docs/AMH-SPECIFICATION.md §8, §13, §16), this entire package —
+// physical device actuation — belongs in a separate Physical AI
+// extension, not AMH core; it has not yet been moved there.
 package actuation
 
 import (
@@ -206,15 +208,15 @@ func loadDeviceAction(ctx context.Context, db *sql.DB, id string) (*deviceAction
 }
 
 // hasApprovedSafetyCase enforces §14.7's evidence floor explicitly:
-// independent_review MUST be true for any risk_class above 'low'. In V0
+// independent_review MUST be true for any risk_class above 'low'. Today
 // every case that reaches approved_at=NOT NULL also has
 // independent_review=1 (daemon/safetycase.Registry.Approve sets both
 // together, for every risk_class, not only the ones the floor requires
 // it for) — but this query checks the rule directly rather than relying
 // on that invariant holding forever as safetycase.Approve evolves. A
 // case that somehow reached approved_at without independent_review
-// (data migrated from elsewhere, a future code path that doesn't go
-// through Approve) must not silently grant autonomy here.
+// (data migrated from elsewhere, a code path that doesn't go through
+// Approve) must not silently grant autonomy here.
 func hasApprovedSafetyCase(ctx context.Context, db *sql.DB, subjectID string) (bool, error) {
 	var n int
 	err := db.QueryRowContext(ctx,
@@ -231,8 +233,10 @@ func hasApprovedSafetyCase(ctx context.Context, db *sql.DB, subjectID string) (b
 }
 
 // renderInverse substitutes {{prior}} in the stored template's "shell_template"
-// JSON field with the observed prior state. V0 keeps this to one placeholder;
-// richer templating is a post-V0 concern once more device types exist.
+// JSON field with the observed prior state. One substitution variable is
+// what every currently-supported reversible device_action needs; a
+// device type whose inverse depends on more than the single prior-state
+// read would need this template grammar extended.
 func renderInverse(templateJSON, priorState string) (string, error) {
 	if templateJSON == "" {
 		return "", fmt.Errorf("device_action has reversible=true but no inverse_template")

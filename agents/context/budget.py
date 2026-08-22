@@ -5,9 +5,16 @@ cap (defaulting to 25k tokens, matching Claude Code's product default), and
 reports when the compaction threshold is crossed so the compactor (§3.2,
 compactor.py) can act.
 
-V0 token counting is a documented approximation (chars // 4) rather than a
-real tokenizer — plugging in a model-specific tokenizer is a drop-in swap
-via the `count_tokens` callable, not a redesign.
+Two-tier token counting, matching the fail-honest (not fail-fake) pattern
+daemon/credentials and daemon/authn already use elsewhere in this
+codebase: when a real model client is configured (agents/context/llm.py),
+BudgetManager.count_tokens should be set to that client's real
+provider-side token count — the actual number the model will see, not an
+estimate. approximate_token_count below is the explicit fallback for when
+no model client is configured (no API key, or a caller that only needs a
+cheap local estimate) — it is not a stand-in for the real thing pretending
+to be one; count_tokens defaults to it only until a caller supplies the
+real counter.
 """
 
 from __future__ import annotations
@@ -17,11 +24,15 @@ from typing import Callable
 
 
 def approximate_token_count(text: str) -> int:
-    """V0 approximation: ~4 chars/token, the commonly-cited English-text
-    ratio for GPT/Claude-family tokenizers. Good enough to trigger budget
-    and compaction thresholds at roughly the right point; not a substitute
-    for a real tokenizer when exact accounting matters (billing, hard
-    provider-side limits)."""
+    """Local, offline fallback: ~4 chars/token, the commonly-cited
+    English-text ratio for GPT/Claude-family tokenizers. Deliberately not
+    an attempt at a more accurate local heuristic — English word-count-based
+    ratios are the same order of crudeness as chars/4, and a materially
+    better count means the real provider tokenizer, not a fancier guess.
+    Good enough to trigger budget and compaction thresholds at roughly the
+    right point; not a substitute for the real count when exact accounting
+    matters (billing, hard provider-side limits) — see this module's
+    top-level doc comment for how to supply the real one."""
     return max(1, len(text) // 4)
 
 

@@ -1,6 +1,6 @@
 # AMH connector manifest — see docs/AMH-SPECIFICATION.md Artifact G.
-# V0 reference connector: a single SSH-controlled reversible device action,
-# used by the greenhouse walking-skeleton scenario (Artifact H, steps 1-4).
+# Reference connector: a single SSH-controlled reversible device action,
+# used by the greenhouse scenario (Artifact H, steps 1-4).
 apiVersion: amh/v1
 kind: Connector
 metadata:

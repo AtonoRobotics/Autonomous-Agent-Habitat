@@ -30,7 +30,7 @@ def db_path(tmp_path):
     return path
 
 
-def test_pursue_goal_runs_to_completion(db_path):
+def test_pursue_goal_runs_to_completion(db_path, fake_model_server):
     from dbos import DBOS
 
     from workflows.goal import pursue_goal
@@ -56,7 +56,7 @@ def test_pursue_goal_runs_to_completion(db_path):
     conn.close()
 
 
-def test_pursue_goal_survives_process_restart(db_path, tmp_path):
+def test_pursue_goal_survives_process_restart(db_path, tmp_path, fake_model_server):
     """Starts pursue_goal *asynchronously* (DBOS.start_workflow) under a
     fixed workflow ID in a subprocess that crashes (os._exit, skipping all
     cleanup and never calling get_result()) immediately after — simulating

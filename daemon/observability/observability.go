@@ -4,11 +4,11 @@
 // (gen_ai.tool.name etc.) so a trace spans both the Python agent layer
 // and the Go daemon coherently under one convention.
 //
-// V0 default: no exporter configured unless one is explicitly passed to
-// Init — spans are still created and recorded on the tracer provider
-// (visible to an in-memory test exporter), but nothing ships anywhere
-// unless wired to a real exporter (OTLP, stdout, etc.), matching
-// .env.example's opt-in OTEL_EXPORTER_OTLP_ENDPOINT.
+// No exporter is configured unless one is explicitly passed to Init —
+// spans are still created and recorded on the tracer provider (visible to
+// an in-memory test exporter), but nothing ships anywhere unless wired to
+// a real exporter (OTLP, stdout, etc.), matching .env.example's opt-in
+// OTEL_EXPORTER_OTLP_ENDPOINT.
 package observability
 
 import (

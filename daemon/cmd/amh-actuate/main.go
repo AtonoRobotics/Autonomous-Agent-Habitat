@@ -1,15 +1,12 @@
 // Command amh-actuate is a thin CLI wrapping daemon/actuation.Execute for
-// one device action, over SSH. It exists as the V0 bridge that lets the
-// Python agent layer (which has no direct access to the daemon's
-// in-process connector registry) trigger a real device actuation as a
-// DBOS step — a subprocess call, not a network RPC.
-//
-// This is a deliberately minimal stand-in for the daemon<->agent bridge
-// Artifact A names as contracts/proto (gRPC). A CLI is enough to prove the
-// V0 walking-skeleton scenario end-to-end (Artifact H, steps 1-4) across
-// real process boundaries; a persistent RPC service replacing per-call
-// process spawn is a follow-up task once the daemon needs to serve many
-// concurrent agent-layer requests rather than one-off V0 demonstrations.
+// one device action, over SSH — a subprocess call, not a network RPC.
+// The daemon's persistent HTTP API (daemon/api, wired in
+// agents/workflows/actuate.py) is the actual daemon<->agent bridge now;
+// this CLI predates that and is kept as a standalone ops tool for driving
+// one actuation directly (see daemon/cmd/amh-daemon for the supervised
+// long-running path). Artifact A names contracts/proto (gRPC) as the
+// formal bridge contract; neither this CLI nor the HTTP API implements
+// that transport.
 //
 // SECURITY: --insecure-skip-host-key-verify exists only for the local
 // fake-device test fixture (daemon/cmd/amh-fake-device) and must never be

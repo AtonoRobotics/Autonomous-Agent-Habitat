@@ -1,90 +1,85 @@
 # Autonomous Multi-Agent Habitat (AMH)
 
-A platform for autonomous agents doing real work under bounded authority. Fully autonomous, running 24/7, not a governance app or orchestration layer, but the core on which domain-specific applications are built.
+A continuously operating habitat for autonomous agents. It wakes from goals, schedules, events, and messages; supplies durable work, context, memory, tools, workers, and recovery; and exposes stable seams on which domain applications are built.
 
-**Designed for:** AI agents that control physical devices (via SSH, OPC-UA, MQTT, WinRM), learn from operational history, and self-heal on failure — with reversibility as the sole gating axis. Irreversible or high-consequence actions require evidence-backed approval, not blanket denial.
-
-**Architecture (v8):** Python agent/LLM layer (DeepAgents patterns reimplemented natively on DBOS) + Go control-plane daemon (systemd/Windows Service), DBOS Transact on SQLite for durable-execution, embedded hybrid KG + vector store, spatial memory R-tree index, reversible capability composition, effect-tracked self-modification, and earned autonomy staged by evidence.
+AMH is not a governance product, a security product, a physical-device stack, or a domain application. Small hard core, reversible extensions: the core contains only the invariants every domain requires. Models, harness policies, tools, connectors, memory implementations, user surfaces, and domain behavior attach as replaceable, individually installable, individually removable extensions — see `docs/AMH-SPECIFICATION.md` §1 for the full governing decision set.
 
 ## Layout
 
+Only directories that hold real, working code are listed — nothing here is a reserved name for future work.
+
 ```
-daemon/           Go control plane (single binary per OS)
-├── cmd/amh-daemon        systemd/Windows-service entry
-├── supervisor/           OTP-style supervision tree
-├── scheduler/            cron/triggers/event sources
-├── bus/                  embedded NATS + blackboard
-├── mcp/                  MCP client + server (stdio, Streamable HTTP)
-├── connectors/           REST/GraphQL/webhook + SSH/WinRM/MQTT/OPC-UA
-├── interlocks/           ApprovalGate enforcement
-└── health/               watchdog, circuit breakers, bulkheads
+daemon/                Go control-plane daemon (single binary)
+├── cmd/amh-daemon              supervisor entrypoint (systemd/Windows Service)
+├── cmd/amh-fake-device         SSH device simulator, test fixture only
+├── cmd/amh-actuate             standalone CLI for one device actuation
+├── supervisor/                 OTP-style supervision tree
+├── scheduler/                  interval ticker for routines
+├── health/                     healthz endpoint, watchdog
+├── authn/                      bearer-token RBAC (agent/operator roles)
+├── api/                        HTTP admin surface: actuation, approval gates,
+│                                safety cases, extensions, computers, connectors, accounts
+├── extensions/                 Cordis-lifecycle extension registry: discover,
+│                                activate, quiesce, dispose, dependency resolution
+├── sandbox/                    per-agent computer provisioning (container or
+│                                Linux namespace isolation)
+├── credentials/                AES-256-GCM encrypted account/module credential store
+├── interlocks/                 ApprovalGate: ticket-based approval for actions
+│                                with no verified inverse
+├── safetycase/                 standing, revocable autonomy grants for
+│                                irreversible/high-consequence actions
+├── actuation/                  device-actuation kernel (physical devices — see
+│                                the note on the v10 core/extension boundary below)
+├── connectors/                 SSH device connector
+├── observability/              OpenTelemetry tracing
+└── store/                      SQLite open + migration runner
 
-agents/           Python agent/LLM layer (uv-managed)
-├── harness/              deep-agent: planning, VFS, subagents, middleware
-├── coder/                CodeAct sandbox loop
-├── context/              budget mgr, compactor, offload
-├── memory/               5-tier + bi-temporal KG
-├── kb/                   hybrid RAG (sqlite-vec + FTS5 + graph)
-├── selfimprove/          GEPA/ACE/Voyager + eval-gate
-└── workflows/            DBOS durable workflows & activities
+agents/                 Python cognition layer (uv-managed)
+├── harness/                    tool-calling loop, scoped VFS, planning, MCP client
+├── context/                    token budget manager, compaction
+└── workflows/                  DBOS durable workflows: goal pursuit, actuation,
+                                 approval, safety-case, and control-plane HTTP clients
 
-contracts/        SHARED public interfaces
+extensions/             Installed extensions, activated through daemon/extensions
+└── control-plane-ui/           first-party operator UI, itself an extension —
+                                 not baked into the daemon
+
+contracts/              Public interface contracts
 ├── ontology.schema.json
 ├── envelope.schema.json
-├── manifests/
-└── proto/                daemon↔agent gRPC
+├── extension-manifest.schema.json
+├── action-envelope.schema.json
+├── effect-record.schema.json
+├── policy-decision.schema.json
+├── manifests/                  example agent/skill/connector manifests
+└── proto/                      reserved for a future gRPC daemon<->agent transport
 
-sdk/              domain-app extension SDK (stable public API)
-├── python/               amh_sdk (Protocols)
-└── ts/                   @amh/sdk (interfaces)
-
-store/            DDL, migrations
-migrations/       ordered SQL migrations for the business ledger
-evals/            eval suites, canary configs
-deploy/           systemd unit, Windows service, installers
-
-clients/          field surfaces (Linux page, iOS app)
-fixtures/         test-only packs and throwaway keys
-docker/           tenant-computer and local-stack images
-scripts/          bootstrap, pack signing, local run
-state/            per-tenant on-disk state (git-ignored)
+store/migrations/       Canonical SQL DDL, applied by daemon/store and agents/workflows/ontology.py
+fixtures/                test-only device simulators and a pinned MCP server
 ```
 
-## Getting started
+## What's real right now
 
-**Read first:** `docs/AMH-SPECIFICATION.md` — the complete architecture spec, design rationale, component decisions, and staged V0/V1 roadmap.
+Everything below is working code with tests that exercise it against real processes, real SQLite, and (where applicable) a real network protocol — not mocked.
 
-**V0 (walking skeleton):** Go daemon supervisor + Python agent layer on DBOS/SQLite, one SSH connector, one reversible device action, approval gate for irreversible actions, MCP client, context budget manager, OTel tracing. Greenhouse scenario (monitor temp, open vent on threshold, self-heal on fault) runs end-to-end and survives daemon restart.
+- **Durable execution.** DBOS Transact on SQLite. A crashed process resumes exactly where it left off, no duplicate committed steps — proven by restart-mid-flight tests on both the goal-pursuit and greenhouse workflows.
+- **Device actuation.** A real SSH connector, key-based auth, host-key verification required. Reversible actions execute autonomously with a verified inverse recorded; actions with no inverse require either an ApprovalGate ticket or an operator-approved SafetyCase.
+- **Extension registry (`daemon/extensions`).** Discover, activate, quiesce, dispose against `contracts/extension-manifest.schema.json`; dependency resolution between capability providers and consumers; disposal recorded as activation's verified inverse. Knowledge base, memory, model providers, connectors, and harnesses are all just extensions to this registry — it has no domain-specific logic.
+- **Computers (`daemon/sandbox`).** Each agent's own isolated compute instance: container-backed via docker, or process-backed via a real Linux mount namespace when no docker daemon is present. Create/Destroy is a verified-inverse pair.
+- **Credentials (`daemon/credentials`).** AES-256-GCM encrypted at rest, fails closed with no encryption key configured, rotation-aware, never returns a secret over the admin API.
+- **Control-plane UI (`extensions/control-plane-ui`).** Installs harnesses, provisions computers, configures connectors, and authenticates accounts — installed and activated through the extension registry itself, not compiled into the daemon.
+- **Authorization.** Two bearer-token roles (agent, operator), constant-time comparison, fail-closed daemon startup if either token is unset. An agent token is mechanically refused on every operator-only route (extension install/activate/dispose, credential writes, SafetyCase/ApprovalGate approval) — not a convention, enforced by the server.
+- **Context management.** Per-tool-result token cap, budget tracking, compaction triggered at a configurable threshold, trace-context propagation across DBOS worker-thread boundaries so a subordinate agent's span nests under its parent's.
+- **MCP client.** stdio transport, tested against a real third-party MCP server (pinned, not `npx`-refetched per run).
 
-**V1 (autonomous habitat):** orchestrator/worker multi-agent (3–5 sub-agents for independent work), full 5-tier memory + bi-temporal KG, coder agent + sandbox, self-improvement (GEPA/ACE/Voyager behind eval/canary/promote), full self-healing (capability-level granularity), earned autonomy graduation engine (reversible track), Connector SDK, MCP server, extension/plugin model.
+## What's declared but not yet built
 
-## Key architectural decisions
+Stated plainly rather than hidden in a roadmap: `agents/context/budget.py`'s token counting and `agents/context/compactor.py`'s summarization are not model-backed — there is no LLM client in this repository yet, so goal decomposition and sub-agent work are not real cognition either. Building that requires a model provider and an API key this environment does not hold; the code is honest about producing a real result or failing, not about faking one.
 
-| # | Subsystem | Decision | Why |
-|-|-|-|-|
-| 1 | Runtime | Python + Go | Deepest agent ecosystem + single-binary daemon, native Windows |
-| 2 | Durable execution | DBOS Transact (SQLite) | In-process library, no separate server, official Windows support |
-| 3 | Gating axis | Reversibility, not physicality | Autonomy is not the danger; unreversable change is |
-| 4 | Harness | Native DeepAgents reimplementation | Patterns are MIT-licensed; package dependency collides with DBOS durability |
-| 5 | Context | KV-cache-stable + FS offload + sub-agent isolation | Anthropic/Manus/Cognition convergence; 15× token cost for multi-agent justified only for independent work |
-| 6 | Memory | 5-tier CoALA + bi-temporal KG | Standard cognitive taxonomy; Graphiti fact-invalidation model |
-| 7 | Spatial | R-tree-indexed Location + bi-temporal located_at edges | Path-planning extensions already committed; retrofitting later breaks stability |
-| 8 | Reversibility | Effect-tracked, verified-inverse reversibility | Covers software capabilities (rollback) AND physical device actuation (auto-reversal) |
-| 9 | Earned autonomy | Staged trust (reversible track) + SafetyCase (irreversible track) | Reversible actions automate readily; irreversible actions earn autonomy via evidence |
-| 10 | Self-mod safety | Independent tamper-proof instrumentation | Prevent reward-hacking; evals run on separate tooling the agent cannot edit |
-
-## Permissions & safety gates
-
-- **Reversible actions** (verified inverse exists): autonomous by default. Self-healing supervisor auto-reverses on post-actuation fault, no human wait.
-- **Irreversible actions** (no verified inverse, no approved SafetyCase): ApprovalGate required. Rate-limited and logged.
-- **High-consequence actions** (SafetyCase track): earn autonomy via independent review, guardrails proof, supervised track record — staged per-`risk_class`, not blanket excluded.
+The v10 core/extension boundary (`docs/AMH-SPECIFICATION.md` §2.3, §13, §16) states that physical devices, connectors, and safety cases for physical actuation belong in a separate Physical AI extension, not AMH core. `daemon/actuation`, `daemon/connectors`, and `daemon/safetycase` currently live in core and have not yet been moved to match that boundary.
 
 ## Contributing
 
-The specification is normative. Subsystems implement their §N section of `docs/AMH-SPECIFICATION.md` — each carrying its own rules and refusals (see §A, monorepo layout, and the per-subsystem READMEs).
+`docs/AMH-SPECIFICATION.md` is normative — it states what the core is required to provide, what belongs to an extension, and what is explicitly excluded. Read §1 (governing decisions) and §2 (system boundary) before adding anything to `daemon/` or `agents/workflows/`; if what you're adding is domain-specific, it almost certainly belongs in an extension under `extensions/`, not in core.
 
-For encoding patterns, stability contracts, and extension points, consult the Artifact sections: B (Protocol ports), C (Ontology), D (Inter-agent envelope), E (DDL), F (durable workflows), G (manifests), H (worked scenario).
-
----
-
-**Alpha Vector LLC.** Spec revision: v8 (2026-08-19). See `docs/AMH-SPECIFICATION.md` for revision history.
+`contracts/` schemas are the stable, versioned interface between core and extensions. A domain extension publishes its own namespaced schemas; it does not modify a core schema to add a domain entity.

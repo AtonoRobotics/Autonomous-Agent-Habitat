@@ -1,4 +1,4 @@
-"""End-to-end test for the V0 walking-skeleton scenario (Artifact H, steps
+"""End-to-end test for the greenhouse scenario (Artifact H, steps
 1-4), across real process boundaries: a Python DBOS workflow orchestrates
 decomposition, isolated sub-agent execution, and context compaction, then
 drives a genuine SSH actuation through the Go daemon's persistent
@@ -54,7 +54,7 @@ def seed_vent(db_path: str, host: str, port: int, host_key_authorized_key: str, 
     conn.close()
 
 
-def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_path, tmp_path):
+def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_path, tmp_path, fake_model_server):
     from dbos import DBOS
 
     from workflows.greenhouse import run_greenhouse_scenario
@@ -108,7 +108,7 @@ def test_greenhouse_scenario_steps_1_to_4_end_to_end(fake_device, daemon, db_pat
     conn.close()
 
 
-def test_greenhouse_scenario_survives_process_restart(fake_device, daemon, db_path, tmp_path):
+def test_greenhouse_scenario_survives_process_restart(fake_device, daemon, db_path, tmp_path, fake_model_server):
     """Starts run_greenhouse_scenario asynchronously, crashes the Python
     process with os._exit before it reaches step 4, then a second,
     independent Python process resumes via DBOS.launch() alone (never

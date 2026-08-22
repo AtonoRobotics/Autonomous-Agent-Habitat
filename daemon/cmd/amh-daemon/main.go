@@ -72,7 +72,8 @@ func main() {
 	// No exporter wired yet: spans are recorded but not shipped anywhere
 	// until an OTLP exporter is added (OTEL_EXPORTER_OTLP_ENDPOINT is
 	// already reserved for this in .env.example). Recording without
-	// exporting is a valid V0 default — see daemon/observability's doc.
+	// exporting is the correct default until that's configured — see
+	// daemon/observability's doc.
 	tp := observability.Init(nil)
 	defer tp.Shutdown(context.Background())
 

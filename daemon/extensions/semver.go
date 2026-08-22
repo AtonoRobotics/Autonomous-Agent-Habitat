@@ -7,8 +7,9 @@ import (
 )
 
 // semver is a parsed MAJOR.MINOR.PATCH triple. Pre-release/build metadata
-// (accepted by the manifest's semver pattern) are not compared here — V0's
-// dependency resolution only needs release-version ordering.
+// (accepted by the manifest's semver pattern) are not compared here —
+// dependency resolution orders by release version only; a capability
+// dependency range never needs to distinguish "1.2.3-rc1" from "1.2.3".
 type semver struct {
 	major, minor, patch int
 }

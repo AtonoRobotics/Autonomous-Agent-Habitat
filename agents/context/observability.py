@@ -5,11 +5,11 @@ sub-agent spawns, using OTel's GenAI semantic conventions
 names, so traces are queryable the same way across any OTel-compatible
 backend.
 
-V0 default exporter: none configured by init_tracing() unless an OTLP
-endpoint is passed — spans are created and recorded on the current
-provider either way (visible to an in-memory exporter in tests), but
-nothing is shipped over the network unless OTEL_EXPORTER_OTLP_ENDPOINT is
-set, matching .env.example's opt-in OTLP config.
+No exporter is configured by init_tracing() unless an OTLP endpoint is
+passed — spans are created and recorded on the current provider either
+way (visible to an in-memory exporter in tests), but nothing is shipped
+over the network unless OTEL_EXPORTER_OTLP_ENDPOINT is set, matching
+.env.example's opt-in OTLP config.
 """
 
 from __future__ import annotations
@@ -48,12 +48,12 @@ def init_tracing(service_name: str = "amh-agents", exporter: SpanExporter | None
     """Installs a TracerProvider as the global default. Pass an explicit
     exporter (e.g. an in-memory one for tests, or an OTLP exporter for
     production) — with none given, spans are recorded but never exported,
-    which is a valid no-op default for local V0 runs.
+    the correct default until an exporter is configured.
 
-    Uses SimpleSpanProcessor (export-on-end, no batching) — V0's span
-    volume is modest and this keeps test assertions straightforward
-    (spans are visible immediately, no explicit flush needed). Swap to
-    BatchSpanProcessor if a real OTLP collector's throughput demands it."""
+    Uses SimpleSpanProcessor (export-on-end, no batching), which keeps
+    test assertions straightforward (spans are visible immediately, no
+    explicit flush needed). Swap to BatchSpanProcessor if a real OTLP
+    collector's throughput demands it."""
     provider = TracerProvider(resource=Resource.create({SERVICE_NAME: service_name}))
     if exporter is not None:
         provider.add_span_processor(SimpleSpanProcessor(exporter))

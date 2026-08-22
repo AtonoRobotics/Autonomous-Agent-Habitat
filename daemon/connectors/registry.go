@@ -21,8 +21,10 @@ import (
 // SSHConnectorConfig is the shape of connector.config for type='ssh'.
 //
 // PrivateKeyPath, not the key material itself, is what's stored — secrets
-// live on disk (or a real secret manager, post-V0), never inline in the
-// SQLite row. HostKeyAuthorizedKey pins the device's host key in
+// live on disk or a real secret manager, never inline in the SQLite row
+// (daemon/credentials is the encrypted-at-rest store for secrets that do
+// need to live in SQLite, e.g. connector/account credentials that aren't
+// filesystem-resident keys). HostKeyAuthorizedKey pins the device's host key in
 // authorized_keys format (e.g. "ssh-rsa AAAA..."); InsecureSkipHostKeyVerify
 // exists only for test fixtures (daemon/cmd/amh-fake-device) and is
 // refused unless explicitly set — see resolveHostKeyCallback.

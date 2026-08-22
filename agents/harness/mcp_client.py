@@ -2,8 +2,9 @@
 
 AMH is both an MCP client (consuming third-party servers) and an MCP
 server (exposing its own capabilities) — this module is the client half,
-V0 scope: stdio transport only (Streamable HTTP is a post-V0 addition once
-a real remote server is in play).
+implementing stdio transport. Streamable HTTP is a separate transport this
+module does not implement; a caller needing a remote MCP server over HTTP
+needs that added here first.
 
 Security posture (§12, non-negotiable): tool output from an MCP server is
 untrusted input, not agent-authored content. This client does not execute

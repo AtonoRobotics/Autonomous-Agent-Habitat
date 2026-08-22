@@ -4,10 +4,12 @@ docs/AMH-SPECIFICATION.md §14.1-§14.2). Backs filesystem-as-context: large
 tool results, research notes, and scratchpads live as files referenced by
 handle, loaded just-in-time, rather than held in the context window.
 
-V0 backend: local disk, one root directory per agent run (matching the
-"local disk" backend option named in §4; a graph-store backend is a
-post-V0 concern). Every path is resolved relative to and confined within
-the VFS root — no traversal outside it.
+Local-disk backend: one root directory per agent run, matching the
+"local disk" backend option named in §4. A graph-store backend is a
+distinct implementation of the same interface, not built here; nothing
+in this module assumes disk-backed storage beyond its own implementation.
+Every path is resolved relative to and confined within the VFS root — no
+traversal outside it.
 """
 
 from __future__ import annotations

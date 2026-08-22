@@ -1,8 +1,10 @@
 """DBOS runtime bootstrap for the AMH agent layer. See
 docs/AMH-SPECIFICATION.md §2 (DBOS Transact, SQLite primary) and the
-DurableEngine port in Artifact B — this module is the concrete DBOS
-implementation V0 wires up directly; a swappable DurableEngine Protocol
-is deferred until a second engine (Temporal) is actually needed.
+DurableEngine port in Artifact B — this module wires up DBOS directly, the
+only durability engine AMH core runs today (docs/AMH-SPECIFICATION.md §1
+decision 3). A swappable DurableEngine Protocol is the abstraction a
+second engine (Temporal) would introduce; nothing in this codebase depends
+on that abstraction existing before then.
 """
 
 from __future__ import annotations

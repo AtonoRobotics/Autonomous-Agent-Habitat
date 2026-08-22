@@ -99,9 +99,13 @@ func New(db *sql.DB, baseDir string) *Provisioner {
 // reference for container isolation, or a shell command (e.g. "sleep
 // infinity", a real harness entrypoint) for process isolation.
 // resourceLimits accepts docker-CLI-shaped keys ("memory": "512m", "cpus":
-// "1.0") — applied for container isolation only; process isolation records
-// them but does not (yet) enforce them, since V0 has no cgroup wiring
-// independent of a container runtime.
+// "1.0"). Container isolation enforces them (docker --memory/--cpus).
+// Process isolation records them on the computer row for visibility and
+// audit but does not enforce them: unshare gives a mount namespace, not a
+// cgroup — enforcing limits without a container runtime needs this
+// package to drive cgroups directly, which it does not do. A caller that
+// needs enforced limits without docker must add that wiring; it is not
+// present today.
 func (p *Provisioner) Create(ctx context.Context, agentID string, isolation Isolation, image string, resourceLimits map[string]string) (*Computer, error) {
 	if isolation != IsolationProcess && isolation != IsolationContainer {
 		return nil, fmt.Errorf("sandbox: isolation must be \"process\" or \"container\", got %q", isolation)

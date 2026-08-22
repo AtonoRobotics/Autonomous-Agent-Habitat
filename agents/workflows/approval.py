@@ -86,10 +86,11 @@ def wait_for_approval(daemon_api_base_url: str, agent_token: str, ticket_id: str
     something that should instead be driven by an external event (a
     human's action) — the earned-autonomy / SafetyCase design in §14.7
     envisions review as an asynchronous, agent-external act, not something
-    the durability layer waits on synchronously. A production version of
-    this would use DBOS.recv/DBOS.send (matching the spec's ApprovalGate
-    design note in Artifact B) instead of polling; polling is the
-    documented V0 simplification, not the intended end state.
+    the durability layer waits on synchronously. This polls the daemon API
+    rather than using DBOS.recv/DBOS.send (the mechanism the spec's
+    ApprovalGate design note in Artifact B names) — a caller with many
+    concurrent pending approvals should replace this with recv/send
+    instead of scaling up poll frequency.
     """
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:

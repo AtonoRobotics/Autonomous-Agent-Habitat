@@ -2,16 +2,29 @@
 real SSH device simulator — used by test_greenhouse_e2e.py and
 test_approval_e2e.py. See daemon/cmd/amh-daemon and
 daemon/cmd/amh-fake-device.
+
+Also provides fake_model_server: a real local HTTP server standing in for
+a model provider, so workflows.goal's real model calls (context/llm.py's
+openai_compatible path) can be tested end-to-end — genuine HTTP request/
+response handling, real JSON parsing — without a live API key. This is
+the same "real protocol, fake remote counterpart" pattern amh-fake-device
+already uses for SSH: the decomposition/completion logic this server
+returns is deliberately test-fixture logic, standing in for what a real
+model would answer for these specific deterministic test inputs — it does
+not reintroduce placeholder logic into workflows/goal.py itself.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
@@ -92,6 +105,60 @@ def _find_free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
+
+
+class _FakeModelHandler(BaseHTTPRequestHandler):
+    """Implements just enough of an OpenAI-compatible /chat/completions
+    endpoint for workflows.goal's real prompts. Distinguishes
+    decompose_goal's call from do_subagent_work's call by system-prompt
+    content (both are sent as the first message per context/llm.py's
+    _complete_openai_compatible), not by guessing — a real model would be
+    told the same way."""
+
+    def log_message(self, format, *args):  # noqa: A002 (stdlib signature) - quiet test output
+        pass
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body = json.loads(self.rfile.read(length))
+        messages = body["messages"]
+        system_content = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
+        user_content = next(m["content"] for m in reversed(messages) if m["role"] == "user")
+
+        if "JSON array" in system_content:
+            clauses = [c.strip() for c in user_content.split(";") if c.strip()] or [user_content]
+            content = json.dumps([{"objective": c} for c in clauses])
+        else:
+            content = f"completed: {user_content}"
+
+        response = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(response)))
+        self.end_headers()
+        self.wfile.write(response)
+
+
+@pytest.fixture()
+def fake_model_server(monkeypatch):
+    """Starts the fake model HTTP server, points ADAPTER_MODEL/
+    ADAPTER_BASE_URL/ANTHROPIC_API_KEY at it (inherited by any subprocess
+    spawned after this fixture runs, since subprocess.run with no env=
+    inherits the current os.environ), tears down on exit."""
+    port = _find_free_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    monkeypatch.setenv("ADAPTER_MODEL", "test-fake-model")
+    monkeypatch.setenv("ADAPTER_BASE_URL", f"http://127.0.0.1:{port}")
+    monkeypatch.setenv("ADAPTER_API_KEY", "test-fake-key")
+
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
 
 
 @pytest.fixture()

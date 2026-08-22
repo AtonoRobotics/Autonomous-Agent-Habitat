@@ -68,7 +68,7 @@ def test_tool_call_span_records_error_on_exception(span_exporter):
     assert spans[0].attributes["error.type"] == "test_error"
 
 
-def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, tmp_path):
+def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, tmp_path, fake_model_server):
     """The real integration: pursue_goal (parent) and each run_subagent
     (child) must each produce their own invoke_agent span, AND the child
     spans must share the parent's trace ID — proving trace-context

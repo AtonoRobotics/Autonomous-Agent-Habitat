@@ -7,16 +7,14 @@
 // authorization policy for this package; see Handler's doc comment.
 //
 // Spec fidelity note: docs/AMH-SPECIFICATION.md Artifact A names
-// contracts/proto (gRPC) as the daemon<->agent bridge. This is a
-// deliberate substitute: protoc and the Go/Python gRPC plugin toolchain
+// contracts/proto (gRPC) as the daemon<->agent bridge. This package uses
+// JSON-over-HTTP instead: protoc and the Go/Python gRPC plugin toolchain
 // aren't available in this environment, and JSON-over-HTTP gets the same
 // architectural property — a persistent daemon-owned connector registry
 // instead of a process spawned per actuation — without a fragile codegen
-// dependency. Same "ship the seam now, harden later" discipline the spec
-// already applies to §7a/§14.6/§14.7: this package's request/response
-// shape is what a future .proto file would formalize, not a different
-// design. Migrating the wire format later doesn't change any of the
-// logic in daemon/actuation this package calls into.
+// dependency. This package's request/response shape is what a .proto file
+// would formalize if the transport changes; that migration would not
+// touch any of the logic in daemon/actuation this package calls into.
 package api
 
 import (
@@ -165,7 +163,7 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 //     (routine agent work, same as the ApprovalGate's equivalents);
 //     approve and revoke are operator ONLY — see daemon/safetycase's
 //     doc comment for why the operator-only gate here IS the
-//     independent review §14.7 requires, in V0's collapsed design.
+//     independent review §14.7 requires.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/device-actions/{deviceActionID}/actuate",
@@ -352,11 +350,11 @@ func (s *Server) handleCreateTicket(w http.ResponseWriter, r *http.Request) {
 // function body ever runs. approved_by is still a free-text field, not a
 // second identity check: it records WHICH operator approved (for audit),
 // while the bearer token is what proves the caller IS an operator at
-// all. V0 has one static operator token, not a multi-operator identity
+// all. There is one static operator token, not a multi-operator identity
 // system (see caveat in docs/AMH-SPECIFICATION.md re: SafetyCase's
 // independent_review role being deployment-specific) — approved_by lets
 // that distinction exist in the audit trail even though this package
-// can't yet verify it cryptographically.
+// cannot verify it cryptographically.
 func (s *Server) handleApprove(w http.ResponseWriter, r *http.Request) {
 	ticketID := r.PathValue("ticketID")
 
@@ -433,7 +431,7 @@ func (s *Server) handleSubmitSafetyCaseEvidence(w http.ResponseWriter, r *http.R
 
 // handleApproveSafetyCase is gated to authn.RoleOperator alone (see
 // Handler's routing table) — this IS the independent review §14.7
-// requires in V0's collapsed design; see daemon/safetycase's doc comment.
+// requires; see daemon/safetycase's doc comment.
 func (s *Server) handleApproveSafetyCase(w http.ResponseWriter, r *http.Request) {
 	caseID := r.PathValue("caseID")
 

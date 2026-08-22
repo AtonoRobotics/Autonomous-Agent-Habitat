@@ -1,7 +1,8 @@
 // Package scheduler is the one kernel-owned ticker that fires routines,
-// deadlines, and triggers. V0 slice: a single interval ticker; cron
-// expressions and event-driven triggers are deferred (see
-// docs/AMH-SPECIFICATION.md §1, HABITAT_ROUTINE_TICK_MS).
+// deadlines, and triggers: a single interval ticker (HABITAT_ROUTINE_TICK_MS,
+// see docs/AMH-SPECIFICATION.md §1). It does not parse cron expressions or
+// dispatch on external events — routines it fires are responsible for
+// their own scheduling logic against each tick.
 package scheduler
 
 import (

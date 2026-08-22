@@ -5,14 +5,13 @@
 // of autonomy for a whole device_action or capability, built from
 // guardrail evidence and independent review rather than reversibility.
 //
-// V0 simplification, stated plainly: the spec's SafetyCase.request_review
-// names a distinct step routing to "an agent-external reviewer," separate
-// from approval itself. This package collapses that into one action:
-// Approve is gated to authn.RoleOperator at the HTTP layer (daemon/api),
-// and the fact that only an operator credential can call it IS the
-// independent review — there is no separate reviewer role or ReviewTicket
-// workflow to build yet, matching the spec's own caveat that "the
-// irreversible-action proof engine... requires a defined
+// This package deliberately collapses the spec's SafetyCase.request_review
+// (a distinct step routing to "an agent-external reviewer," separate from
+// approval itself) into one action: Approve is gated to authn.RoleOperator
+// at the HTTP layer (daemon/api), and the fact that only an operator
+// credential can call it IS the independent review — there is no separate
+// reviewer role or ReviewTicket workflow, matching the spec's own caveat
+// that "the irreversible-action proof engine... requires a defined
 // independent-reviewer role this spec does not invent." Approve sets
 // independent_review=1 atomically with approved_at for every risk_class,
 // not only the ones the spec's floor requires it for (moderate/high/

@@ -1,6 +1,6 @@
-"""The V0 walking-skeleton scenario, per docs/AMH-SPECIFICATION.md
-Artifact H: "Keep the greenhouse healthy overnight; if temperature exceeds
-32C, open the vent." Composes steps 1-4 of the worked scenario:
+"""The greenhouse scenario, per docs/AMH-SPECIFICATION.md Artifact H:
+"Keep the greenhouse healthy overnight; if temperature exceeds 32C, open
+the vent." Composes steps 1-4 of the worked scenario:
 
   1. Decomposition (goal.decompose_goal)
   2. Sub-agent spawn with context isolation (goal.run_subagent)
@@ -58,7 +58,7 @@ def run_greenhouse_scenario(
     forward: str,
     read_state: str,
 ) -> dict[str, Any]:
-    """Top-level durable workflow for the full V0 scenario. Crash-safe: if
+    """Top-level durable workflow for the full scenario. Crash-safe: if
     the process dies after step 4's actuation is durably recorded (either
     by the daemon's own SQLite commit, or by DBOS's step-completion
     record) but before this function returns, resuming replays only the

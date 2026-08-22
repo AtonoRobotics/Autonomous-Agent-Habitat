@@ -1,9 +1,9 @@
 // Package ssh implements the SSH device connector: golang.org/x/crypto/ssh
 // for device control, per docs/AMH-SPECIFICATION.md §1 and §12.
 //
-// V0 scope: a device action is a shell command template rendered with the
-// action's arguments and run over one SSH session; state reads are a
-// second shell command whose stdout is parsed as the state value. This is
+// A device action is a shell command template rendered with the action's
+// arguments and run over one SSH session; state reads are a second shell
+// command whose stdout is parsed as the state value. This is
 // intentionally generic — the greenhouse-vent example in
 // contracts/manifests/connector.manifest.yaml runs `vent-ctl` commands,
 // but any device exposing a CLI over SSH fits the same shape.
@@ -24,7 +24,7 @@ type Config struct {
 	Host           string
 	Port           int
 	User           string
-	Signer         ssh.Signer // private key auth; the only supported auth for V0
+	Signer         ssh.Signer // private key auth; the only auth method this connector implements
 	HostKeyCB      ssh.HostKeyCallback
 	DialTimeout    time.Duration
 	CommandTimeout time.Duration

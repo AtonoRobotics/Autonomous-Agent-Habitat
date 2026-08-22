@@ -1,6 +1,6 @@
 // Command amh-fake-device is a test/dev fixture only: an ephemeral SSH
 // device simulator standing in for a real greenhouse vent actuator, so the
-// V0 end-to-end scenario (docs/AMH-SPECIFICATION.md Artifact H, steps 1-4)
+// end-to-end scenario (docs/AMH-SPECIFICATION.md Artifact H, steps 1-4)
 // can exercise a genuine SSH protocol round-trip without physical hardware.
 //
 // SECURITY: this server accepts ANY client public key — there is no

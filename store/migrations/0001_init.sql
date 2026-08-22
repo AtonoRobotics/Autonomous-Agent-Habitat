@@ -1,4 +1,4 @@
--- AMH V0 initial schema.
+-- AMH core schema.
 -- Ontology tables + episode log + spatial (R-tree) + vector (sqlite-vec) + FTS5.
 -- See docs/AMH-SPECIFICATION.md Artifact E for the authoritative design and rationale.
 --

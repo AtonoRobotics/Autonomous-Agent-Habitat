@@ -1,105 +1,406 @@
-# Autonomous Multi-Agent Habitat (AMH): Architecture, Written Specification & Concrete Artifacts
+# Autonomous Multi-Agent Habitat (AMH) — Governing Architecture
 
-*Greenfield platform specification. Spirit-kin to Grok Bot / Hermes / OpenClaw, but fully autonomous and running 24/7. Not a governance app; not a security app. This is a platform core on which domain-specific apps are built.*
+**Status:** Authoritative production baseline
 
-> **Revision note (v2).** Citation and version audit applied. Several claims in v1 were stale, misattributed, or fabricated; they are corrected or removed below. Two facts marked **[reviewer-sourced]** could not be independently confirmed and should be verified before they become load-bearing.
+**Revision:** 10
 
-> **Revision note (v3).** Added §14 (Harness Layer) following dedicated research into LangChain DeepAgents v0.7.0 internals, the wider harness landscape, and DeepSeek's model/harness offering. Findings: DeepAgents' durability model structurally collides with DBOS Transact (both are replay-based durability engines); AMH will not depend on the `deepagents` package or raw LangGraph, but will reimplement its strongest patterns natively on DBOS. DeepSeek is confirmed as a pluggable model (not a harness dependency) requiring one adapter-level fix. No change to §1–§13 architecture decisions.
+**Date:** 2026-08-21
 
-> **Revision note (v4).** Added §7a (Spatial Memory). Correction of judgment, not new research: an initial recommendation to defer spatial indexing was wrong because robotics-adjacent path-planning extensions are already committed to build on this core, not speculative future work. Since AMH's charter is to expose stable interfaces domain apps build against, spatial data model and storage are built into V1's core schema now — path-planning *algorithms* remain the extension's responsibility, not the core's.
+AMH is a continuously operating habitat for autonomous agents. It wakes from goals, schedules, events, and messages; supplies durable work, context, memory, tools, workers, and recovery; and exposes stable seams on which domain applications are built.
 
-> **Revision note (v5).** Added §14.6 (Reversible Capability Composition). Correction of reasoning, not new research: an initial dismissal of Cordis's "everything is a plugin" pattern conflated its formal reversibility guarantee (safe to lift) with ungated live self-modification (correctly rejected). The reversibility mechanism — not the live-hot-swap posture — was a real gap underneath §10's already-committed self-modification loop, whose "rollback available" bullet had no mechanical substrate. That substrate is now specified, gated by the existing eval → canary → promote/rollback pipeline, and also strengthens §11's fault-isolation grain.
+AMH is not a governance product, a security product, a physical-device stack, or a domain application. Operational controls exist because a 24/7 runtime needs them, but domain meaning and domain safety remain outside the core.
 
-> **Revision note (v6).** Corrected a conflation running through the TL;DR, §12, and the worked scenario: "physical" and "irreversible" had been treated as overlapping gating triggers ("every irreversible **or** physical actuation" required approval). They aren't. Reversibility is the sole gating axis; the platform's role is to warn about irreversible change, not to gate broadly on autonomy or physicality as categories. §14.6's `Effect`/verified-inverse mechanism, built for software capability rollback, is generalized to physical device actuation: reversibility now lives per-`DeviceAction` (not per-`Device`), requires a *verified* inverse to earn autonomous execution, and a reversible action's recorded inverse enables automatic self-healing reversal on a post-actuation fault — no human wait. The ApprovalGate's scope shrinks to exactly the residue with no verified inverse. Ontology, DDL, the durable workflow, the connector manifest example, and the worked scenario are all updated to match.
+## 1. Governing decisions
 
-> **Revision note (v7).** Added §14.7 (Earned Autonomy), a staged trust model layered above §14.6's floor, not a replacement of it. HIL gates remain permanently scoped to genuinely irreversible actions (§12, unchanged); this addresses a separate asymmetry — §10 already grants software changes graduated trust (eval → canary → promote) while §12's physical actuation went straight from "verified" to "fully autonomous" with no interim track-record stage. `DeviceAction` gains `autonomy_stage`/`autonomy_policy` fields now; V1's implemented behavior is unchanged (`autonomy_policy: immediate`, matching v6 exactly); the graduation engine itself is explicitly deferred, per the same schema-now/mechanism-later discipline already used for §7a and §14.6.
+1. **Small hard core, reversible extensions.** The core contains only invariants that every domain requires. Models, harness policies, tools, connectors, memory implementations, user surfaces, and domain behavior attach as replaceable extensions.
+2. **Python cognition, Go habitat daemon.** Python owns model-facing cognition. Go owns service supervision, extension hosting, local transport, resource isolation, and connector process I/O.
+3. **DBOS is the sole durable workflow engine in V1.** DBOS Transact uses SQLite on the single-node deployment. PostgreSQL is the scale path. Temporal is a documented migration alternative, not a configuration-equivalent fallback.
+4. **SQLite is authoritative persistent state.** DBOS workflow history, AMH records, extension registration, memory, knowledge, and evidence are stored or projected from SQLite. Neither an agent, NATS, nor an in-memory supervisor owns truth.
+5. **Context is a managed runtime resource.** Budgeting, offload, retrieval, compaction, cache discipline, and isolated subordinate contexts are first-class services.
+6. **Cordis spatiotemporal composition governs extension lifecycle.** Temporal composability tracks reversible software effects. Spatial composability declares provider/consumer dependencies and determines activation and teardown order. Cordis “spatial” is dependency composition, not physical geometry.
+7. **Reversibility is a policy property.** The core can evaluate declared, attested action properties through generic policy hooks. The extension that defines an action owns the meaning, verification, inverse, recovery, and domain policy for that action.
+8. **Physical devices belong to a Physical AI extension.** The AMH core contains no `Device`, `DeviceAction`, physical `Location`, physical `SafetyCase`, actuation workflow, or device recovery policy.
+9. **Agents propose; deterministic services commit.** Models may reason, plan, retrieve, synthesize, and propose actions. They do not directly mutate durable workflow state, extension registration, policy decisions, or evidence.
+10. **Self-change is offline, evaluated, canaried, and reversible.** The live system cannot promote its own candidate or alter its evaluator, evidence, policy hook, or promotion threshold.
 
-> **Revision note (v8).** Corrected an overstated permanent boundary in v6/v7: irreversible actions were specified as permanently excluded from autonomy ("that boundary doesn't disappear"). That conflated two different claims — auto-reversal is permanently impossible for an irreversible action (true, tautological), but earned autonomy is not (false; nuclear automation and validated financial ML both demonstrate proof-scaled autonomy for high-consequence, often-irreversible actions). §14.7 is generalized: reversibility is now understood as the cheapest possible evidence in a `SafetyCase`, not the only path to earned autonomy. A new `SafetyCase` entity — guardrails, supervised track record, formal verification, mandatory agent-external independent review above low risk — provides the harder evidence path for irreversible/high-consequence actions, with asymmetric single-incident revocation and persistent post-approval monitoring. The reversible track (§14.6/§14.7, V1 `immediate` policy) is unchanged. The irreversible-action proof engine is explicitly not staged as a buildable V1/Post-V1 algorithm the way the reversible graduation engine was — it requires real operational history and a defined independent-reviewer role this spec does not invent.
+## 2. System boundary
 
----
+### 2.1 Core responsibilities
 
-## TL;DR
+The AMH core SHALL provide:
 
-- **Python-first agent/LLM layer plus a Go control-plane daemon**, single-node/single-user for V1, using **DBOS Transact (SQLite) as the primary durable-execution engine** (Temporal dev-server as the documented fallback), an **embedded hybrid store for ontology/memory/knowledgebase**, and **two communication substrates — MCP (agent↔tool) and an A2A-derived internal envelope (agent↔agent)**. Context engineering is a first-class headline subsystem.
-- **The single most consequential design decision is treating context as the scarcest resource.** The platform is architected around KV-cache-stable prompts, filesystem offloading as external memory, sub-agent context isolation with result-only return, and automatic compaction — following convergent guidance from Anthropic, Manus, and Cognition, which agree on "one coherent agent plus isolated one-shot sub-agents" over chatty swarms. Anthropic's multi-agent research system reported a **90.2% relative improvement over single-agent Claude Opus 4 on a private internal research eval**, while consuming roughly **15× the tokens** of standard chat — so multi-agent is used surgically, only where sub-problems are genuinely independent.
-- **Self-improvement and self-healing are eval-gated, durable loops.** Prompts/skills/routing improve offline via GEPA/ACE-style reflection behind a canary + rollback eval harness; runtime resilience uses OTP-style supervision trees, circuit breakers, bulkheads, and durable workflow replay. **Reversibility, not physicality, is the sole gating axis.** Every action — software or physical — is autonomous by default if it has a verified inverse; only genuinely irreversible actions pass through a human-approval interlock. Autonomy is not the danger; unreversable change is, and the danger is warned about at exactly that boundary, not gated by category.
+- durable workflow start, wait, signal, cancellation, child execution, retry, and recovery;
+- process and worker supervision;
+- extension discovery, dependency resolution, activation, quiescence, disposal, and rollback;
+- effect journaling for core-mediated software composition effects;
+- generic action admission and approval-hook execution;
+- scoped artifact and context storage;
+- core identity, goal, task, run, event, message, artifact, memory, claim, extension, capability, effect, evaluation, and version records;
+- model-provider and tool-provider seams;
+- MCP client/server interoperability;
+- A2A interoperability at the external agent boundary;
+- OpenTelemetry tracing and per-goal/run/model cost accounting;
+- independent evaluation, canary, promotion, demotion, and rollback mechanics.
 
----
+### 2.2 Extension responsibilities
 
-## Key Findings (Decision Summary)
+An extension SHALL own all semantics it introduces, including:
 
-| # | Subsystem | Decision | Primary rationale | Runner-up / fallback |
-|---|-----------|----------|-------------------|----------------------|
-| 1 | Runtime | **Python (agents) + Go (control plane/device I/O)** | Deepest agent ecosystem + single-binary daemon, native Windows | Unified TypeScript/Node |
-| 2 | Durable execution | **DBOS Transact (SQLite)** | In-process library, no separate orchestration server, official Windows support | Temporal dev-server |
-| 3 | Context engineering | **Cache-stable + FS offload + sub-agent isolation + auto-compact** | Anthropic / Manus / Cognition convergence | — |
-| 4 | Deep-agent harness | **Native reimplementation of DeepAgents' patterns on DBOS** (VFS, subagent isolation, compaction triggers, SKILL.md) — NOT the `deepagents` package | DeepAgents' durability collides with DBOS; patterns are MIT-licensed and cheap to reimplement | Depend on `deepagents` only if DBOS is dropped (see §14) |
-| 5 | Coder agent | **CodeAct loop + sandbox + diff apply + TDD verify** | OpenHands/SWE-agent pattern, event-sourced replay | Aider-style diff-only |
-| 6 | Ontology | **Typed property-graph over embedded store** (not RDF/OWL in V1) | Pragmatic single-node; RDF is over-build | Oxigraph (if SPARQL needed) |
-| 7 | Memory | **5-tier (working/episodic/semantic/procedural/entity) + bi-temporal KG** | Standard cognitive taxonomy; Graphiti fact-invalidation | Mem0 (simpler) |
-| 8 | Knowledgebase | **Hybrid (vector + BM25 + graph) + rerank** | Embedded, no server process | Qdrant/LanceDB at scale |
-| 9 | Inter-agent comms | **MCP + A2A-derived envelope over embedded NATS** | Vertical (tools) + horizontal (agents) | In-proc actor bus |
-| 10 | Self-improving | **GEPA/ACE offline + Voyager skills, eval-gated** | Far fewer rollouts than RL; safe staging | DSPy MIPROv2 |
-| 11 | Self-healing | **OTP supervision + circuit breakers + durable replay** | Battle-tested fault isolation | Naive retry/restart |
-| 12 | Integrations | **MCP client+server, connector SDK, SSH/WinRM/MQTT/OPC-UA** | Cross-platform device reach | — |
-| 13 | Observability | **OTel GenAI conventions + durable event replay + token accounting** | Standardized tracing | Custom logging only |
-| 14 | Model routing | **Model-agnostic provider interface; DeepSeek as cost-efficient tier via dedicated adapter; frontier model (Claude/GPT-5-class) for hardest long-horizon tasks** | Near-frontier SWE-bench at ~1/7–1/36 cost; requires `reasoning_content` round-trip handling | Single-provider (frontier-only) if adapter proves unreliable |
-| 15 | Spatial memory | **R-tree-indexed `Location` entity + bi-temporal `located_at` edges + `SpatialStore` port, built in V1 core** | Path-planning extensions are already committed to build on this core; retrofitting geometry later breaks the stable-interface charter | Hierarchical containment only, if extension plans change |
-| 16 | Reversibility engineering | **Effect-tracked, verified-inverse reversibility (Cordis pattern, natively reimplemented) as the sole gating axis — covers software capabilities (§10 rollback) AND physical device actuation (§12), not physicality vs. software** | Autonomy is not the danger; unreversable change is. Self-modification's rollback and physical actuation's safety were both under-specified by category-based gating instead of verified reversibility | Process/action-level restart-and-gate only (no auto-reversal), if verified-inverse engineering proves too costly per capability/device type |
-| 17 | Earned autonomy (reversible track) | **Staged trust model (`unverified`→`supervised`→`earned`) on `DeviceAction`, schema defined in V1, graduation engine deferred** | Closes an asymmetry with §10 (which already grants software changes graduated trust via eval→canary→promote); V1 default (`immediate` policy) is unchanged from row 16's floor | `graduated`/`always_gated` policies available as operator overrides once the graduation engine ships |
-| 18 | Earned autonomy (irreversible/high-consequence track) | **`SafetyCase` — guardrails + supervised track record + mandatory agent-external independent review, schema defined in V1, proof-evaluation workflow not staged as an algorithm this spec commits to** | Irreversibility caps auto-reversal, not earned autonomy. Proof requirement scales with `risk_class` instead of gating permanently by category; asymmetric single-incident revocation | Remains permanently gated per-action if no `SafetyCase` is ever pursued for that action type |
+- action schemas and effects;
+- domain entities and relations;
+- domain policy and approval requirements;
+- inverse construction and verification;
+- reconciliation and recovery selection;
+- connector-specific idempotency and uncertain-outcome handling;
+- domain telemetry, health interpretation, and acceptance evidence;
+- domain storage projections and indexes;
+- domain-specific safety cases or assurance arguments.
 
----
+### 2.3 Explicitly outside the core
 
-## Details
+- robot control, navigation, manipulation, PLC semantics, or device safe states;
+- financial, medical, legal, or real-estate policy;
+- physical coordinate frames, maps, poses, paths, or R-tree schemas;
+- domain risk taxonomies;
+- domain-specific approval rules;
+- derivation of an inverse for an arbitrary physical or external action.
 
-### 1. Runtime & Language Recommendation
+The core MAY host generic extension-provided schemas and indexes. Hosting does not transfer semantic ownership to the core.
 
-**Primary: a polyglot split — Python for the agent/LLM layer, Go for the control-plane daemon, device I/O, and the MCP gateway. Runner-up: a unified TypeScript/Node stack.**
+## 3. Runtime ownership
 
-| Criterion | Python | Go | TypeScript/Node | Rust | Elixir/BEAM |
-|-----------|--------|----|-----------------|------|-------------|
-| LLM/agent ecosystem | ★★★★★ (DeepAgents, DSPy/GEPA, Letta, Graphiti, Mem0) | ★★ | ★★★★ (deepagents.js, Vercel AI SDK) | ★★ | ★ |
-| Durable-execution SDK | ★★★★ (DBOS, Temporal, Restate) | ★★★★★ | ★★★★ | ★★★ (Restate native) | ★★ |
-| SSH / device I/O | ★★★ (Paramiko, pyserial, pymodbus, asyncua) | ★★★★★ (`x/crypto/ssh`, single binary) | ★★★ | ★★★★ | ★★★ |
-| Windows support | ★★★ (packaging friction) | ★★★★★ (static exe) | ★★★★ | ★★★★ | ★★★ |
-| Single-binary distribution | ★★ | ★★★★★ | ★★★ | ★★★★★ | ★★★ |
-| Concurrency model | ★★ (GIL; asyncio) | ★★★★★ (goroutines) | ★★★ (event loop) | ★★★★ | ★★★★★ (actors) |
+### 3.1 Go daemon
 
-The agent ecosystem gravity is overwhelmingly Python — the deep-agent harness, DSPy/GEPA optimizers, Letta/Graphiti/Mem0 memory stacks, and most MCP tooling are Python-first. But Python is weakest exactly where a 24/7 daemon needs strength: single-binary distribution, concurrency without the GIL, and clean Windows packaging. Go supplies a static executable per OS, goroutine concurrency ideal for connection multiplexing (SSH sessions, MQTT subscriptions, MCP transports), and `golang.org/x/crypto/ssh` for device control. This split mirrors how the durable-execution vendors themselves are structured (Temporal's Go server + Python workers; Restate's Rust core + polyglot SDKs).
+`amh-daemon` owns:
 
-Elixir/BEAM is genuinely the best *self-healing* runtime — OTP supervision is native — but its LLM ecosystem is too thin for V1. We borrow OTP's **patterns** in Go instead.
+- operating-system service lifecycle;
+- worker process start, health, restart, and termination;
+- extension host isolation;
+- local gRPC transport;
+- resource limits and bulkheads;
+- MCP transport gateway;
+- connector subprocess and socket I/O;
+- deterministic delivery of external triggers into DBOS using stable idempotency keys.
 
-**Process/deployment model (single node):**
-- `amh-daemon` (Go, one static binary): supervisor tree, scheduler/triggers, MCP gateway (client + server), connector runtime, device I/O, embedded message bus, health/watchdog. Runs as a **systemd service** (Linux) or **Windows Service** (`golang.org/x/sys/windows/svc`).
-- `amh-agents` (Python): agent/LLM workers, deep-agent harness, coder agent, memory/RAG pipelines, self-improvement jobs. One or more DBOS worker processes supervised by the daemon.
-- `amh-store`: embedded — SQLite (relational), sqlite-vec (vectors), a typed property-graph, and durable-execution system tables. No external DB process required for V1.
+The daemon SHALL NOT independently advance, retry, or complete a DBOS workflow. Restarting a process is not permission to repeat its durable operation.
 
-**Packaging honesty.** PyInstaller is mature (v6.x) but **is not a cross-compiler** — build the Windows `.exe` on Windows and the Linux binary on Linux in CI. **`uv` handles dependency resolution, locking, and wheel building, but does not replace PyInstaller** — it produces distributable wheels, not a self-contained executable. Skip Tauri/Electron for V1 (no GUI needed for a headless daemon; add a Tauri control UI later).
+### 3.2 Python cognition workers
 
-### 2. Durable Execution — Comparison & Decision
+`amh-agents` owns:
 
-**Recommendation: DBOS Transact (primary), Temporal dev-server (fallback).**
+- provider-neutral model calls;
+- context assembly and compaction;
+- planning and subordinate-agent cognition;
+- retrieval and memory consolidation;
+- coder-agent reasoning inside a sandbox;
+- candidate prompt, skill, routing, and capability generation;
+- offline evaluations.
 
-| Engine | Model | Native Windows? | Single-node w/o extra DB process? | Persistence | Verdict |
-|--------|-------|-----------------|-----------------------------------|-------------|---------|
-| **DBOS Transact** | In-process library (decorators) | ✅ Linux/macOS/Windows | ✅ SQLite default | SQLite (default) or Postgres | **Primary** |
-| **Temporal** | Server sidecar | ✅ CLI dev-server | ⚠️ SQLite dev/test-only | In-memory by default; SQLite via `--db-filename`; Postgres/MySQL for prod | **Fallback** |
-| **Restate** | Single Rust binary sidecar | ❌ **No native Windows server binary** (as of 1.7.4) | ✅ Embedded RocksDB | RocksDB + disk | Rejected (Windows) |
-| **Inngest** | Server sidecar (HTTP/event) | ✅ **Official amd64 + arm64 Windows zips (v1.41.1)** | ✅ `inngest start` | SQLite + bundled Redis | Viable; rejected on server model |
-| **Hatchet** | Server + gRPC workers | Unclear | ❌ **Requires Postgres** | Postgres | Rejected (Postgres) |
-| Cadence/Prefect/Windmill/Golem | Server/orchestrator | Varies | ❌ Heavier infra | Various | Rejected for V1 |
+Cognition workers SHALL be replaceable. All state required to resume a durable run SHALL be reconstructible from durable records and scoped artifacts.
 
-The decisive factor for a single-node app on **both** Linux and Windows is footprint and install friction. **DBOS Transact is an embedded library** added via decorators (`@DBOS.workflow()`, `@DBOS.step()`) — no separate orchestration server, no rearchitecting. **SQLite-as-default landed in the Python SDK in August 2025 (PR #441)**; later write-ups restate it but did not introduce it. Note the precise claim: **zero external database *process*, not zero pip dependencies.** DBOS's transactional exactly-once semantics (a step's DB writes and its durability record commit together) are the cleanest in the category when steps write to the same store, with a clean path to multi-replica via Postgres.
+### 3.3 DBOS and SQLite
 
-**Temporal is the fallback.** `temporal server start-dev` runs as a single process with no runtime dependencies — but note it is **in-memory by default and only persists when you pass `--db-filename`**, and SQLite persistence is officially dev/test-only. GitHub issue **#3366 ("Support sqlite in production") remains open with no milestone**. The frequently-cited missing-table-after-idle defect is a **2024/2025 issue fixed in v1.26**, not a current defect — don't cite it as a live blocker. Choose Temporal if you want its mature time-travel UI and will run a Postgres/MySQL sidecar in production.
+DBOS owns the durable workflow lifecycle. SQLite owns persisted truth.
 
-**Migration insurance:** wrap durable execution behind a `DurableEngine` port (§ artifacts) so DBOS↔Temporal is a config swap.
+The V1 system SHALL use:
 
----
+- DBOS queues/signals for durable workflow communication;
+- transactional inbox/outbox records for durable external delivery;
+- local gRPC for synchronous daemon/worker calls;
+- in-process channels only for disposable notification.
 
-**[Complete specification sections §3–§14, Artifacts A–H, Recommendations, and Caveats continue as provided — full v8 text complete and ready for implementation. See repository for artifact schemas, DDL, workflow definitions, and worked scenario.]**
+NATS is not a V1 core dependency. A NATS/JetStream transport extension MAY be added when multi-process fan-out or multi-node topology justifies it.
 
----
+SQLite admission requires crash, power-loss, WAL recovery, disk-full, backup/restore, migration-with-pending-work, lock-contention, and Windows-service qualification. Failure of that qualification changes the V1 database to PostgreSQL; it does not permit weakening durability.
 
-**Alpha Vector LLC.** Specification v8 (2026-08-19).
+Temporal is a migration target behind the AMH operation contract. Migrating requires workflow semantic compatibility tests and state migration; it is not a configuration swap.
+
+## 4. Durable operation and external effects
+
+AMH guarantees durable orchestration, not universal exactly-once external effects.
+
+Core-local transactional steps MAY be exactly-once when the application write and durability record commit atomically in the same database transaction. Calls to MCP servers, APIs, connectors, devices, filesystems, or other processes are external effects and SHALL use the following generic lifecycle:
+
+```text
+PROPOSED
+  -> ADMITTED | REJECTED | NEEDS_APPROVAL
+  -> DISPATCH_PENDING
+  -> DISPATCHED
+  -> OBSERVED | OUTCOME_UNKNOWN
+  -> CONFIRMED | RECONCILED | COMPENSATED | FAILED
+```
+
+Before dispatch, the owning extension SHALL supply:
+
+- stable operation and command identities;
+- canonical payload digest;
+- retry classification;
+- idempotency mechanism, if available;
+- observation/reconciliation method;
+- timeout and uncertainty behavior;
+- declared properties used by policy, including reversibility where applicable.
+
+After an interrupted dispatch, AMH SHALL ask the extension to reconcile. AMH SHALL NOT infer that the effect failed, retry blindly, construct an inverse, or select a domain recovery action.
+
+## 5. Extension composition
+
+### 5.1 Cordis temporal composability
+
+Every core-mediated software effect installed by an extension SHALL register its disposer at the time the effect is created. Effects SHALL be disposed in reverse registration order.
+
+Examples include:
+
+- tool registration / tool removal;
+- event subscription / unsubscribe;
+- timer start / timer stop;
+- route registration / route removal;
+- service publication / withdrawal;
+- child extension mount / child extension disposal.
+
+An effect that bypasses the extension context is outside the reversibility guarantee and SHALL be rejected by conformance tests for an extension claiming reversible unload.
+
+### 5.2 Cordis spatial composability
+
+Extensions SHALL declare capabilities they provide and require. The resolver SHALL:
+
+- activate providers before consumers;
+- reject unsatisfied required dependencies;
+- detect dependency cycles;
+- quiesce consumers before withdrawing their provider;
+- dispose consumers before providers;
+- reactivate consumers only after replacement providers pass health and compatibility checks.
+
+### 5.3 Extension lifecycle
+
+```text
+DISCOVERED -> VALIDATED -> RESOLVED -> STAGED -> ACTIVATING -> ACTIVE
+ACTIVE -> QUIESCING -> DISPOSING -> DISPOSED
+ACTIVATING | ACTIVE | DISPOSING -> FAILED -> RECOVERY_REQUIRED
+```
+
+Activation and disposal progress SHALL be journaled incrementally. An extension SHALL NOT return an unpersisted list of completed effects only after activation finishes.
+
+### 5.4 Reversibility property
+
+`reversibility` is a generic action property with three values:
+
+- `verified`: the owning extension supplies a current verification attestation and inverse contract;
+- `claimed`: an inverse is declared but not currently attested;
+- `none`: no inverse is available.
+
+The core policy surface MAY use this property as a gating predicate. The extension owns what the property means for its action and SHALL bind its attestation to the extension version, action schema version, verification evidence, validity conditions, and invalidation rules.
+
+The existence of an inverse does not instruct the core to invoke it. The owning extension selects recovery through its reconciliation contract.
+
+## 6. Generic policy and approval seam
+
+The core SHALL provide a fail-closed policy hook without embedding domain rules.
+
+Input:
+
+- principal and extension identity;
+- action type and schema version;
+- canonical payload digest;
+- declared properties and attestation references;
+- requested deadline and resource budget;
+- extension-provided domain context reference.
+
+Output:
+
+- `admit`;
+- `admit_with_constraints`;
+- `needs_approval`;
+- `defer`;
+- `deny`.
+
+The result SHALL bind the exact action digest, constraints, policy version, decision time, and expiry. Check-then-act approval is forbidden: dispatch consumes the bound decision atomically or fails closed.
+
+Physical AI, finance, medical, communications, deployment, and other extensions define their own policies over this seam.
+
+## 7. Agent harness and context
+
+AMH SHALL implement the useful DeepAgents patterns natively on DBOS and SHALL NOT depend on LangGraph or the `deepagents` package while DBOS remains the durability engine.
+
+Required harness services:
+
+- tool-calling loop;
+- scoped VFS/artifact tools;
+- isolated subordinate-agent workflow;
+- configurable planning/recitation tool;
+- context budget manager;
+- compaction middleware;
+- SKILL.md progressive disclosure;
+- provider-neutral prompt-cache policy;
+- OpenTelemetry spans.
+
+Context rules:
+
+1. Stable, deterministic prompt prefix where the provider supports prefix caching.
+2. Configurable per-provider cache behavior; no assumption that hosted APIs expose token-level logit masking.
+3. Opaque, non-enumerable, capability-scoped artifact handles rather than ambient filesystem paths.
+4. Large tool output stored externally and retrieved by range/filter.
+5. Single-result cap, default 25,000 tokens unless the provider/model limit is lower.
+6. Compaction preserves governing constraints, goal, completion predicate, unresolved decisions, failures, uncertainty, active plan, and artifact references.
+7. Most recent turns remain raw according to provider policy.
+8. Subordinate agents receive explicit objective, boundary, artifact grants, budget, and output schema.
+9. Subordinate traces are durable artifacts available to the manager but are not automatically injected into any agent context.
+
+DeepSeek thinking-mode adapters SHALL preserve required `reasoning_content` across the active tool-call chain. Once the chain completes, provider policy determines retention and compaction.
+
+## 8. Memory and knowledge
+
+The core ontology contains only domain-neutral records:
+
+- Principal, Agent, Goal, Task, Run, Event, Message, Artifact;
+- Extension, Capability, ActionType, Effect, PolicyDecision, ApprovalRequest;
+- Memory, Claim, EntityRef, SkillVersion, PromptVersion, Eval, CandidateVersion.
+
+Memory projections:
+
+- working: active task/context projection;
+- episodic: event projection;
+- semantic: bi-temporal claim graph;
+- procedural: versioned skills and playbooks;
+- entity: profiles assembled from claims and evidence.
+
+Semantic claims SHALL preserve both valid time and transaction time, provenance, confidence meaning, contradiction/supersession links, and extraction version.
+
+Knowledge retrieval SHALL combine lexical, vector, and graph retrieval behind ports. SQLite FTS5 and sqlite-vec are V1 implementations, not public contracts. Embedding identity, dimension, model version, chunk version, source digest, and ACL/visibility metadata SHALL be stored with every vector.
+
+Domain extensions MAY register namespaced entity schemas, relations, indexes, retrieval enrichers, and consolidation rules. Physical geometry and spatial indexes belong to the Physical AI extension.
+
+## 9. Interoperability
+
+- **MCP 2026-07-28** is the native tool/resource interoperability baseline. Older MCP versions are compatibility adapters.
+- **A2A 1.0** is the external agent interoperability baseline.
+- AMH internal durable communication uses its own versioned operation/message contracts rather than an “A2A-derived” private envelope.
+
+MCP and A2A adapters SHALL translate external lifecycle and errors into AMH canonical operation states without becoming workflow authorities.
+
+## 10. Self-improvement
+
+Candidate classes are evaluated independently:
+
+| Candidate | Required evidence |
+|---|---|
+| Prompt | quality, cost, latency, regression suite |
+| Retrieval policy | relevance, provenance, poisoning, latency |
+| Declarative skill | schema plus scenario execution |
+| Executable skill/module | sandbox, static checks, tests, capability and effect conformance |
+| Core code | full build, migration, compatibility, durability, recovery, and operational qualification |
+
+Promotion flow:
+
+```text
+GENERATED -> EVALUATED -> CANARY -> PROMOTED | REJECTED
+PROMOTED -> DEMOTED -> ROLLED_BACK
+```
+
+GEPA, ACE, Voyager-style skill extraction, DSPy optimizers, and coder agents are replaceable modules. No optimizer may alter its evaluator, held-out cases, instrumentation, policy decision, approval, or promotion threshold.
+
+Promotion of a runtime capability uses the extension lifecycle: stage candidate, activate canary, observe independent evidence, quiesce previous provider, switch binding, retain rollback target, and dispose only when the rollback window closes.
+
+## 11. Self-healing
+
+Recovery ownership is explicit:
+
+| Failure | Owner |
+|---|---|
+| Go daemon or worker process | OS/service supervisor |
+| Python cognition worker | Go supervisor; DBOS resumes durable workflow |
+| Durable workflow interruption | DBOS |
+| Provider outage/rate limit | provider router/circuit breaker |
+| Extension process failure | extension supervisor |
+| Extension dependency loss | composition resolver |
+| External effect uncertainty | owning extension reconciler |
+| Context overflow | context manager |
+| Invalid model/tool output | contract validator |
+| Goal cannot continue | durable goal workflow |
+
+Restarting a process restores availability; it does not prove an operation succeeded. Recovery SHALL restore invariants or explicitly retain `OUTCOME_UNKNOWN`.
+
+## 12. Public contracts
+
+The following repository artifacts are normative:
+
+- `contracts/extension-manifest.schema.json`
+- `contracts/action-envelope.schema.json`
+- `contracts/effect-record.schema.json`
+- `contracts/policy-decision.schema.json`
+
+Domain extensions SHALL publish their schemas under their own namespace and SHALL NOT modify AMH core schemas to introduce domain entities.
+
+Public contracts require semantic versioning, compatibility declarations, typed errors, concurrency/version tokens where mutable state is involved, and deprecation periods.
+
+## 13. Physical AI extension boundary
+
+The separate Physical AI extension owns:
+
+- Device, DeviceAction, Location, Pose, Frame, Map, Mission, SafetyCase, and physical Effect specializations;
+- SSH, WinRM, MQTT, OPC-UA, Modbus, ROS 2, and device-driver modules used by that extension;
+- inverse verification for physical actions;
+- actuation bounds, interlocks, safe states, recovery, and earned-autonomy policy;
+- geometry, R-tree or other spatial indexes;
+- greenhouse, robot, industrial, cinema-motion-control, or building-control scenarios.
+
+The extension uses AMH durable workflows, generic action envelope, policy hook, effect record, artifacts, memory projections, and extension lifecycle. The core never interprets a physical command.
+
+## 14. Deployment and roadmap
+
+### V0 — production foundation
+
+- Go daemon as Linux systemd and Windows Service;
+- Python cognition workers managed by `uv` and packaged per target OS;
+- DBOS/SQLite durability qualification;
+- scoped artifact/VFS service and context budget manager;
+- one model provider and one MCP 2026-07-28 client;
+- extension resolver and reversible software effect journal;
+- generic policy hook;
+- OpenTelemetry tracing;
+- non-domain autonomous workflow surviving process and host restart.
+
+### V1 — autonomous habitat
+
+- isolated subordinate-agent workflows with bounded concurrency;
+- five memory projections and hybrid retrieval;
+- coder agent and production sandbox;
+- MCP server and A2A 1.0 adapter;
+- provider routing and failover;
+- independent eval/canary/promotion/rollback;
+- connector and domain-extension SDKs;
+- signed extension packs and compatibility qualification;
+- backup/restore, upgrade/rollback, corruption recovery, resource exhaustion, and soak acceptance.
+
+Physical AI is a separately versioned extension. Its schedule does not redefine or block AMH core V1.
+
+## 15. Acceptance invariants
+
+AMH is not complete until automated evidence proves:
+
+1. a durable workflow resumes after worker, daemon, and host restart without duplicate committed steps;
+2. interrupted external effects enter reconciliation and can remain `OUTCOME_UNKNOWN`;
+3. removing a conformant reversible extension leaves no registered context-mediated effects;
+4. dependency removal quiesces and disposes consumers before providers;
+5. an extension cannot mutate another extension’s owned effects;
+6. policy dispatch is bound to the admitted action digest and fails closed after expiry or mutation;
+7. a subordinate agent cannot enumerate artifacts outside its grants;
+8. compaction preserves every required checkpoint field;
+9. the trajectory presented to a model is reconstructible from durable records and artifacts;
+10. a candidate cannot modify its evaluator, evidence, policy, or promotion threshold;
+11. rollback restores the prior capability binding and compatible persisted state;
+12. no core schema contains domain-owned physical entities or policy.
+
+## 16. Superseded decisions
+
+The following earlier decisions are revoked and SHALL NOT be reintroduced:
+
+- physicality or physical safety as an AMH core concern;
+- core `Device`, `DeviceAction`, physical `Location`, physical `SafetyCase`, or greenhouse workflow types;
+- generic core derivation or invocation of physical inverses;
+- LangGraph/DeepAgents checkpointer nested inside DBOS workflows;
+- DBOS-to-Temporal described as a configuration swap;
+- NATS as a mandatory V1 core dependency;
+- private “A2A-derived” internal envelopes presented as A2A compatibility;
+- universal exactly-once claims for external effects.
+
+This document supersedes earlier AMH architecture revisions.

@@ -151,6 +151,60 @@ def test_complete_raises_when_daemon_unreachable():
         client.complete(system="", messages=[{"role": "user", "content": "hi"}])
 
 
+def test_from_env_embedding_fields_default_empty(monkeypatch):
+    monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
+    monkeypatch.delenv("ADAPTER_EMBEDDING_MODEL", raising=False)
+    monkeypatch.delenv("ADAPTER_EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("ADAPTER_EMBEDDING_PROVIDERS", raising=False)
+    client = from_env("http://127.0.0.1:9999", "agent-token")
+    assert client.embedding_model == ""
+    assert client.embedding_provider == ""
+    assert client.embedding_providers is None
+
+
+def test_from_env_reads_embedding_fields(monkeypatch):
+    monkeypatch.setenv("ADAPTER_MODEL", "claude-sonnet-5")
+    monkeypatch.setenv("ADAPTER_EMBEDDING_MODEL", "text-embedding-3-small")
+    monkeypatch.setenv("ADAPTER_EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setenv("ADAPTER_EMBEDDING_PROVIDERS", "openai, voyage")
+    client = from_env("http://127.0.0.1:9999", "agent-token")
+    assert client.embedding_model == "text-embedding-3-small"
+    assert client.embedding_provider == "openai"
+    assert client.embedding_providers == ["openai", "voyage"]
+
+
+def test_embed_sends_real_request_and_parses_real_response(fake_daemon):
+    _FakeDaemon.response_body = json.dumps({"embeddings": [[0.1, 0.2], [0.3, 0.4]], "dimension": 2}).encode()
+    client = ModelClient(
+        daemon_api_base_url=fake_daemon, agent_token="my-agent-token", model="claude-sonnet-5",
+        embedding_model="text-embedding-3-small", embedding_provider="openai",
+    )
+
+    result = client.embed(["first", "second"])
+
+    assert result == [[0.1, 0.2], [0.3, 0.4]]
+    assert _FakeDaemon.captured_path == "/v1/inference/embed"
+    assert _FakeDaemon.captured_auth == "Bearer my-agent-token"
+    assert _FakeDaemon.captured_body["provider"] == "openai"
+    assert _FakeDaemon.captured_body["model"] == "text-embedding-3-small"
+    assert _FakeDaemon.captured_body["input"] == ["first", "second"]
+
+
+def test_embed_raises_without_embedding_model_configured(fake_daemon):
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5")
+    with pytest.raises(ModelNotConfiguredError):
+        client.embed(["hi"])
+
+
+def test_embed_raises_on_daemon_error_response(fake_daemon):
+    _FakeDaemon.response_status = 400
+    _FakeDaemon.response_body = json.dumps({"error": "embeddings are only implemented for the openai_compatible provider kind"}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5", embedding_model="voyage-3")
+
+    with pytest.raises(ModelNotConfiguredError):
+        client.embed(["hi"])
+
+
 def test_never_sends_a_model_provider_credential():
     """Structural guardrail: this module has no parameter or attribute
     shaped like a model-provider secret — only the daemon holds one."""

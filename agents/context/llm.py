@@ -15,9 +15,10 @@ calls the daemon with only the same agent bearer token it already holds
 for actuation, approval, and everything else — matching
 agents/workflows/actuate.py's shape exactly.
 
-complete() and count_tokens() make a real HTTP call and return the real
-result. No provider registered on the daemon side -> the daemon returns
-404 and this raises ModelNotConfiguredError — never a canned response.
+complete(), count_tokens(), and embed() each make a real HTTP call and
+return the real result. No provider registered on the daemon side -> the
+daemon returns 404 and this raises ModelNotConfiguredError — never a
+canned response.
 """
 
 from __future__ import annotations
@@ -58,6 +59,15 @@ class ModelClient:
     order and returns the first success. Takes precedence over `provider`
     when set; `provider` remains the single-provider shorthand."""
 
+    embedding_model: str = ""
+    embedding_provider: str = ""
+    embedding_providers: list[str] | None = None
+    """Separate from `model`/`provider`/`providers`: daemon/inference.Embed
+    is only implemented for the openai_compatible provider kind (Anthropic
+    has no first-party embeddings API), so a habitat whose completion
+    provider is "anthropic" needs a distinct registered account — e.g.
+    "voyage" or "openai" — for embed() to call."""
+
     def complete(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> str:
         """Returns the model's real text response, via the daemon."""
         payload = {
@@ -83,6 +93,23 @@ class ModelClient:
         }
         result = self._post("/v1/inference/count-tokens", payload)
         return result["input_tokens"]
+
+    def embed(self, texts: list[str]) -> list[list[float]]:
+        """Returns one real embedding vector per entry in texts, in order,
+        via the daemon. Raises ModelNotConfiguredError if embedding_model is
+        unset or if the resolved provider account has no embeddings support
+        (e.g. an "anthropic" kind credential — see embedding_model's doc
+        comment above)."""
+        if not self.embedding_model:
+            raise ModelNotConfiguredError("embedding_model is not set — no embedding model is configured for this agent run")
+        payload = {
+            "provider": self.embedding_provider,
+            "providers": self.embedding_providers or [],
+            "model": self.embedding_model,
+            "input": texts,
+        }
+        result = self._post("/v1/inference/embed", payload)
+        return result["embeddings"]
 
     def _post(self, path: str, payload: dict) -> dict:
         url = f"{self.daemon_api_base_url}{path}"
@@ -121,10 +148,19 @@ def from_env(daemon_api_base_url: str, agent_token: str) -> ModelClient:
     provider = os.environ.get("ADAPTER_PROVIDER", "").strip()
     providers_raw = os.environ.get("ADAPTER_PROVIDERS", "").strip()
     providers = [p.strip() for p in providers_raw.split(",") if p.strip()] or None
+
+    embedding_model = os.environ.get("ADAPTER_EMBEDDING_MODEL", "").strip()
+    embedding_provider = os.environ.get("ADAPTER_EMBEDDING_PROVIDER", "").strip()
+    embedding_providers_raw = os.environ.get("ADAPTER_EMBEDDING_PROVIDERS", "").strip()
+    embedding_providers = [p.strip() for p in embedding_providers_raw.split(",") if p.strip()] or None
+
     return ModelClient(
         daemon_api_base_url=daemon_api_base_url,
         agent_token=agent_token,
         model=model,
         provider=provider,
         providers=providers,
+        embedding_model=embedding_model,
+        embedding_provider=embedding_provider,
+        embedding_providers=embedding_providers,
     )

@@ -1,9 +1,12 @@
 -- AMH core schema.
--- Ontology tables + episode log + spatial (R-tree) + vector (sqlite-vec) + FTS5.
--- See docs/AMH-SPECIFICATION.md Artifact E for the authoritative design and rationale.
+-- Ontology tables + episode log + spatial (R-tree) + vector + FTS5.
+-- See docs/AMH-SPECIFICATION.md §8 for the memory-projection design and
+-- rationale; see 0004_memory_projections.sql for the vector/entity/
+-- semantic-hardening schema built on top of this file.
 --
--- NOTE: sqlite-vec is a loadable extension; the store layer loads it before
---   running this migration. rtree and fts5 are built-in SQLite modules.
+-- NOTE: rtree and fts5 are built-in SQLite modules, loaded unconditionally.
+--   Vector storage/search does not use a native sqlite-vec extension — see
+--   0004_memory_projections.sql's chunk_embedding table for why.
 
 PRAGMA foreign_keys = ON;
 
@@ -138,14 +141,14 @@ CREATE TABLE chunk (
   meta JSON
 );
 
--- Vector index (sqlite-vec; brute-force KNN by default in V1).
--- Loaded conditionally by the store layer — dimension is env-configured
--- (VECTOR_EMBED_DIM); this migration creates it only if the extension loaded.
--- CREATE VIRTUAL TABLE chunk_vec USING vec0(embedding FLOAT[1024]);
+-- Vector storage: see 0004_memory_projections.sql's chunk_embedding table
+-- (brute-force KNN by default in V1, per .env.example's VECTOR_EMBED_DIM).
 
 CREATE VIRTUAL TABLE chunk_fts USING fts5(text, content='chunk', content_rowid='rowid');
+-- Kept in sync by triggers in 0004_memory_projections.sql (external-content
+-- FTS5 tables are not populated automatically).
 
--- ── Spatial memory (§7a) ─────────────────────────────────────────────────
+-- ── Spatial memory (§13, Physical AI extension) ─────────────────────────
 
 CREATE TABLE location (
   id TEXT PRIMARY KEY,

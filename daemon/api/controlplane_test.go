@@ -432,6 +432,68 @@ func TestInferenceComplete_RequiresModel(t *testing.T) {
 	}
 }
 
+func TestInferenceEmbed_RealRoundTripThroughRegisteredProvider(t *testing.T) {
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			t.Errorf("expected path /embeddings, got %q", r.URL.Path)
+		}
+		w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3],"index":0}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProvider(t, ts, fakeProvider.URL)
+
+	body, _ := json.Marshal(map[string]any{"provider": "test-fake", "model": "test-embed-model", "input": []string{"hello world"}})
+	resp := postJSON(t, ts.URL+"/v1/inference/embed", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+	var result inferenceEmbedResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Dimension != 3 || len(result.Embeddings) != 1 || result.Embeddings[0][0] != 0.1 {
+		t.Fatalf("expected the real provider's embedding, got %+v", result)
+	}
+}
+
+func TestInferenceEmbed_RequiresModelAndInput(t *testing.T) {
+	ts := newTestServer(t, true)
+
+	body, _ := json.Marshal(map[string]any{"input": []string{"hi"}})
+	resp := postJSON(t, ts.URL+"/v1/inference/embed", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when model is missing, got %d", resp.StatusCode)
+	}
+
+	body2, _ := json.Marshal(map[string]any{"model": "m"})
+	resp2 := postJSON(t, ts.URL+"/v1/inference/embed", testAgentToken, body2)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when input is missing, got %d", resp2.StatusCode)
+	}
+}
+
+func TestInferenceEmbed_AnthropicProvider_ReturnsBadRequest(t *testing.T) {
+	ts := newTestServer(t, true)
+	createBody, _ := json.Marshal(map[string]string{"provider": "anthropic", "display_name": "anthropic"})
+	create := postJSON(t, ts.URL+"/v1/accounts", testOperatorToken, createBody)
+	var acct accountResponse
+	json.NewDecoder(create.Body).Decode(&acct)
+	create.Body.Close()
+	envelope, _ := json.Marshal(map[string]string{"kind": "anthropic", "api_key": "k"})
+	credBody, _ := json.Marshal(map[string]string{"secret": string(envelope)})
+	postJSON(t, ts.URL+"/v1/accounts/"+acct.ID+"/credential", testOperatorToken, credBody).Body.Close()
+
+	body, _ := json.Marshal(map[string]any{"provider": "anthropic", "model": "voyage-3", "input": []string{"hi"}})
+	resp := postJSON(t, ts.URL+"/v1/inference/embed", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 for a provider kind with no embeddings support, got %d", resp.StatusCode)
+	}
+}
+
 func mustReadAll(t *testing.T, r io.Reader) []byte {
 	t.Helper()
 	b, err := io.ReadAll(r)

@@ -98,7 +98,29 @@ var (
 	// ErrAllProvidersFailed wraps the joined per-provider errors when every
 	// provider in a Request's failover chain failed — see providerChain.
 	ErrAllProvidersFailed = errors.New("inference: every provider in the failover chain failed")
+	// ErrEmbedNotSupported is returned for a provider kind with no known
+	// embeddings endpoint — currently just "anthropic" (Anthropic does not
+	// publish a first-party embeddings API; its own docs point customers at
+	// a separate provider, Voyage AI, for that). Register a Voyage/OpenAI/
+	// self-hosted account as "openai_compatible" to use Embed.
+	ErrEmbedNotSupported = errors.New("inference: embeddings are only implemented for the openai_compatible provider kind")
 )
+
+// EmbedRequest requests one or more embedding vectors for Input, using the
+// same provider-account resolution and failover chain as Request.
+type EmbedRequest struct {
+	Provider  string
+	Providers []string
+	Model     string
+	Input     []string
+}
+
+// EmbedResult holds one real embedding vector per EmbedRequest.Input entry,
+// in the same order, plus the dimension every vector shares.
+type EmbedResult struct {
+	Embeddings [][]float32
+	Dimension  int
+}
 
 // providerChain returns req's ordered list of providers to try: Providers
 // if set, otherwise the single Provider (defaulting to "anthropic").
@@ -206,6 +228,82 @@ func (r *Router) countTokensOne(ctx context.Context, provider string, req Reques
 		return 0, fmt.Errorf("inference: count_tokens is only implemented for the anthropic provider, got %q", env.Kind)
 	}
 	return r.anthropicCountTokens(ctx, env, req)
+}
+
+// Embed returns real embedding vectors for req.Input, trying each provider
+// in req's failover chain in order (see Complete). Only implemented for the
+// openai_compatible provider kind — see ErrEmbedNotSupported.
+func (r *Router) Embed(ctx context.Context, req EmbedRequest) (EmbedResult, error) {
+	var errs []error
+	for _, provider := range providerChain(Request{Provider: req.Provider, Providers: req.Providers}) {
+		result, err := r.embedOne(ctx, provider, req)
+		if err == nil {
+			return result, nil
+		}
+		errs = append(errs, fmt.Errorf("provider %q: %w", provider, err))
+	}
+	return EmbedResult{}, errors.Join(append([]error{ErrAllProvidersFailed}, errs...)...)
+}
+
+func (r *Router) embedOne(ctx context.Context, provider string, req EmbedRequest) (EmbedResult, error) {
+	env, err := r.resolveCredential(ctx, provider)
+	if err != nil {
+		return EmbedResult{}, err
+	}
+	if env.Kind != "openai_compatible" {
+		return EmbedResult{}, ErrEmbedNotSupported
+	}
+	return r.openAICompatibleEmbed(ctx, env, req)
+}
+
+func (r *Router) openAICompatibleEmbed(ctx context.Context, env credentialEnvelope, req EmbedRequest) (EmbedResult, error) {
+	if env.BaseURL == "" {
+		return EmbedResult{}, fmt.Errorf("inference: openai_compatible credential is missing base_url")
+	}
+	key, err := bearerFor(env)
+	if err != nil {
+		return EmbedResult{}, err
+	}
+	body, _ := json.Marshal(map[string]any{
+		"model": req.Model,
+		"input": req.Input,
+	})
+
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(env.BaseURL, "/")+"/embeddings", bytes.NewReader(body))
+	if err != nil {
+		return EmbedResult{}, err
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Authorization", "Bearer "+key)
+
+	_, respBody, err := r.doJSON(httpReq)
+	if err != nil {
+		return EmbedResult{}, err
+	}
+	var payload struct {
+		Data []struct {
+			Embedding []float32 `json:"embedding"`
+			Index     int       `json:"index"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(respBody, &payload); err != nil {
+		return EmbedResult{}, fmt.Errorf("inference: parse openai-compatible embeddings response: %w", err)
+	}
+	if len(payload.Data) == 0 {
+		return EmbedResult{}, fmt.Errorf("inference: openai-compatible embeddings response had no data: %s", string(respBody))
+	}
+	vectors := make([][]float32, len(payload.Data))
+	dimension := len(payload.Data[0].Embedding)
+	for _, d := range payload.Data {
+		if d.Index < 0 || d.Index >= len(vectors) {
+			return EmbedResult{}, fmt.Errorf("inference: embeddings response index %d out of range for %d inputs", d.Index, len(vectors))
+		}
+		if len(d.Embedding) != dimension {
+			return EmbedResult{}, fmt.Errorf("inference: embeddings response has inconsistent dimensions (%d vs %d)", len(d.Embedding), dimension)
+		}
+		vectors[d.Index] = d.Embedding
+	}
+	return EmbedResult{Embeddings: vectors, Dimension: dimension}, nil
 }
 
 func providerOrDefault(p string) string {

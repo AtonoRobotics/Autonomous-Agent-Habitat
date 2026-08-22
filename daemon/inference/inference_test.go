@@ -413,3 +413,102 @@ func TestComplete_DefaultsProviderToAnthropic(t *testing.T) {
 		t.Fatalf("expected empty Provider to default to anthropic: %v", err)
 	}
 }
+
+func TestEmbed_OpenAICompatible_RealRequestShapeAndResponseParsing(t *testing.T) {
+	var capturedAuth string
+	var capturedBody map[string]any
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			t.Errorf("expected path /embeddings, got %q", r.URL.Path)
+		}
+		capturedAuth = r.Header.Get("Authorization")
+		json.NewDecoder(r.Body).Decode(&capturedBody)
+		w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3],"index":1},{"embedding":[0.4,0.5,0.6],"index":0}]}`))
+	}))
+	defer fake.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "embedder", map[string]string{"kind": "openai_compatible", "api_key": "embed-key", "base_url": fake.URL})
+
+	router := New(creds)
+	result, err := router.Embed(context.Background(), EmbedRequest{
+		Provider: "embedder", Model: "text-embedding-3-small",
+		Input: []string{"first", "second"},
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if result.Dimension != 3 {
+		t.Fatalf("expected dimension 3, got %d", result.Dimension)
+	}
+	// Response arrived index-1-first, index-0-second — result.Embeddings
+	// must be reordered back to match the input order.
+	if len(result.Embeddings) != 2 || result.Embeddings[0][0] != 0.4 || result.Embeddings[1][0] != 0.1 {
+		t.Fatalf("embeddings not reordered by index: %v", result.Embeddings)
+	}
+	if capturedAuth != "Bearer embed-key" {
+		t.Fatalf("expected Bearer embed-key, got %q", capturedAuth)
+	}
+	if capturedBody["model"] != "text-embedding-3-small" {
+		t.Fatalf("expected model in request body, got %v", capturedBody["model"])
+	}
+	input := capturedBody["input"].([]any)
+	if len(input) != 2 || input[0] != "first" || input[1] != "second" {
+		t.Fatalf("expected input array preserved, got %v", input)
+	}
+}
+
+func TestEmbed_Anthropic_ReturnsNotSupported(t *testing.T) {
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "k"})
+
+	router := New(creds)
+	_, err := router.Embed(context.Background(), EmbedRequest{Provider: "anthropic", Model: "voyage-3", Input: []string{"x"}})
+	if !errors.Is(err, ErrEmbedNotSupported) {
+		t.Fatalf("expected ErrEmbedNotSupported, got %v", err)
+	}
+}
+
+func TestEmbed_InconsistentDimensions_Fails(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"embedding":[0.1,0.2],"index":0},{"embedding":[0.1,0.2,0.3],"index":1}]}`))
+	}))
+	defer fake.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "embedder", map[string]string{"kind": "openai_compatible", "api_key": "k", "base_url": fake.URL})
+
+	router := New(creds)
+	_, err := router.Embed(context.Background(), EmbedRequest{Provider: "embedder", Model: "m", Input: []string{"a", "b"}})
+	if err == nil {
+		t.Fatalf("expected an error for inconsistent embedding dimensions")
+	}
+}
+
+func TestEmbed_FailsOverToSecondProviderOnFirstFailure(t *testing.T) {
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer primary.Close()
+	backup := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"data":[{"embedding":[0.9],"index":0}]}`))
+	}))
+	defer backup.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "primary", map[string]string{"kind": "openai_compatible", "api_key": "k", "base_url": primary.URL})
+	registerProviderAccount(t, creds, "backup", map[string]string{"kind": "openai_compatible", "api_key": "k", "base_url": backup.URL})
+
+	router := New(creds)
+	result, err := router.Embed(context.Background(), EmbedRequest{Providers: []string{"primary", "backup"}, Model: "m", Input: []string{"x"}})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if len(result.Embeddings) != 1 || result.Embeddings[0][0] != 0.9 {
+		t.Fatalf("expected backup provider's result, got %v", result.Embeddings)
+	}
+}

@@ -266,6 +266,8 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleInferenceComplete, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/inference/count-tokens",
 		s.Auth.RequireRole(s.handleInferenceCountTokens, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/inference/embed",
+		s.Auth.RequireRole(s.handleInferenceEmbed, authn.RoleAgent, authn.RoleOperator))
 
 	return mux
 }

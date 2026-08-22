@@ -586,3 +586,50 @@ func (s *Server) handleInferenceCountTokens(w http.ResponseWriter, r *http.Reque
 	}
 	writeJSON(w, http.StatusOK, inferenceCountTokensResponse{InputTokens: n})
 }
+
+type inferenceEmbedRequest struct {
+	Provider  string   `json:"provider,omitempty"`
+	Providers []string `json:"providers,omitempty"`
+	Model     string   `json:"model"`
+	Input     []string `json:"input"`
+}
+
+type inferenceEmbedResponse struct {
+	Embeddings [][]float32 `json:"embeddings,omitempty"`
+	Dimension  int         `json:"dimension,omitempty"`
+	Error      string      `json:"error,omitempty"`
+}
+
+func (s *Server) handleInferenceEmbed(w http.ResponseWriter, r *http.Request) {
+	if s.inferenceUnavailable(w) {
+		return
+	}
+	var req inferenceEmbedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, inferenceEmbedResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if req.Model == "" {
+		writeJSON(w, http.StatusBadRequest, inferenceEmbedResponse{Error: "model is required"})
+		return
+	}
+	if len(req.Input) == 0 {
+		writeJSON(w, http.StatusBadRequest, inferenceEmbedResponse{Error: "input is required"})
+		return
+	}
+	result, err := s.Inference.Embed(r.Context(), inference.EmbedRequest{
+		Provider:  req.Provider,
+		Providers: req.Providers,
+		Model:     req.Model,
+		Input:     req.Input,
+	})
+	if err != nil {
+		status := inferenceErrorStatus(err)
+		if errors.Is(err, inference.ErrEmbedNotSupported) {
+			status = http.StatusBadRequest
+		}
+		writeJSON(w, status, inferenceEmbedResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, inferenceEmbedResponse{Embeddings: result.Embeddings, Dimension: result.Dimension})
+}

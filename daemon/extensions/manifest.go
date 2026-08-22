@@ -4,11 +4,14 @@
 // contracts/extension-manifest.schema.json defines the wire shape of.
 // store/migrations/0001's capability/capability_effect tables were this
 // concept's DDL only, with no code ever reading or writing them — this
-// package, and 0002_control_plane.sql's extension/extension_effect tables,
-// replace that gap with a working registry: discover, activate (spatial
-// composability — dependency resolution and activation order), quiesce,
-// dispose (temporal composability — disposal as activation's verified
-// inverse), and rollback on partial-activation failure.
+// package, and 0001_init.sql's extension table, replace that gap with a
+// working registry: discover, activate (spatial composability —
+// dependency resolution and activation order), quiesce, dispose (temporal
+// composability — disposal as activation's verified inverse), and
+// rollback on partial-activation failure. Activation/disposal are
+// themselves tracked as daemon/operations Effects (§4) — see
+// registry.go's trackedLaunch — not through the extension table's own
+// (now-removed, see 0007_drop_extension_effect.sql) bespoke audit table.
 package extensions
 
 import (

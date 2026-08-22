@@ -22,6 +22,15 @@ configured via AMH_MCP_SERVERS (see mcp_servers_from_env) — unset means
 no MCP tools, the same optional-if-unconfigured pattern
 workflows/memory_hooks.py already uses for Hindsight/Graphiti.
 
+Every MCP tool call is proposed as an external effect through
+workflows/operations.py (daemon/operations — §4) before it runs, using
+model_client's own daemon_api_base_url/agent_token (no new plumbing
+through run_agentic_loop's signature). This is deliberately track-only,
+not enforcing: see _propose_mcp_effect's doc comment for why the loop
+never waits for or acts on the resulting decision, and workflows/
+operations.py's module doc comment for why these calls aren't
+@DBOS.step()-wrapped here.
+
 Physical actuation (workflows/actuate.py) is deliberately still not a
 loop tool — that needs a policy decision about which tools an isolated
 subagent should be allowed to reach directly versus only through an
@@ -33,17 +42,22 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
+import uuid
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 
 from context.budget import BudgetManager, approximate_token_count
 from context.compactor import Compactor
 from context.llm import ModelClient
+from workflows import operations
 
 from .mcp_client import connect_stdio
 from .planning import TodoList
 from .vfs import VFS, PathEscapesRootError
+
+logger = logging.getLogger(__name__)
 
 _SYSTEM_PROMPT_TEMPLATE = """You are an isolated agent completing one task, with access to a virtual \
 filesystem scoped to this task and a planning tool. Respond on every turn \
@@ -114,6 +128,40 @@ class LoopBudgetExceededError(Exception):
 class UnknownToolError(Exception):
     """The model named a tool outside the known built-in + configured-MCP
     set — a real protocol violation, not swallowed as a no-op."""
+
+
+async def _propose_mcp_effect(daemon_api_base_url: str, agent_token: str, server_name: str, raw_tool_name: str, args: dict) -> None:
+    """Best-effort external-effect tracking (§4) for one MCP tool call, via
+    workflows/operations.py. Always reversibility="none": an arbitrary
+    third-party MCP tool has no verified inverse this harness can attest
+    to, so daemon/policy's built-in policy always resolves this to
+    needs_approval — and nothing here calls approve()/deny() on it. That's
+    deliberate, not a bug: the effect record is a real, permanent audit
+    entry ("this call happened, unattested"), not a live admission gate —
+    the loop does not wait for or act on the decision, and still runs the
+    tool call regardless of it. Enforcing admission before dispatch is a
+    real, separate step this deliberately does not take yet.
+
+    A failure to even record the Propose call (daemon unreachable, etc.)
+    is logged and swallowed here, never allowed to block or crash the
+    tool call it describes — the tool call's own success or failure is
+    independent of whether tracking it succeeded."""
+    try:
+        await asyncio.to_thread(
+            operations.propose,
+            daemon_api_base_url,
+            agent_token,
+            str(uuid.uuid4()),
+            "amh.core/mcp-client",
+            f"mcp_tool_call:{server_name}:{raw_tool_name}",
+            {"server": server_name, "tool": raw_tool_name, "args": args},
+            "none",
+        )
+    except Exception:
+        logger.warning(
+            "failed to record operations effect for MCP call %s:%s (proceeding untracked)",
+            server_name, raw_tool_name, exc_info=True,
+        )
 
 
 def _dispatch_builtin_tool(vfs: VFS, todos: TodoList, tool: str, args: dict) -> str:
@@ -192,6 +240,7 @@ async def _run_agentic_loop_async(
             args = action.get("args", {})
             if tool in mcp_tool_lookup:
                 server_name, raw_tool_name = mcp_tool_lookup[tool]
+                await _propose_mcp_effect(model_client.daemon_api_base_url, model_client.agent_token, server_name, raw_tool_name, args)
                 try:
                     call_result = await mcp_clients[server_name].call_tool(raw_tool_name, args)
                     texts = [c["text"] for c in call_result.content if c.get("type") == "text"]

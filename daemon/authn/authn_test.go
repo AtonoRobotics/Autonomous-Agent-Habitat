@@ -99,6 +99,33 @@ func TestRequireRole_AgentTokenRejectedOnOperatorOnlyRoute(t *testing.T) {
 	}
 }
 
+func TestRequireRole_StashesTheAuthenticatedRoleOnContext(t *testing.T) {
+	auth := newTestAuth(t)
+	var gotRole Role
+	var gotOK bool
+	handler := auth.RequireRole(func(w http.ResponseWriter, r *http.Request) {
+		gotRole, gotOK = RoleFromContext(r.Context())
+		w.WriteHeader(http.StatusOK)
+	}, RoleAgent, RoleOperator)
+
+	doRequest(t, handler, "operator-secret")
+	if !gotOK || gotRole != RoleOperator {
+		t.Fatalf("expected RoleOperator on context, got role=%q ok=%v", gotRole, gotOK)
+	}
+
+	doRequest(t, handler, "agent-secret")
+	if !gotOK || gotRole != RoleAgent {
+		t.Fatalf("expected RoleAgent on context, got role=%q ok=%v", gotRole, gotOK)
+	}
+}
+
+func TestRoleFromContext_AbsentWhenRequireRoleNeverRan(t *testing.T) {
+	_, ok := RoleFromContext(httptest.NewRequest(http.MethodGet, "/", nil).Context())
+	if ok {
+		t.Fatalf("expected no role on a plain, unauthenticated context")
+	}
+}
+
 func TestRequireRole_MalformedHeaderIs401(t *testing.T) {
 	auth := newTestAuth(t)
 	handler := auth.RequireRole(handlerOK, RoleAgent, RoleOperator)

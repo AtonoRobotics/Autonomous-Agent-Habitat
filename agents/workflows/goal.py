@@ -3,9 +3,13 @@ docs/AMH-SPECIFICATION.md Artifact F.
 
 pursue_goal decomposes a goal into tasks (a step), spawns one run_subagent
 child workflow per task (isolated context, condensed result-only return per
-§14.2/Cognition), gathers results, and synthesizes (a single-threaded write,
-per §3/§9). Both workflows are DBOS-durable: a crashed process resumes from
-the last committed step on restart — no bespoke retry logic, no lost work.
+§14.2/Cognition) subject to a durable, bounded concurrency limit
+(_SUBAGENT_QUEUE — §14 V1's "isolated subordinate-agent workflows with
+bounded concurrency"), gathers results, and synthesizes (a single-threaded
+write, per §3/§9). Both workflows are DBOS-durable: a crashed process
+resumes from the last committed step on restart — no bespoke retry logic,
+no lost work, and a subagent still queued (not yet started) at crash time
+is still subject to the same concurrency bound on restart.
 
 decompose_goal and do_subagent_work make real model calls through the
 daemon's inference seam (context/llm.py, daemon/inference) — they are not
@@ -25,13 +29,36 @@ loudly, not by returning a fake result.
 from __future__ import annotations
 
 import json
+import os
 from typing import Any
 
-from dbos import DBOS
+from dbos import DBOS, Queue
 
 from context.llm import from_env
 from context.observability import agent_run_span, inject_trace_context
 from . import ontology
+
+# Bounded concurrency for subordinate-agent fan-out (docs/AMH-SPECIFICATION.md
+# §14, V1: "isolated subordinate-agent workflows with bounded concurrency").
+# A goal that decomposes into many tasks must not fan out unboundedly —
+# every task at once would mean unbounded concurrent model calls (cost,
+# rate limits) and unbounded concurrent SQLite writers against the shared
+# ontology database. DBOS's Queue is a durable concurrency limiter, not an
+# in-process one (e.g. threading.Semaphore): a queued-but-not-yet-started
+# subagent survives a process crash and resumes being subject to the same
+# limit on restart, matching every other durability guarantee in this
+# codebase. AMH_SUBAGENT_CONCURRENCY is read once at import time, since a
+# DBOS Queue's concurrency is fixed at construction.
+_SUBAGENT_QUEUE = Queue(
+    "amh-subagents",
+    concurrency=int(os.environ.get("AMH_SUBAGENT_CONCURRENCY", "5")),
+    # DBOS's default (1.0s) is tuned for low background-poll overhead at
+    # scale; a habitat spawning subagents on human/device timescales (not
+    # thousands/sec) can afford to check far more often, and callers of
+    # start_subagent already block on .get_result() — a slow dequeue is
+    # pure added latency with no offsetting benefit here.
+    polling_interval_sec=0.2,
+)
 
 _DECOMPOSE_SYSTEM_PROMPT = """You decompose a goal into concrete, independently-workable tasks.
 
@@ -121,18 +148,26 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url
 
 
 def start_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, agent_token: str):
-    """Starts run_subagent as a DBOS child workflow, capturing the
+    """Enqueues run_subagent as a DBOS child workflow, capturing the
     caller's current OTel span context and passing it through explicitly
     so the child's span nests under the caller's trace. Must be called
     from inside the caller's own `with agent_run_span(...):` block — the
     whole point is to capture whatever span is active at the call site.
 
+    Goes through _SUBAGENT_QUEUE rather than DBOS.start_workflow directly:
+    a goal that decomposes into more tasks than AMH_SUBAGENT_CONCURRENCY
+    allows queues the excess durably instead of running them all at once
+    — see this module's top-level comment. The returned handle behaves
+    identically either way (.get_result() blocks until the subagent
+    actually runs and completes), so callers don't need to know which.
+
     The single choke point for starting a sub-agent: both pursue_goal and
-    run_greenhouse_scenario call this rather than DBOS.start_workflow
-    directly, so trace propagation only needs to be right in one place.
+    run_greenhouse_scenario call this rather than the queue/start_workflow
+    APIs directly, so trace propagation and the concurrency bound only
+    need to be right in one place.
     """
     trace_context = inject_trace_context()
-    return DBOS.start_workflow(run_subagent, task_id, objective, db_path, daemon_api_base_url, agent_token, trace_context)
+    return _SUBAGENT_QUEUE.enqueue(run_subagent, task_id, objective, db_path, daemon_api_base_url, agent_token, trace_context)
 
 
 @DBOS.step()

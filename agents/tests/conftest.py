@@ -142,24 +142,18 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
         self.wfile.write(response)
 
 
-@pytest.fixture()
-def fake_model_server(daemon, monkeypatch):
-    """Starts the fake model HTTP server, registers it as a real
-    "test-fake" provider account on the real running daemon (the same
-    two calls an operator makes through the control-plane UI's Accounts
-    tab), and points ADAPTER_MODEL/ADAPTER_PROVIDER at it — the only
-    things workflows.goal's from_env() reads from this process's own
-    environment now; daemon_api_base_url/agent_token flow explicitly
-    through the workflow call graph instead (see workflows/goal.py)."""
-    port = _find_free_port()
-    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeModelHandler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-
-    envelope = json.dumps({"kind": "openai_compatible", "api_key": "test-fake-key", "base_url": f"http://127.0.0.1:{port}"})
+def register_model_provider_account(daemon, model_server_url: str, provider: str = "test-fake") -> None:
+    """Registers model_server_url as a real provider account on the real
+    running daemon (the same two calls an operator makes through the
+    control-plane UI's Accounts tab) — the same envelope shape
+    daemon/inference parses for any openai_compatible provider. Shared by
+    fake_model_server and any test that needs its own model-server
+    instance with the same registration dance (e.g. one with custom
+    tracking behavior a shared fixture shouldn't carry)."""
+    envelope = json.dumps({"kind": "openai_compatible", "api_key": "test-fake-key", "base_url": model_server_url})
     create_req = urllib.request.Request(
         f"{daemon.base_url}/v1/accounts",
-        data=json.dumps({"provider": "test-fake", "display_name": "fake model server"}).encode(),
+        data=json.dumps({"provider": provider, "display_name": "fake model server"}).encode(),
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {daemon.operator_token}"},
         method="POST",
     )
@@ -175,6 +169,22 @@ def fake_model_server(daemon, monkeypatch):
         method="POST",
     )
     urllib.request.urlopen(credential_req, timeout=10).close()
+
+
+@pytest.fixture()
+def fake_model_server(daemon, monkeypatch):
+    """Starts the fake model HTTP server, registers it as a real
+    "test-fake" provider account on the real running daemon, and points
+    ADAPTER_MODEL/ADAPTER_PROVIDER at it — the only things workflows.goal's
+    from_env() reads from this process's own environment now;
+    daemon_api_base_url/agent_token flow explicitly through the workflow
+    call graph instead (see workflows/goal.py)."""
+    port = _find_free_port()
+    server = ThreadingHTTPServer(("127.0.0.1", port), _FakeModelHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    register_model_provider_account(daemon, f"http://127.0.0.1:{port}")
 
     monkeypatch.setenv("ADAPTER_MODEL", "test-fake-model")
     monkeypatch.setenv("ADAPTER_PROVIDER", "test-fake")

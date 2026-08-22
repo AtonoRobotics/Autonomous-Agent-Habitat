@@ -18,6 +18,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/a2a"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/api"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/cognition"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/mcp"
@@ -158,12 +159,24 @@ func main() {
 	a2aPublicURL := getenv("AMH_A2A_PUBLIC_URL", "http://"+host+":"+a2aPort)
 	a2aSrv := a2a.New(host+":"+a2aPort, a2aPublicURL, a2a.NewStore(db), tp, auth, log)
 
+	// docs/AMH-SPECIFICATION.md §11's self-healing ownership table:
+	// "Python cognition worker | Go supervisor; DBOS resumes durable
+	// workflow." AMH_COGNITION_WORKER_CMD is unset by default —
+	// cognition.Worker.Run is then a no-op (see its doc comment), the
+	// same soft-disable posture as AMH_CREDENTIAL_KEY above, not a
+	// startup refusal over a genuinely optional piece.
+	cognitionWorker := &cognition.Worker{
+		Command: os.Getenv("AMH_COGNITION_WORKER_CMD"),
+		Dir:     os.Getenv("AMH_COGNITION_WORKER_DIR"),
+	}
+
 	sup := supervisor.New("amh-daemon", supervisor.OneForOne, 5, time.Minute, log)
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})
 	sup.Add(supervisor.Child{Name: "health", Run: healthSrv.Run})
 	sup.Add(supervisor.Child{Name: "api", Run: apiSrv.Run})
 	sup.Add(supervisor.Child{Name: "mcp", Run: mcpSrv.Run})
 	sup.Add(supervisor.Child{Name: "a2a", Run: a2aSrv.Run})
+	sup.Add(supervisor.Child{Name: "cognition-worker", Run: cognitionWorker.Run})
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()

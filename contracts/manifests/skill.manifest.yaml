@@ -1,0 +1,10 @@
+# AMH skill manifest — see docs/AMH-SPECIFICATION.md Artifact G.
+apiVersion: amh/v1
+kind: Skill
+metadata:
+  name: poll-temperature
+  version: 0.1.0
+spec:
+  code_ref: skills/poll_temperature.py
+  eval_suite: evals/poll_temperature
+  min_score: 0.9

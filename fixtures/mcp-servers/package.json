@@ -1,0 +1,8 @@
+{
+  "name": "amh-mcp-server-fixtures",
+  "private": true,
+  "description": "Pinned third-party MCP reference servers used by agents/tests/test_mcp_client.py — installed locally (not via npx on every run) so tests are fast and deterministic. Run `npm install` here once before running the MCP client tests.",
+  "dependencies": {
+    "@modelcontextprotocol/server-filesystem": "2026.7.10"
+  }
+}

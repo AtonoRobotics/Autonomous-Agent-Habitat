@@ -1,0 +1,132 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "amh/ontology/v1",
+  "title": "AMH Ontology",
+  "description": "Typed property-graph entity definitions. See docs/AMH-SPECIFICATION.md Artifact C and §6.",
+  "$defs": {
+    "Agent": {
+      "type": "object",
+      "required": ["id", "kind", "state"],
+      "properties": {
+        "id": { "type": "string" },
+        "kind": { "type": "string" },
+        "model": { "type": ["string", "null"] },
+        "parent_id": { "type": ["string", "null"] },
+        "state": { "type": "string", "enum": ["spawned", "running", "paused", "hibernated", "terminated"] },
+        "budget_usd": { "type": "number", "default": 0 }
+      }
+    },
+    "Goal": {
+      "type": "object",
+      "required": ["id", "text", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "text": { "type": "string" },
+        "priority": { "type": "integer", "default": 0 },
+        "owner": { "type": ["string", "null"] },
+        "status": { "type": "string", "enum": ["open", "active", "done", "failed"] }
+      }
+    },
+    "Task": {
+      "type": "object",
+      "required": ["id", "goal_id", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "goal_id": { "type": "string" },
+        "assignee": { "type": ["string", "null"] },
+        "status": { "type": "string" },
+        "approval_required": { "type": "boolean", "default": false }
+      }
+    },
+    "Skill": {
+      "type": "object",
+      "required": ["id", "version"],
+      "properties": {
+        "id": { "type": "string" },
+        "version": { "type": "string" },
+        "name": { "type": "string" },
+        "code_ref": { "type": "string" },
+        "eval_score": { "type": ["number", "null"] }
+      }
+    },
+    "Memory": {
+      "type": "object",
+      "required": ["id", "tier", "payload", "valid_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "tier": { "type": "string", "enum": ["working", "episodic", "semantic", "procedural", "entity"] },
+        "payload": {},
+        "valid_at": { "type": "string", "format": "date-time" },
+        "invalid_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "Artifact": {
+      "type": "object",
+      "required": ["id", "task_id", "uri"],
+      "properties": {
+        "id": { "type": "string" },
+        "task_id": { "type": "string" },
+        "uri": { "type": "string" },
+        "hash": { "type": ["string", "null"] }
+      }
+    },
+    "Run": {
+      "type": "object",
+      "required": ["id", "started", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "task_id": { "type": ["string", "null"] },
+        "started": { "type": "string", "format": "date-time" },
+        "ended": { "type": ["string", "null"], "format": "date-time" },
+        "status": { "type": "string" },
+        "tokens_in": { "type": "integer", "default": 0 },
+        "tokens_out": { "type": "integer", "default": 0 },
+        "cost_usd": { "type": "number", "default": 0 }
+      }
+    },
+    "Event": {
+      "type": "object",
+      "required": ["id", "run_id", "type", "ts"],
+      "properties": {
+        "id": { "type": "string" },
+        "run_id": { "type": "string" },
+        "type": { "type": "string" },
+        "ts": { "type": "string", "format": "date-time" },
+        "payload": {}
+      }
+    },
+    "PolicyDecision": {
+      "type": "object",
+      "description": "§6's generic policy hook output: fail-closed, bound to the exact action digest, never re-evaluated after decidedAt. See contracts/policy-decision.schema.json for the wire-level shape this projects from.",
+      "required": ["id", "operation_id", "action_digest", "policy_id", "policy_version", "result", "decided_at", "expires_at"],
+      "properties": {
+        "id": { "type": "string" },
+        "operation_id": { "type": "string" },
+        "action_digest": { "type": "string" },
+        "policy_id": { "type": "string" },
+        "policy_version": { "type": "string" },
+        "result": { "type": "string", "enum": ["admit", "admit_with_constraints", "needs_approval", "defer", "deny"] },
+        "constraints": {},
+        "approval_request_id": { "type": ["string", "null"] },
+        "reason_codes": { "type": "array", "items": { "type": "string" } },
+        "evidence_refs": { "type": "array", "items": { "type": "string" } },
+        "decided_at": { "type": "string", "format": "date-time" },
+        "expires_at": { "type": "string", "format": "date-time" },
+        "consumed_at": { "type": ["string", "null"], "format": "date-time" }
+      }
+    },
+    "ApprovalRequest": {
+      "type": "object",
+      "description": "Created only when a PolicyDecision's result is needs_approval. Resolution is operator-only (decision 9: agents propose, deterministic services commit) and mints a fresh, freshly-bound PolicyDecision rather than mutating this one.",
+      "required": ["id", "decision_id", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "decision_id": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "denied"] },
+        "resolved_by": { "type": ["string", "null"] },
+        "resolved_at": { "type": ["string", "null"], "format": "date-time" },
+        "reason": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

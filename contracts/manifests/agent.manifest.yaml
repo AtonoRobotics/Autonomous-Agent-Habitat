@@ -1,0 +1,22 @@
+# AMH agent manifest — see docs/AMH-SPECIFICATION.md Artifact G.
+apiVersion: amh/v1
+kind: Agent
+metadata:
+  name: research-lead
+  version: 0.1.0
+spec:
+  model: claude-sonnet-4-6
+  harness: deep-agent
+  planning:
+    write_todos: true   # opt-in upstream (DeepAgents v0.7); on by default in AMH
+  tools: [read_file, write_file, memory.recall]
+  subagents:
+    max_concurrent: 1   # this agent runs one sub-agent at a time
+    isolation: strict
+    return: result_only
+    share_trace_to_manager: true
+  context:
+    window_budget: 180000
+    compact_at: 0.70
+    keep_recent_turns_raw: 3
+    tool_result_cap: 25000

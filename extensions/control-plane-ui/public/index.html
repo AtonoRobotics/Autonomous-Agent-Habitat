@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>AMH Control Plane</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <header>
+    <h1>AMH Control Plane</h1>
+    <div class="token-bar">
+      <label>Bearer token
+        <input id="token-input" type="password" placeholder="operator or agent token" autocomplete="off">
+      </label>
+      <span id="token-status" class="status"></span>
+    </div>
+  </header>
+
+  <nav id="tabs">
+    <button data-tab="extensions" class="active">Extensions</button>
+    <button data-tab="computers">Computers</button>
+    <button data-tab="accounts">Accounts</button>
+  </nav>
+
+  <main>
+    <section id="tab-extensions" class="tab active">
+      <h2>Extensions <span class="hint">install harnesses, knowledge-base/memory/model-provider modules — anything the registry hosts</span></h2>
+      <form id="form-discover-extension" class="card">
+        <h3>Install (discover) an extension</h3>
+        <textarea id="extension-manifest" rows="10" placeholder='{"apiVersion":"amh/v1","kind":"Extension","metadata":{"id":"amh.example/thing","name":"Example","version":"1.0.0","publisher":"you"},"spec":{"entrypoint":"true","isolation":"in_process","provides":[],"requires":[],"compatibility":{"amhCore":">=0.1.0"}}}'></textarea>
+        <button type="submit">Discover</button>
+      </form>
+      <div id="extensions-table"></div>
+    </section>
+
+    <section id="tab-computers" class="tab">
+      <h2>Computers <span class="hint">each agent's own isolated compute instance — build a sandbox, tear it down</span></h2>
+      <form id="form-create-computer" class="card">
+        <h3>Provision a computer</h3>
+        <label>Agent ID <input name="agent_id" placeholder="agent-1"></label>
+        <label>Isolation
+          <select name="isolation">
+            <option value="process">process (unshare, no daemon needed)</option>
+            <option value="container">container (docker)</option>
+          </select>
+        </label>
+        <label>Image / command <input name="image" placeholder="sleep infinity" required></label>
+        <button type="submit">Create</button>
+      </form>
+      <label class="filter">Filter by agent ID <input id="computers-agent-filter" placeholder="agent-1"></label>
+      <div id="computers-table"></div>
+    </section>
+
+    <section id="tab-accounts" class="tab">
+      <h2>Accounts <span class="hint">authenticate accounts and modules — secrets are stored encrypted and never shown again</span></h2>
+      <form id="form-create-account" class="card">
+        <h3>Register an account</h3>
+        <label>Model-provider preset <span class="hint">optional — just fills in a consistent provider name; agents select this account via their own ADAPTER_PROVIDER setting</span>
+          <select id="account-preset">
+            <option value="">— none (custom provider) —</option>
+            <option value="anthropic">Anthropic (native)</option>
+            <option value="openai">OpenAI (api.openai.com)</option>
+            <option value="grok">Grok / SuperGrok (api.x.ai)</option>
+            <option value="glm">GLM / Z.ai Coding Plan</option>
+            <option value="vllm">Self-hosted vLLM</option>
+            <option value="ollama">Self-hosted Ollama</option>
+          </select>
+        </label>
+        <label>Provider <input name="provider" placeholder="github, gmail, anthropic, ..." required></label>
+        <label>Display name <input name="display_name" placeholder="amh-bot"></label>
+        <button type="submit">Register</button>
+      </form>
+      <div id="accounts-table"></div>
+    </section>
+  </main>
+
+  <dialog id="credential-dialog">
+    <form id="form-credential">
+      <h3 id="credential-dialog-title">Authenticate account</h3>
+      <label>Credential type
+        <select id="credential-kind-toggle">
+          <option value="opaque">Opaque secret (generic providers)</option>
+          <option value="model">Model-provider credential (inference seam)</option>
+        </select>
+      </label>
+
+      <div id="credential-opaque-fields">
+        <label>Secret <textarea id="credential-opaque-secret" rows="3" placeholder="raw secret value" autocomplete="off"></textarea></label>
+      </div>
+
+      <div id="credential-model-fields" class="hidden">
+        <label>Preset <span class="hint">fills in the kind and base URL below — still editable</span>
+          <select id="credential-preset">
+            <option value="">— custom —</option>
+            <option value="anthropic">Anthropic (native)</option>
+            <option value="openai">OpenAI (api.openai.com)</option>
+            <option value="grok">Grok / SuperGrok (api.x.ai)</option>
+            <option value="glm-anthropic">GLM / Z.ai — Anthropic-compatible endpoint</option>
+            <option value="glm-openai">GLM / Z.ai — OpenAI-compatible coding endpoint</option>
+            <option value="vllm">Self-hosted vLLM</option>
+            <option value="ollama">Self-hosted Ollama</option>
+          </select>
+        </label>
+        <label>Kind
+          <select id="credential-model-kind">
+            <option value="anthropic">anthropic (native Messages API)</option>
+            <option value="openai_compatible">openai_compatible (chat completions)</option>
+          </select>
+        </label>
+        <label>API key <input id="credential-api-key" type="password" placeholder="leave blank if using OAuth below" autocomplete="off"></label>
+        <label>Base URL <input id="credential-base-url" placeholder="leave blank for the provider's default"></label>
+        <details>
+          <summary>OAuth (subscription) tokens — optional</summary>
+          <label>Access token <input id="credential-oauth-access" type="password" autocomplete="off"></label>
+          <label>Refresh token <input id="credential-oauth-refresh" type="password" autocomplete="off"></label>
+          <label>Expires at <input id="credential-oauth-expires" type="datetime-local"></label>
+          <label>Refresh URL <input id="credential-oauth-refresh-url" placeholder="https://.../oauth/token"></label>
+          <label>Client ID <input id="credential-oauth-client-id"></label>
+        </details>
+      </div>
+
+      <div class="dialog-actions">
+        <button type="button" id="credential-cancel">Cancel</button>
+        <button type="submit" id="credential-save">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast"></div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

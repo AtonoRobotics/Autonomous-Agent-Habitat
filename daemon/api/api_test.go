@@ -19,7 +19,17 @@ const (
 
 func testDB(t *testing.T) *sql.DB {
 	t.Helper()
-	return storetest.Open(t, "../../store/migrations")
+	db, _, _ := storetest.OpenScoped(t, "../../store/migrations")
+	return db
+}
+
+// testDBWithURL is testDB, but also returns the schema-scoped connection
+// URL and bare schema name — for tests that need to drive daemon/backup
+// (which shells out to pg_dump/pg_restore, not database/sql) against the
+// same isolated schema the returned *sql.DB is connected to.
+func testDBWithURL(t *testing.T) (db *sql.DB, dbURL, schema string) {
+	t.Helper()
+	return storetest.OpenScoped(t, "../../store/migrations")
 }
 
 func testAuth(t *testing.T) *authn.Authenticator {

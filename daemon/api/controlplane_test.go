@@ -11,11 +11,12 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store/storetest"
 )
 
 func newTestServer(t *testing.T, withCredentials bool) *httptest.Server {
 	t.Helper()
-	db := testDB(t)
+	db, _, schema := testDBWithURL(t)
 	tp := sdktrace.NewTracerProvider()
 	var creds *credentials.Store
 	if withCredentials {
@@ -29,7 +30,13 @@ func newTestServer(t *testing.T, withCredentials bool) *httptest.Server {
 			t.Fatalf("credentials.New: %v", err)
 		}
 	}
-	server := New("", db, tp, testAuth(t), nil, t.TempDir(), creds, false)
+	// daemon/backup shells out to pg_dump/pg_restore, which need a real
+	// libpq connection string (not database/sql's scoped-via-"options"
+	// URL — see storetest.AdminURL's doc comment) plus an explicit
+	// --schema to stay confined to this test's own isolated schema rather
+	// than every concurrently running test's.
+	server := New("", db, storetest.AdminURL(), tp, testAuth(t), nil, t.TempDir(), creds, false)
+	server.Backup.Schema = schema
 	ts := httptest.NewServer(server.Handler())
 	t.Cleanup(ts.Close)
 	return ts

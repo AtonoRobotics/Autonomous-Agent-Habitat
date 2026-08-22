@@ -28,17 +28,47 @@ import (
 
 const defaultAdminURL = "postgresql://postgres:postgres@127.0.0.1:5432/postgres"
 
+// AdminURL returns the resolved connection URL Open/OpenScoped provision
+// test schemas against (AMH_TEST_DATABASE_URL if set, else the local
+// default), with no schema-scoping "options" query parameter applied. A
+// tool that scopes to one schema through its own flag rather than a libpq
+// "options=-c search_path=..." URI parameter — pg_dump/pg_restore's
+// --schema, in particular (see daemon/backup's tests) — needs this
+// unscoped form paired with the schema name OpenScoped also returns:
+// libpq's own URI conninfo parser (unlike pgx's) does not decode a "+" in
+// a query value back to a space, so the scoped URL Open/OpenScoped hand to
+// database/sql cannot be reused as-is with a CLI tool that links libpq.
+func AdminURL() string {
+	if v := os.Getenv("AMH_TEST_DATABASE_URL"); v != "" {
+		return v
+	}
+	return defaultAdminURL
+}
+
 // Open provisions a fresh schema in the shared test Postgres instance,
 // applies store/migrations/*.sql (resolved relative to the repo root via
 // migrationsDir), and returns a *sql.DB scoped to that schema. The schema
 // is dropped when the test completes.
 func Open(t *testing.T, migrationsDir string) *sql.DB {
 	t.Helper()
+	db, _, _ := open(t, migrationsDir)
+	return db
+}
 
-	adminURL := os.Getenv("AMH_TEST_DATABASE_URL")
-	if adminURL == "" {
-		adminURL = defaultAdminURL
-	}
+// OpenScoped is Open, but also returns the schema-scoped connection URL
+// and bare schema name — for tests (daemon/backup's, in particular) that
+// need to drive something like pg_dump/pg_restore directly against the
+// same isolated schema Open's *sql.DB is connected to, rather than only
+// through database/sql.
+func OpenScoped(t *testing.T, migrationsDir string) (db *sql.DB, scopedURL, schema string) {
+	t.Helper()
+	return open(t, migrationsDir)
+}
+
+func open(t *testing.T, migrationsDir string) (db *sql.DB, scopedURL, schema string) {
+	t.Helper()
+
+	adminURL := AdminURL()
 
 	admin, err := sql.Open("pgx", adminURL)
 	if err != nil {
@@ -46,7 +76,7 @@ func Open(t *testing.T, migrationsDir string) *sql.DB {
 	}
 	defer admin.Close()
 
-	schema := fmt.Sprintf("test_%d_%d", os.Getpid(), rand.Int63())
+	schema = fmt.Sprintf("test_%d_%d", os.Getpid(), rand.Int63())
 	if _, err := admin.Exec(fmt.Sprintf(`CREATE SCHEMA %q`, schema)); err != nil {
 		t.Fatalf("storetest: create schema %s: %v", schema, err)
 	}
@@ -59,17 +89,17 @@ func Open(t *testing.T, migrationsDir string) *sql.DB {
 		cleanup.Exec(fmt.Sprintf(`DROP SCHEMA IF EXISTS %q CASCADE`, schema))
 	})
 
-	scopedURL, err := withSchema(adminURL, schema)
+	scopedURL, err = withSchema(adminURL, schema)
 	if err != nil {
 		t.Fatalf("storetest: build scoped URL: %v", err)
 	}
 
-	db, err := store.Open(scopedURL, migrationsDir)
+	db, err = store.Open(scopedURL, migrationsDir)
 	if err != nil {
 		t.Fatalf("storetest: open+migrate schema %s: %v", schema, err)
 	}
 	t.Cleanup(func() { db.Close() })
-	return db
+	return db, scopedURL, schema
 }
 
 // withSchema appends a search_path option to a Postgres connection URL so

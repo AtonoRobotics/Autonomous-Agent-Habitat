@@ -6,6 +6,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -33,6 +35,26 @@ func main() {
 	host := getenv("AMH_DAEMON_HOST", "127.0.0.1")
 	port := getenv("AMH_DAEMON_PORT", "8080")
 	apiPort := getenv("AMH_API_PORT", "8090")
+
+	// -rollback-migration is a maintenance operation, not a runtime one:
+	// it rolls back the N most recently applied migrations (store.Rollback,
+	// one at a time, most-recent-first) against DATABASE_URL/
+	// AMH_MIGRATIONS_DIR, then exits without starting the supervisor tree
+	// or touching a live schema an already-running daemon still depends
+	// on. Run it against a stopped daemon.
+	rollbackSteps := flag.Int("rollback-migration", 0, "roll back this many of the most recently applied migrations, then exit, without starting the daemon")
+	flag.Parse()
+	if *rollbackSteps > 0 {
+		for i := 0; i < *rollbackSteps; i++ {
+			name, err := store.Rollback(dbURL, migrationsDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "rollback step %d/%d failed: %v\n", i+1, *rollbackSteps, err)
+				os.Exit(1)
+			}
+			fmt.Fprintf(os.Stdout, "rolled back %s\n", name)
+		}
+		return
+	}
 
 	// Every process-isolation extension the registry launches
 	// (daemon/extensions) inherits this daemon's environment via plain
@@ -112,7 +134,7 @@ func main() {
 	// against a key already registered via
 	// POST /v1/extensions/trusted-keys.
 	requireSignatures := getenv("AMH_EXTENSIONS_REQUIRE_SIGNATURES", "false") == "true"
-	apiSrv := api.New(host+":"+apiPort, db, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
+	apiSrv := api.New(host+":"+apiPort, db, dbURL, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
 
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)

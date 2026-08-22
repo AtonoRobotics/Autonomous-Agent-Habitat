@@ -257,7 +257,7 @@ async def _run_agentic_loop_async(
 
             budget.add_turn("user", tool_result, is_tool_result=True)
 
-            if compactor.compact(budget) is not None:
+            if compactor.compact(budget, objective=objective) is not None:
                 compacted_any = True
 
         raise LoopBudgetExceededError(f"agentic loop for {objective!r} did not finish within {max_turns} turns")

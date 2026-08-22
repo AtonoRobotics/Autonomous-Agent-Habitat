@@ -1,16 +1,16 @@
-// Control-plane routes: install harnesses, provision computers, configure
-// connectors, and authenticate accounts and modules — the admin surface
-// the control-plane UI extension (extensions/control-plane-ui) is built
-// against, and the seam any other operator tool could use instead.
+// Control-plane routes: install harnesses, provision computers, and
+// authenticate accounts and modules — the admin surface the control-plane
+// UI extension (extensions/control-plane-ui) is built against, and the
+// seam any other operator tool could use instead.
 //
 // Extension ids are namespaced ("amh.control-plane/ui") and contain a
 // literal "/", which Go's net/http ServeMux cannot represent inside a
 // single {wildcard} path segment (and a trailing {id...} wildcard can't be
 // followed by a version segment and an action). Rather than URL-encoding
 // around that, extension id/version travel in the JSON body for mutations
-// and as query parameters for the two GET routes — computers, connectors,
-// and accounts use plain UUIDs and keep the path-segment style the rest
-// of this package already uses.
+// and as query parameters for the two GET routes — computers and accounts
+// use plain UUIDs and keep the path-segment style the rest of this
+// package already uses.
 package api
 
 import (
@@ -252,108 +252,6 @@ func (s *Server) handleListComputers(w http.ResponseWriter, r *http.Request) {
 	out := make([]computerResponse, 0, len(list))
 	for _, c := range list {
 		out = append(out, toComputerResponse(c))
-	}
-	writeJSON(w, http.StatusOK, out)
-}
-
-// ── Connectors ───────────────────────────────────────────────────────────
-
-type createConnectorRequest struct {
-	ID               string          `json:"id"`
-	Type             string          `json:"type"`
-	Auth             string          `json:"auth"`
-	Config           json.RawMessage `json:"config,omitempty"`
-	ExtensionID      string          `json:"extension_id,omitempty"`
-	ExtensionVersion string          `json:"extension_version,omitempty"`
-	AccountID        string          `json:"account_id,omitempty"`
-}
-
-type connectorResponse struct {
-	ID     string `json:"id,omitempty"`
-	Type   string `json:"type,omitempty"`
-	Auth   string `json:"auth,omitempty"`
-	Status string `json:"status,omitempty"`
-	Error  string `json:"error,omitempty"`
-}
-
-func (s *Server) handleCreateConnector(w http.ResponseWriter, r *http.Request) {
-	var req createConnectorRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, connectorResponse{Error: "invalid request body: " + err.Error()})
-		return
-	}
-	if req.ID == "" || req.Type == "" {
-		writeJSON(w, http.StatusBadRequest, connectorResponse{Error: "id and type are required"})
-		return
-	}
-	auth := req.Auth
-	if auth == "" {
-		auth = "none"
-	}
-	var configVal any
-	if len(req.Config) > 0 {
-		configVal = string(req.Config)
-	}
-	var extIDVal, extVerVal, acctVal any
-	if req.ExtensionID != "" {
-		extIDVal, extVerVal = req.ExtensionID, req.ExtensionVersion
-	}
-	if req.AccountID != "" {
-		acctVal = req.AccountID
-	}
-	_, err := s.DB.ExecContext(r.Context(), `
-		INSERT INTO connector (id, type, auth, config, extension_id, extension_version, account_id, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, 'active')`,
-		req.ID, req.Type, auth, configVal, extIDVal, extVerVal, acctVal,
-	)
-	if err != nil {
-		writeJSON(w, http.StatusConflict, connectorResponse{Error: err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusCreated, connectorResponse{ID: req.ID, Type: req.Type, Auth: auth, Status: "active"})
-}
-
-func (s *Server) handleDisableConnector(w http.ResponseWriter, r *http.Request) {
-	connectorID := r.PathValue("connectorID")
-	res, err := s.DB.ExecContext(r.Context(), `UPDATE connector SET status = 'disabled' WHERE id = $1`, connectorID)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, simpleResponse{Error: err.Error()})
-		return
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		writeJSON(w, http.StatusNotFound, simpleResponse{Error: "connector not found: " + connectorID})
-		return
-	}
-	writeJSON(w, http.StatusOK, simpleResponse{})
-}
-
-func (s *Server) handleGetConnector(w http.ResponseWriter, r *http.Request) {
-	connectorID := r.PathValue("connectorID")
-	var resp connectorResponse
-	err := s.DB.QueryRowContext(r.Context(), `SELECT id, type, auth, status FROM connector WHERE id = $1`, connectorID).
-		Scan(&resp.ID, &resp.Type, &resp.Auth, &resp.Status)
-	if err != nil {
-		writeJSON(w, http.StatusNotFound, connectorResponse{Error: "connector not found: " + connectorID})
-		return
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-func (s *Server) handleListConnectors(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.DB.QueryContext(r.Context(), `SELECT id, type, auth, status FROM connector ORDER BY created_at DESC`)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, simpleResponse{Error: err.Error()})
-		return
-	}
-	defer rows.Close()
-	out := []connectorResponse{}
-	for rows.Next() {
-		var c connectorResponse
-		if err := rows.Scan(&c.ID, &c.Type, &c.Auth, &c.Status); err != nil {
-			writeJSON(w, http.StatusInternalServerError, simpleResponse{Error: err.Error()})
-			return
-		}
-		out = append(out, c)
 	}
 	writeJSON(w, http.StatusOK, out)
 }

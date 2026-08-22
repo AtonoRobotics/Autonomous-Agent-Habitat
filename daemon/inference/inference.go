@@ -5,11 +5,9 @@
 // itself: the credential is registered once, by an operator, as an
 // account in daemon/credentials, and every agent process calls this
 // package (via daemon/api's /v1/inference/* routes) using only the same
-// agent bearer token it already holds for actuation, approval, and
-// everything else. Model inference is exactly the same "agent proposes
-// via a token it holds; the daemon commits via a secret it holds"
-// pattern daemon/actuation already uses for physical device I/O — this
-// package is that pattern applied to model calls instead of SSH.
+// agent bearer token it already holds for everything else. Model
+// inference is the "agent proposes via a token it holds; the daemon
+// commits via a secret it holds" pattern applied to model calls.
 //
 // A model-provider account's credential is a JSON envelope (see
 // credentialEnvelope) covering both static API keys and OAuth

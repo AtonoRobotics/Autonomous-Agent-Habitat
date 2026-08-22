@@ -5,13 +5,13 @@ compute instance via the Go daemon's control-plane API
 Unlike extensions.py and accounts.py, this module DOES perform mutations
 with an agent_token — daemon/api's RBAC table allows agent-or-operator on
 both /v1/computers (create) and /v1/computers/{id}/destroy, not operator
-only. That's a deliberate, narrower application of the same reversibility
-principle §12/v6 already gates device actuation on: a computer's
-Create/Destroy pair is always a verified inverse of itself by construction
-(daemon/sandbox never records a Create with no corresponding teardown
-path), so there is no residue here for the ApprovalGate to cover — unlike
-installing an extension (new code, unbounded effects) or authenticating an
-account (external identity, a secret), which stay operator-only.
+only. That's a deliberate, narrower application of the reversibility
+principle §12/v6 gates on: a computer's Create/Destroy pair is always a
+verified inverse of itself by construction (daemon/sandbox never records a
+Create with no corresponding teardown path), so there is no residue here
+requiring an operator gate — unlike installing an extension (new code,
+unbounded effects) or authenticating an account (external identity, a
+secret), which stay operator-only.
 """
 
 from __future__ import annotations

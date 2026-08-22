@@ -1,20 +1,19 @@
 // Package authn is the daemon API's authentication/authorization layer:
 // static bearer tokens mapped to one of two roles. It exists to make one
 // specific security property mechanical rather than a convention: an
-// agent must never be able to approve its own ApprovalGate ticket (§12,
-// §14.7's anti-reward-hacking discipline — the same DGM cautionary case
-// §10 cites, applied to identity instead of eval logging).
+// agent must never be able to grant itself an operator-only action —
+// installing an extension, writing a credential — the same anti-reward-
+// hacking discipline (§14.7) applied to identity instead of eval logging.
 //
 // Two static, long-lived tokens (one per role), configured via
 // environment variables, checked with constant-time comparison. This is
 // deliberately not a full identity system — no per-user tokens, no
 // expiry, no revocation list — because those aren't what the security
 // property here needs: "the requesting agent literally does not hold the
-// credential needed to approve its own request" is a fact enforced by the
-// server, not a hopeful comment. A multi-operator deployment needing
-// per-operator accountability puts a proper identity provider in front of
-// this; see the caveat in docs/AMH-SPECIFICATION.md re: SafetyCase's
-// independent_review role being deployment-specific.
+// credential needed to perform the operator-only action" is a fact
+// enforced by the server, not a hopeful comment. A multi-operator
+// deployment needing per-operator accountability puts a proper identity
+// provider in front of this.
 package authn
 
 import (

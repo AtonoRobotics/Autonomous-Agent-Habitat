@@ -183,64 +183,6 @@ func TestComputerLifecycle_CreateThenDestroy_ViaHTTP_AgentTokenAllowed(t *testin
 	}
 }
 
-// ── Connectors ───────────────────────────────────────────────────────────
-
-func TestConnectorLifecycle_CreateListDisable_OperatorOnly(t *testing.T) {
-	ts := newTestServer(t, false)
-
-	createBody, _ := json.Marshal(map[string]any{
-		"id":   "my-rest-connector",
-		"type": "rest",
-		"auth": "apikey",
-	})
-	agentAttempt := postJSON(t, ts.URL+"/v1/connectors", testAgentToken, createBody)
-	agentAttempt.Body.Close()
-	if agentAttempt.StatusCode != http.StatusForbidden {
-		t.Fatalf("expected 403 for an agent token creating a connector, got %d", agentAttempt.StatusCode)
-	}
-
-	create := postJSON(t, ts.URL+"/v1/connectors", testOperatorToken, createBody)
-	if create.StatusCode != http.StatusCreated {
-		t.Fatalf("create: expected 201, got %d", create.StatusCode)
-	}
-	create.Body.Close()
-
-	// A brand new connector type not in 0001's old fixed enum — this is
-	// the actual regression test for the migration dropping that CHECK.
-	customBody, _ := json.Marshal(map[string]any{
-		"id":   "my-custom-connector",
-		"type": "amh.test/custom-protocol",
-		"auth": "none",
-	})
-	custom := postJSON(t, ts.URL+"/v1/connectors", testOperatorToken, customBody)
-	if custom.StatusCode != http.StatusCreated {
-		t.Fatalf("expected a non-enumerated connector type to be accepted, got %d", custom.StatusCode)
-	}
-	custom.Body.Close()
-
-	list := getJSON(t, ts.URL+"/v1/connectors", testAgentToken)
-	var all []connectorResponse
-	json.NewDecoder(list.Body).Decode(&all)
-	list.Body.Close()
-	if len(all) != 2 {
-		t.Fatalf("expected 2 connectors listed, got %d", len(all))
-	}
-
-	disable := postJSON(t, ts.URL+"/v1/connectors/my-rest-connector/disable", testOperatorToken, nil)
-	if disable.StatusCode != http.StatusOK {
-		t.Fatalf("disable: expected 200, got %d", disable.StatusCode)
-	}
-	disable.Body.Close()
-
-	get := getJSON(t, ts.URL+"/v1/connectors/my-rest-connector", testAgentToken)
-	var got connectorResponse
-	json.NewDecoder(get.Body).Decode(&got)
-	get.Body.Close()
-	if got.Status != "disabled" {
-		t.Fatalf("expected disabled, got %s", got.Status)
-	}
-}
-
 // ── Accounts / credentials ───────────────────────────────────────────────
 
 func TestAccountLifecycle_CreateAuthenticateRevoke_OperatorOnly(t *testing.T) {

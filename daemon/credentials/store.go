@@ -1,11 +1,10 @@
 // Package credentials is the encrypted-at-rest secret store for
-// "authenticate accounts and modules": external service accounts a
-// connector or extension needs to act as (a GitHub account, an SMTP
-// login), and module-level secrets an extension itself needs (an API key
-// its own code calls out with). One store, one encryption discipline,
-// serving all three credential subjects (account, connector, extension)
-// uniformly — see store/migrations/0002_control_plane.sql's credential
-// table.
+// "authenticate accounts and modules": external service accounts (a
+// GitHub account, a model-provider API key), and module-level secrets an
+// extension itself needs (an API key its own code calls out with). One
+// store, one encryption discipline, serving both credential subjects
+// (account, extension) uniformly — see store/migrations/0001_init.sql's
+// credential table.
 //
 // Same fail-closed posture as daemon/authn: the encryption key comes from
 // an environment variable, and a missing or malformed key is a
@@ -33,7 +32,6 @@ type SubjectType string
 
 const (
 	SubjectAccount   SubjectType = "account"
-	SubjectConnector SubjectType = "connector"
 	SubjectExtension SubjectType = "extension"
 )
 
@@ -50,7 +48,7 @@ var (
 	ErrInvalidKey     = errors.New("credentials: AMH_CREDENTIAL_KEY must decode (base64) to exactly 32 bytes")
 	ErrNotFound       = errors.New("credentials: not found")
 	ErrNoCredential   = errors.New("credentials: subject has no active credential")
-	ErrInvalidSubject = errors.New("credentials: subject_type must be account, connector, or extension")
+	ErrInvalidSubject = errors.New("credentials: subject_type must be account or extension")
 )
 
 // LoadKeyFromEnv reads and decodes AMH_CREDENTIAL_KEY (base64 standard
@@ -215,7 +213,7 @@ func (s *Store) ListAccounts(ctx context.Context) ([]*Account, error) {
 // plaintext is never returned by this package except via Authenticate,
 // and never logged.
 func (s *Store) PutCredential(ctx context.Context, subjectType SubjectType, subjectID string, plaintext []byte) (string, error) {
-	if subjectType != SubjectAccount && subjectType != SubjectConnector && subjectType != SubjectExtension {
+	if subjectType != SubjectAccount && subjectType != SubjectExtension {
 		return "", ErrInvalidSubject
 	}
 	if subjectID == "" {
@@ -284,7 +282,7 @@ func (s *Store) RevokeCredential(ctx context.Context, credentialID string) error
 
 // Authenticate decrypts and returns the active (non-revoked) credential's
 // plaintext for a subject. This is the ONLY function in this package that
-// returns secret material — it exists for the daemon's own connector and
+// returns secret material — it exists for the daemon's own inference and
 // extension launch code, and must never be reachable from the admin HTTP
 // API (see daemon/api's control-plane routes, which expose account/
 // credential metadata but never call this).

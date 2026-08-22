@@ -45,7 +45,7 @@ def test_agent_run_span_has_genai_attributes(span_exporter):
 
 
 def test_tool_call_span_has_genai_attributes(span_exporter):
-    with tool_call_span("device_action:vent-actuator.set_open_pct", **{"amh.device.host": "127.0.0.1"}):
+    with tool_call_span("read_file", **{"amh.tool.path": "/tmp/example.txt"}):
         pass
 
     spans = span_exporter.get_finished_spans()
@@ -53,13 +53,13 @@ def test_tool_call_span_has_genai_attributes(span_exporter):
     span = spans[0]
     assert span.name == "execute_tool"
     assert span.attributes["gen_ai.operation.name"] == "execute_tool"
-    assert span.attributes["gen_ai.tool.name"] == "device_action:vent-actuator.set_open_pct"
-    assert span.attributes["amh.device.host"] == "127.0.0.1"
+    assert span.attributes["gen_ai.tool.name"] == "read_file"
+    assert span.attributes["amh.tool.path"] == "/tmp/example.txt"
 
 
 def test_tool_call_span_records_error_on_exception(span_exporter):
     with pytest.raises(ValueError):
-        with tool_call_span("device_action:broken") as span:
+        with tool_call_span("broken_tool") as span:
             span.set_attribute("error.type", "test_error")
             raise ValueError("boom")
 

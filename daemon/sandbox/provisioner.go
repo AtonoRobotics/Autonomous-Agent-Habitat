@@ -1,9 +1,8 @@
 // Package sandbox provisions and destroys per-agent computers: the
 // isolated compute instance each agent works inside, as distinct from the
-// extension registry's isolation of extension processes (daemon/extensions)
-// and the connector layer's isolation of external device I/O
-// (daemon/connectors). "Add a computer" and "build a sandbox" are the same
-// operation here — a computer IS a sandbox, scoped to one agent.
+// extension registry's isolation of extension processes (daemon/extensions).
+// "Add a computer" and "build a sandbox" are the same operation here — a
+// computer IS a sandbox, scoped to one agent.
 //
 // Two isolation modes:
 //   - container: a real container via the docker CLI. Strong isolation,
@@ -45,9 +44,9 @@
 // isolation instead.
 //
 // Create/Destroy is the reversible pair, by the same discipline as
-// daemon/actuation and daemon/extensions: provisioning a computer is
-// autonomous because destroying it is a verified, always-available
-// inverse — there is no "irreversible computer."
+// daemon/extensions: provisioning a computer is autonomous because
+// destroying it is a verified, always-available inverse — there is no
+// "irreversible computer."
 package sandbox
 
 import (
@@ -329,8 +328,8 @@ func launchProcess(ctx context.Context, id, image, workdir string) (string, erro
 	// exactly as launchProcessInit expects: $1=workdir, then the target
 	// command's own argv untouched by shell re-parsing (each field reaches
 	// the script as its own positional parameter, not concatenated shell
-	// text) — the same shell-injection concern this package's actuation
-	// sibling (daemon/actuation) guards against with paramValuePattern.
+	// text) — the same shell-injection concern any package that builds a
+	// shell command from caller-supplied fields must guard against.
 	scriptArgs := append([]string{"sh", workdir}, fields...)
 	args := append([]string{"--mount", "--", "sh", "-c", launchProcessInit}, scriptArgs...)
 	// Deliberately exec.Command, not exec.CommandContext(ctx, ...): ctx is

@@ -1,6 +1,6 @@
--- AMH core schema (PostgreSQL). Ontology, control plane, reversibility
--- engineering, and safety-case tables. See docs/AMH-SPECIFICATION.md §1
--- (decision 4: "Postgres is authoritative persistent state") and §3.3.
+-- AMH core schema (PostgreSQL). Ontology and control-plane tables. See
+-- docs/AMH-SPECIFICATION.md §1 (decision 4: "Postgres is authoritative
+-- persistent state") and §3.3.
 --
 -- Memory (docs/AMH-SPECIFICATION.md §8's five projections) is NOT defined
 -- here. working is a query-time projection over goal/task/run/event below
@@ -10,14 +10,17 @@
 -- procedural is the `skill` table below — genuinely AMH-owned, not a fit
 -- for either external system.
 --
+-- Physical-device actuation, connectors, and safety cases are not part of
+-- the AMH core (docs/AMH-SPECIFICATION.md §1 decision 8, §2.3, §13, §16)
+-- — that domain belongs to a separate Physical AI extension, not this
+-- schema.
+--
 -- This schema was previously SQLite (see git history prior to this
 -- revision for that version and the incremental migrations that built it
--- up). It is a from-scratch Postgres baseline, not a mechanical port: the
--- SQLite-era table-rebuild workarounds for constraints SQLite can't ALTER
--- in place (e.g. rebuilding `connector`/`device_effect` under a new name
--- to change a CHECK) don't apply to Postgres, which supports ALTER TABLE
--- ... ADD CONSTRAINT / DROP CONSTRAINT directly — so those tables are
--- defined below in their final shape rather than replayed as patches.
+-- up). It is a from-scratch Postgres baseline, not a mechanical port:
+-- Postgres supports ALTER TABLE ... ADD CONSTRAINT / DROP CONSTRAINT
+-- directly, so tables are defined below in their final shape rather than
+-- replayed as SQLite-era rebuild-under-a-new-name patches.
 
 -- Reproduces SQLite's strftime('%Y-%m-%dT%H:%M:%fZ','now') output exactly
 -- (millisecond-precision UTC ISO-8601 with a trailing "Z") so every
@@ -70,13 +73,6 @@ CREATE TABLE skill (
   PRIMARY KEY (id, version)
 );
 
-CREATE TABLE tool (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL,
-  input_schema TEXT NOT NULL,  -- JSON Schema
-  connector_id TEXT
-);
-
 CREATE TABLE artifact (
   id TEXT PRIMARY KEY,
   task_id TEXT NOT NULL REFERENCES task(id),
@@ -103,20 +99,6 @@ CREATE TABLE event (
   payload JSON
 );
 CREATE INDEX idx_event_run ON event(run_id, ts);
-
-CREATE TABLE approval_gate (
-  id TEXT PRIMARY KEY,
-  action JSON NOT NULL,
-  risk TEXT NOT NULL,
-  approved_by TEXT,
-  approved_at TEXT,
-  created_at TEXT NOT NULL DEFAULT iso8601_now(),
-  -- Binds an approval ticket to the exact action digest (device_action_id
-  -- + canonical params) it was approved for, and makes it single-use —
-  -- an approved ticket cannot authorize a different or repeated action.
-  action_digest TEXT,
-  used_at TEXT
-);
 
 -- ── Control plane: extension registry (Cordis lifecycle) ────────────────
 
@@ -158,9 +140,9 @@ CREATE TABLE extension_provided_capability (
 CREATE INDEX idx_provided_capability_lookup ON extension_provided_capability(capability_id, capability_version);
 
 -- Temporal composability: activation and disposal recorded as a
--- forward/inverse effect pair, same shape as device_effect. Disposal IS
--- the verified inverse of activation — that pairing is what makes an
--- extension a reversible, not just removable, module.
+-- forward/inverse effect pair. Disposal IS the verified inverse of
+-- activation — that pairing is what makes an extension a reversible, not
+-- just removable, module.
 CREATE TABLE extension_effect (
   id TEXT PRIMARY KEY,
   extension_id TEXT NOT NULL,
@@ -205,12 +187,12 @@ CREATE TABLE account (
 );
 
 -- Secret material never lives in plaintext at rest. subject_type/subject_id
--- point at whatever holds the credential (an account, a connector, or an
--- extension needing its own module-level secret) so one store serves all
--- three "authenticate accounts and modules" cases uniformly.
+-- point at whatever holds the credential (an account, or an extension
+-- needing its own module-level secret) so one store serves both
+-- "authenticate accounts and modules" cases uniformly.
 CREATE TABLE credential (
   id TEXT PRIMARY KEY,
-  subject_type TEXT CHECK(subject_type IN ('account','connector','extension')) NOT NULL,
+  subject_type TEXT CHECK(subject_type IN ('account','extension')) NOT NULL,
   subject_id TEXT NOT NULL,
   ciphertext BYTEA NOT NULL,       -- AES-256-GCM: nonce || ciphertext || tag
   key_id TEXT NOT NULL,            -- encryption key version, for rotation without re-deriving old rows
@@ -219,82 +201,3 @@ CREATE TABLE credential (
   revoked_at TEXT
 );
 CREATE INDEX idx_credential_subject ON credential(subject_type, subject_id, revoked_at);
-
--- ── Connectors (extension-declared, not a fixed enum) ───────────────────
-
-CREATE TABLE connector (
-  id TEXT PRIMARY KEY,
-  type TEXT NOT NULL,
-  auth TEXT NOT NULL CHECK(auth IN ('oauth2','apikey','mtls','none')) DEFAULT 'none',
-  config JSON,
-  extension_id TEXT,
-  extension_version TEXT,
-  account_id TEXT REFERENCES account(id),
-  status TEXT CHECK(status IN ('active','disabled')) NOT NULL DEFAULT 'active',
-  created_at TEXT NOT NULL DEFAULT iso8601_now(),
-  FOREIGN KEY (extension_id, extension_version) REFERENCES extension(id, version)
-);
-
-CREATE TABLE device (
-  id TEXT PRIMARY KEY,
-  kind TEXT NOT NULL,
-  connector_id TEXT NOT NULL REFERENCES connector(id)
-);
-
--- ── Reversibility engineering (§12, §14.6) ──────────────────────────────
-
-CREATE TABLE device_action (
-  id TEXT PRIMARY KEY,
-  device_id TEXT NOT NULL REFERENCES device(id),
-  name TEXT NOT NULL,
-  reversible INTEGER NOT NULL DEFAULT 0,
-  -- forward/read-state command shape, the same way inverse_template
-  -- already worked: a caller supplies only named parameter values (see
-  -- daemon/actuation's param validation), never shell text, so "verified
-  -- reversible" and "ticket approved for this action" both mean something
-  -- concrete tied to what the daemon will actually execute. All three are
-  -- {"shell_template": "..."} with {{param_name}} placeholders.
-  forward_template JSON,
-  read_state_template JSON,
-  inverse_template JSON,
-  verified_at TEXT,
-  autonomy_stage TEXT CHECK(autonomy_stage IN ('unverified','supervised','earned')) NOT NULL DEFAULT 'unverified',
-  autonomy_policy TEXT CHECK(autonomy_policy IN ('immediate','graduated','always_gated')) NOT NULL DEFAULT 'immediate',
-  min_successes_to_earn INTEGER DEFAULT 20,
-  max_failure_rate REAL DEFAULT 0.0,
-  graduated_at TEXT
-);
-
-CREATE TABLE device_effect (
-  id TEXT PRIMARY KEY,
-  device_action_id TEXT NOT NULL REFERENCES device_action(id),
-  run_id TEXT,
-  executed_at TEXT NOT NULL DEFAULT iso8601_now(),
-  forward_payload JSON NOT NULL,
-  inverse_payload JSON,
-  reversed_at TEXT,
-  -- 'pending' is persisted before the physical effect runs, so a
-  -- journal-write failure blocks the effect instead of silently following
-  -- it. 'unknown' means the shell command itself errored after the intent
-  -- was durably recorded — state is uncertain, not assumed reverted.
-  outcome TEXT CHECK(outcome IN ('pending','success','unknown','fault_reversed','fault_unreversed')) NOT NULL DEFAULT 'pending'
-);
-CREATE INDEX idx_device_effect_action ON device_effect(device_action_id, outcome);
-
--- ── Earned autonomy, irreversible/high-consequence track (§14.7) ───────
-
-CREATE TABLE safety_case (
-  id TEXT PRIMARY KEY,
-  subject_id TEXT NOT NULL,
-  subject_type TEXT CHECK(subject_type IN ('device_action','capability')) NOT NULL,
-  risk_class TEXT CHECK(risk_class IN ('low','moderate','high','irreversible_high_consequence')) NOT NULL,
-  guardrails JSON,
-  supervised_track_record JSON,
-  formal_verification JSON,
-  independent_review INTEGER NOT NULL DEFAULT 0,
-  approved_at TEXT,
-  approved_by TEXT,
-  ongoing_monitoring JSON,
-  revoked_at TEXT,
-  revoked_reason TEXT
-);

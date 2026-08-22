@@ -187,17 +187,17 @@ func TestRevokeCredential_MakesAuthenticateFail(t *testing.T) {
 	}
 }
 
-func TestPutCredential_ServesConnectorAndExtensionSubjectsToo(t *testing.T) {
+func TestPutCredential_ServesExtensionSubjectsToo(t *testing.T) {
 	db := testDB(t)
 	s, _ := New(db, testKey(t))
 	ctx := context.Background()
 
-	if _, err := s.PutCredential(ctx, SubjectConnector, "some-connector-id", []byte("api-key")); err != nil {
-		t.Fatalf("PutCredential for connector subject: %v", err)
+	if _, err := s.PutCredential(ctx, SubjectExtension, "some-extension-id", []byte("api-key")); err != nil {
+		t.Fatalf("PutCredential for extension subject: %v", err)
 	}
-	got, err := s.Authenticate(ctx, SubjectConnector, "some-connector-id")
+	got, err := s.Authenticate(ctx, SubjectExtension, "some-extension-id")
 	if err != nil {
-		t.Fatalf("Authenticate connector: %v", err)
+		t.Fatalf("Authenticate extension: %v", err)
 	}
 	if string(got) != "api-key" {
 		t.Fatalf("got %q", got)

@@ -19,13 +19,12 @@
   <nav id="tabs">
     <button data-tab="extensions" class="active">Extensions</button>
     <button data-tab="computers">Computers</button>
-    <button data-tab="connectors">Connectors</button>
     <button data-tab="accounts">Accounts</button>
   </nav>
 
   <main>
     <section id="tab-extensions" class="tab active">
-      <h2>Extensions <span class="hint">install harnesses, connectors, knowledge-base/memory/model-provider modules — anything the registry hosts</span></h2>
+      <h2>Extensions <span class="hint">install harnesses, knowledge-base/memory/model-provider modules — anything the registry hosts</span></h2>
       <form id="form-discover-extension" class="card">
         <h3>Install (discover) an extension</h3>
         <textarea id="extension-manifest" rows="10" placeholder='{"apiVersion":"amh/v1","kind":"Extension","metadata":{"id":"amh.example/thing","name":"Example","version":"1.0.0","publisher":"you"},"spec":{"entrypoint":"true","isolation":"in_process","provides":[],"requires":[],"compatibility":{"amhCore":">=0.1.0"}}}'></textarea>
@@ -50,26 +49,6 @@
       </form>
       <label class="filter">Filter by agent ID <input id="computers-agent-filter" placeholder="agent-1"></label>
       <div id="computers-table"></div>
-    </section>
-
-    <section id="tab-connectors" class="tab">
-      <h2>Connectors <span class="hint">any type — not limited to a fixed built-in list</span></h2>
-      <form id="form-create-connector" class="card">
-        <h3>Add a connector</h3>
-        <label>ID <input name="id" placeholder="my-connector" required></label>
-        <label>Type <input name="type" placeholder="ssh, rest, mqtt, or any extension-defined type" required></label>
-        <label>Auth
-          <select name="auth">
-            <option value="none">none</option>
-            <option value="apikey">apikey</option>
-            <option value="oauth2">oauth2</option>
-            <option value="mtls">mtls</option>
-          </select>
-        </label>
-        <label>Config (JSON) <textarea name="config" rows="3" placeholder="{}"></textarea></label>
-        <button type="submit">Add</button>
-      </form>
-      <div id="connectors-table"></div>
     </section>
 
     <section id="tab-accounts" class="tab">
@@ -100,7 +79,7 @@
       <h3 id="credential-dialog-title">Authenticate account</h3>
       <label>Credential type
         <select id="credential-kind-toggle">
-          <option value="opaque">Opaque secret (connectors, generic providers)</option>
+          <option value="opaque">Opaque secret (generic providers)</option>
           <option value="model">Model-provider credential (inference seam)</option>
         </select>
       </label>

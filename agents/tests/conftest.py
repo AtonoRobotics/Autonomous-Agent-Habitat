@@ -1,7 +1,5 @@
-"""Shared fixtures for end-to-end tests that need a real Go daemon and a
-real SSH device simulator — used by test_greenhouse_e2e.py and
-test_approval_e2e.py. See daemon/cmd/amh-daemon and
-daemon/cmd/amh-fake-device.
+"""Shared fixtures for end-to-end tests that need a real Go daemon. See
+daemon/cmd/amh-daemon.
 
 Also provides fake_model_server: a real local HTTP server standing in for
 a model provider, registered as a real account against a real running
@@ -9,12 +7,11 @@ daemon (daemon/inference, daemon/credentials) exactly the way an operator
 would register a real provider — so workflows.goal's real model calls
 travel the actual path (agent token -> daemon -> provider account
 credential -> HTTP call) end to end, not a shortcut through the agent
-process's own environment. This is the same "real protocol, fake remote
-counterpart" pattern amh-fake-device already uses for SSH: the
-decomposition/completion logic this server returns is deliberately
-test-fixture logic, standing in for what a real model would answer for
-these specific deterministic test inputs — it does not reintroduce
-placeholder logic into workflows/goal.py or daemon/inference itself.
+process's own environment. The decomposition/completion logic this server
+returns is deliberately test-fixture logic, standing in for what a real
+model would answer for these specific deterministic test inputs — it does
+not reintroduce placeholder logic into workflows/goal.py or
+daemon/inference itself.
 """
 
 from __future__ import annotations
@@ -79,49 +76,15 @@ class DaemonHandle:
 
 @pytest.fixture(scope="module")
 def go_binaries(tmp_path_factory):
-    """Builds amh-fake-device and amh-daemon once per test module."""
+    """Builds amh-daemon once per test module."""
     bin_dir = tmp_path_factory.mktemp("bin")
     env = dict(os.environ, GOTOOLCHAIN="local")
-    for name, pkg in [
-        ("amh-fake-device", "./daemon/cmd/amh-fake-device"),
-        ("amh-daemon", "./daemon/cmd/amh-daemon"),
-    ]:
-        out = str(bin_dir / name)
-        subprocess.run(
-            ["go", "build", "-o", out, pkg],
-            cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True,
-        )
-    return {
-        "fake_device": str(bin_dir / "amh-fake-device"),
-        "daemon": str(bin_dir / "amh-daemon"),
-    }
-
-
-@pytest.fixture()
-def fake_device(go_binaries):
-    """Starts an SSH device simulator, yields (host, port, host_key_authorized_key)."""
-    proc = subprocess.Popen(
-        [go_binaries["fake_device"], "--initial-open-pct", "40"],
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+    out = str(bin_dir / "amh-daemon")
+    subprocess.run(
+        ["go", "build", "-o", out, "./daemon/cmd/amh-daemon"],
+        cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True,
     )
-    try:
-        listen_line = proc.stdout.readline()
-        assert listen_line.startswith("LISTEN "), f"unexpected fake-device output: {listen_line!r}"
-        addr = listen_line.strip().split(" ", 1)[1]
-        host, port = addr.rsplit(":", 1)
-
-        hostkey_line = proc.stdout.readline()
-        assert hostkey_line.startswith("HOSTKEY "), f"unexpected fake-device output: {hostkey_line!r}"
-        host_key_authorized_key = hostkey_line.strip().split(" ", 1)[1]
-
-        assert proc.stdout.readline().strip() == "READY"
-        yield host, int(port), host_key_authorized_key
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            proc.kill()
+    return {"daemon": out}
 
 
 def _find_free_port() -> int:
@@ -325,24 +288,3 @@ def db_path():
         cleanup = psycopg.connect(TEST_POSTGRES_ADMIN_URL, autocommit=True)
         cleanup.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         cleanup.close()
-
-
-def write_ephemeral_client_key(tmp_path) -> str:
-    """Generates a throwaway RSA key and writes it as a PEM file — the
-    fake device accepts any client key, so identity doesn't matter here,
-    only that the daemon's connector config points at a real, readable
-    private key file, matching how a real deployment's secret would be
-    referenced by path rather than embedded in the database."""
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    pem = key.private_bytes(
-        encoding=serialization.Encoding.PEM,
-        format=serialization.PrivateFormat.TraditionalOpenSSL,
-        encryption_algorithm=serialization.NoEncryption(),
-    )
-    path = str(tmp_path / "client_key.pem")
-    with open(path, "wb") as f:
-        f.write(pem)
-    return path

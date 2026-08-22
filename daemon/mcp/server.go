@@ -2,15 +2,14 @@
 // interoperability" core responsibility (docs/AMH-SPECIFICATION.md
 // §2.1) — completing what agents/harness/mcp_client.py already
 // implements for the client half (stdio, consuming third-party
-// servers). V1 roadmap item: "MCP server and A2A 1.0 adapter" (§14).
+// servers). Roadmap item: "MCP server and A2A 1.0 adapter" (§14).
 //
 // This package exposes a fixed catalog of AMH's own capabilities (see
 // tools.go) as MCP tools an external MCP client (Claude Desktop, another
 // agent) can call — the daemon owns this the same way it owns every
 // other local transport (decision 2: "Go owns... local transport"),
 // dispatching directly into the same internal Go packages daemon/api
-// itself calls (daemon/actuation, daemon/interlocks) rather than looping
-// back through HTTP to reach them.
+// itself calls rather than looping back through HTTP to reach them.
 //
 // # Protocol version
 //
@@ -63,8 +62,6 @@ import (
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/connectors"
-	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/interlocks"
 )
 
 // protocolVersion is what this server declares in InitializeResult,
@@ -87,13 +84,11 @@ type mcpSession struct {
 // daemon/api.Server's dependencies this package's tools actually need —
 // see tools.go's handlers.
 type Server struct {
-	Addr     string
-	DB       *sql.DB
-	Registry *connectors.Registry
-	Gate     *interlocks.Gate
-	Tracer   trace.TracerProvider
-	Auth     *authn.Authenticator
-	Log      *slog.Logger
+	Addr   string
+	DB     *sql.DB
+	Tracer trace.TracerProvider
+	Auth   *authn.Authenticator
+	Log    *slog.Logger
 
 	mu       sync.Mutex
 	sessions map[string]*mcpSession
@@ -108,8 +103,6 @@ func New(addr string, db *sql.DB, tp trace.TracerProvider, auth *authn.Authentic
 	return &Server{
 		Addr:     addr,
 		DB:       db,
-		Registry: connectors.NewRegistry(db),
-		Gate:     interlocks.New(db),
 		Tracer:   tp,
 		Auth:     auth,
 		Log:      log,

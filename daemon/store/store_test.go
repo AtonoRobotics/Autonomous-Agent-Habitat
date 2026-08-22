@@ -60,7 +60,7 @@ func TestOpenAppliesMigrationsAndIsIdempotent(t *testing.T) {
 		t.Fatalf("first open: %v", err)
 	}
 	var n int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM device_action`).Scan(&n); err != nil {
+	if err := db.QueryRow(`SELECT COUNT(*) FROM agent`).Scan(&n); err != nil {
 		t.Fatalf("query ontology table: %v", err)
 	}
 	db.Close()

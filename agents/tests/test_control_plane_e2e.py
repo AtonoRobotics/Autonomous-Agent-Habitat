@@ -1,6 +1,6 @@
 """End-to-end tests for the control plane: install harnesses (extensions),
-build/add computers (sandboxes), configure connectors, and authenticate
-accounts and modules — all driven from Python against a real Go daemon,
+build/add computers (sandboxes), and authenticate accounts and modules —
+all driven from Python against a real Go daemon,
 proving the admin surface the control-plane UI extension is built on
 actually works end-to-end, not just at the Go layer (already covered by
 daemon/api/controlplane_test.go).

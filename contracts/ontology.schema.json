@@ -49,16 +49,6 @@
         "eval_score": { "type": ["number", "null"] }
       }
     },
-    "Tool": {
-      "type": "object",
-      "required": ["id", "name", "input_schema"],
-      "properties": {
-        "id": { "type": "string" },
-        "name": { "type": "string" },
-        "input_schema": { "type": "object" },
-        "connector_id": { "type": ["string", "null"] }
-      }
-    },
     "Memory": {
       "type": "object",
       "required": ["id", "tier", "payload", "valid_at"],
@@ -78,72 +68,6 @@
         "task_id": { "type": "string" },
         "uri": { "type": "string" },
         "hash": { "type": ["string", "null"] }
-      }
-    },
-    "Device": {
-      "type": "object",
-      "required": ["id", "kind", "connector_id"],
-      "properties": {
-        "id": { "type": "string" },
-        "kind": { "type": "string" },
-        "connector_id": { "type": "string" }
-      }
-    },
-    "DeviceAction": {
-      "type": "object",
-      "description": "Reversibility is per-action, not per-device (§12, §14.6).",
-      "required": ["id", "device_id", "name", "reversible", "autonomy_stage", "autonomy_policy"],
-      "properties": {
-        "id": { "type": "string" },
-        "device_id": { "type": "string" },
-        "name": { "type": "string" },
-        "reversible": { "type": "boolean" },
-        "inverse_template": { "type": ["object", "null"] },
-        "verified_at": { "type": ["string", "null"], "format": "date-time" },
-        "autonomy_stage": { "type": "string", "enum": ["unverified", "supervised", "earned"] },
-        "autonomy_policy": { "type": "string", "enum": ["immediate", "graduated", "always_gated"] }
-      }
-    },
-    "SafetyCase": {
-      "type": "object",
-      "required": ["id", "subject_id", "subject_type", "risk_class", "independent_review"],
-      "properties": {
-        "id": { "type": "string" },
-        "subject_id": { "type": "string" },
-        "subject_type": { "type": "string", "enum": ["device_action", "capability"] },
-        "risk_class": { "type": "string", "enum": ["low", "moderate", "high", "irreversible_high_consequence"] },
-        "guardrails": { "type": ["object", "null"] },
-        "supervised_track_record": { "type": ["object", "null"] },
-        "formal_verification": { "type": ["object", "null"] },
-        "independent_review": {
-          "type": "boolean",
-          "description": "MUST be true for risk_class != 'low'"
-        },
-        "approved_at": { "type": ["string", "null"], "format": "date-time" },
-        "revoked_at": { "type": ["string", "null"], "format": "date-time" }
-      }
-    },
-    "Location": {
-      "type": "object",
-      "required": ["id", "kind", "coordinate_frame"],
-      "properties": {
-        "id": { "type": "string" },
-        "name": { "type": ["string", "null"] },
-        "kind": { "type": "string", "enum": ["point", "region", "hierarchy"] },
-        "coordinate_frame": { "type": "string" },
-        "x": { "type": ["number", "null"] },
-        "y": { "type": ["number", "null"] },
-        "z": { "type": ["number", "null"] },
-        "geometry": { "type": ["object", "null"] }
-      }
-    },
-    "Connector": {
-      "type": "object",
-      "required": ["id", "type", "auth"],
-      "properties": {
-        "id": { "type": "string" },
-        "type": { "type": "string", "enum": ["rest", "graphql", "webhook", "ssh", "winrm", "mqtt", "opcua", "mcp"] },
-        "auth": { "type": "string", "enum": ["oauth2", "apikey", "mtls", "none"] }
       }
     },
     "Run": {
@@ -169,17 +93,6 @@
         "type": { "type": "string" },
         "ts": { "type": "string", "format": "date-time" },
         "payload": {}
-      }
-    },
-    "ApprovalGate": {
-      "type": "object",
-      "required": ["id", "action", "risk"],
-      "properties": {
-        "id": { "type": "string" },
-        "action": { "type": "object" },
-        "risk": { "type": "string" },
-        "approved_by": { "type": ["string", "null"] },
-        "approved_at": { "type": ["string", "null"], "format": "date-time" }
       }
     }
   }

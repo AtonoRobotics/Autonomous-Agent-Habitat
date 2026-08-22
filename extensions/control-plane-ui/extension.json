@@ -6,7 +6,7 @@
     "name": "AMH Control Plane UI",
     "version": "1.0.0",
     "publisher": "amh-core",
-    "description": "First-party operator UI for installing harnesses, provisioning computers, configuring connectors, and authenticating accounts and modules — against the same admin API any third-party control-plane UI would use."
+    "description": "First-party operator UI for installing harnesses, provisioning computers, and authenticating accounts and modules — against the same admin API any third-party control-plane UI would use."
   },
   "spec": {
     "entrypoint": "__ABSOLUTE_PATH_TO_SERVER_JS__",

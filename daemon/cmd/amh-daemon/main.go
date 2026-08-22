@@ -1,7 +1,7 @@
 // Command amh-daemon is the AMH Go control-plane process: supervisor tree,
-// scheduler, health/watchdog, connector runtime, device I/O. Runs as a
-// systemd service (Linux) or Windows Service. See
-// docs/AMH-SPECIFICATION.md §1 and Artifact A.
+// scheduler, health/watchdog, extension lifecycle, and the HTTP/MCP
+// control-plane surfaces. Runs as a systemd service (Linux) or Windows
+// Service. See docs/AMH-SPECIFICATION.md §1 and Artifact A.
 package main
 
 import (
@@ -73,12 +73,10 @@ func main() {
 	tp := observability.Init(nil)
 	defer tp.Shutdown(context.Background())
 
-	// Fail closed: the API server enforces two distinct role tokens (§12,
-	// §14.7's anti-reward-hacking discipline — an agent must not be able
-	// to approve its own ApprovalGate ticket), and there is no
-	// unauthenticated fallback mode. If either token is unset, refuse to
-	// start rather than run the actuation/approval API open to anyone who
-	// can reach the port. See daemon/authn's doc comment and
+	// Fail closed: the API server enforces two distinct role tokens (§12),
+	// and there is no unauthenticated fallback mode. If either token is
+	// unset, refuse to start rather than run the control-plane API open to
+	// anyone who can reach the port. See daemon/authn's doc comment and
 	// .env.example for how to configure these.
 	agentToken := os.Getenv("AMH_API_AGENT_TOKEN")
 	operatorToken := os.Getenv("AMH_API_OPERATOR_TOKEN")

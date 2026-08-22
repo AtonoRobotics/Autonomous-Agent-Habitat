@@ -66,7 +66,6 @@ function refreshCurrentTab() {
   const tab = currentTab();
   if (tab === 'extensions') loadExtensions();
   if (tab === 'computers') loadComputers();
-  if (tab === 'connectors') loadConnectors();
   if (tab === 'accounts') loadAccounts();
 }
 
@@ -200,58 +199,6 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('computers-agent-filter').addEventListener('change', loadComputers);
 });
 
-// ── Connectors ───────────────────────────────────────────────────────────
-
-async function loadConnectors() {
-  const container = document.getElementById('connectors-table');
-  try {
-    const list = await api('/v1/connectors');
-    if (!list || !list.length) { container.innerHTML = '<div class="empty">No connectors configured yet.</div>'; return; }
-    const table = document.createElement('table');
-    table.innerHTML = '<thead><tr><th>ID</th><th>Type</th><th>Auth</th><th>Status</th><th></th></tr></thead>';
-    const tbody = document.createElement('tbody');
-    list.forEach((c) => {
-      const tr = document.createElement('tr');
-      tr.innerHTML = `<td>${escapeHtml(c.id)}</td><td>${escapeHtml(c.type)}</td><td>${escapeHtml(c.auth)}</td><td></td>`;
-      tr.children[3].appendChild(badge(c.status));
-      const actions = document.createElement('td');
-      actions.className = 'row-actions';
-      addAction(actions, 'Disable', () => disableConnector(c.id), c.status === 'disabled');
-      tr.appendChild(actions);
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    container.innerHTML = '';
-    container.appendChild(table);
-  } catch (err) {
-    container.innerHTML = `<div class="empty">Could not load connectors: ${escapeHtml(err.message)}</div>`;
-  }
-}
-
-function disableConnector(id) {
-  return api('/v1/connectors/' + encodeURIComponent(id) + '/disable', { method: 'POST' });
-}
-
-document.addEventListener('DOMContentLoaded', () => {
-  document.getElementById('form-create-connector').addEventListener('submit', async (ev) => {
-    ev.preventDefault();
-    const form = new FormData(ev.target);
-    let config;
-    const raw = (form.get('config') || '').trim();
-    if (raw) {
-      try { config = JSON.parse(raw); } catch { toast('Config is not valid JSON', 'error'); return; }
-    }
-    try {
-      await api('/v1/connectors', {
-        method: 'POST',
-        body: JSON.stringify({ id: form.get('id'), type: form.get('type'), auth: form.get('auth'), config }),
-      });
-      toast('Connector added');
-      loadConnectors();
-    } catch (err) { toast('Add failed: ' + err.message, 'error'); }
-  });
-});
-
 // ── Accounts ─────────────────────────────────────────────────────────────
 
 // Provider-name presets for the "Register an account" form — purely a
@@ -343,8 +290,8 @@ document.addEventListener('DOMContentLoaded', () => {
 //
 // Two credential shapes travel through the same /v1/accounts/{id}/credential
 // endpoint as an opaque {"secret": "<string>"} — the daemon never interprets
-// it. For a connector or generic provider that string is just the secret
-// itself. For a model-provider account it is instead the JSON-encoded
+// it. For a generic provider that string is just the secret itself. For a
+// model-provider account it is instead the JSON-encoded
 // credential envelope daemon/inference/inference.go parses
 // ({kind, api_key, base_url, oauth}) — this dialog builds that JSON so an
 // operator never hand-writes it.

@@ -55,6 +55,7 @@ class _ConcurrencyTrackingHandler(BaseHTTPRequestHandler):
         system_content = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
         user_content = next(m["content"] for m in reversed(messages) if m["role"] == "user")
 
+        agentic_marker = "Your task:\n\n"
         if "JSON array" in system_content:
             clauses = [c.strip() for c in user_content.split(";") if c.strip()] or [user_content]
             content = json.dumps([{"objective": c} for c in clauses])
@@ -67,7 +68,11 @@ class _ConcurrencyTrackingHandler(BaseHTTPRequestHandler):
             time.sleep(_SUBAGENT_THINK_TIME_S)
             with cls.lock:
                 cls.current -= 1
-            content = f"completed: {user_content}"
+            if agentic_marker in system_content:
+                objective = system_content.split(agentic_marker, 1)[1]
+                content = json.dumps({"tool": "done", "result": f"completed: {objective}"})
+            else:
+                content = f"completed: {user_content}"
 
         response = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode("utf-8")
         self.send_response(200)

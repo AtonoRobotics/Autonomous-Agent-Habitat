@@ -151,10 +151,18 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
     """Implements just enough of an OpenAI-compatible /chat/completions and
     /embeddings endpoint for workflows.goal's real prompts and
     memory/retrieval.py's real embedding calls. Distinguishes
-    decompose_goal's call from do_subagent_work's call by system-prompt
-    content (both are sent as the first message per context/llm.py's
-    _complete_openai_compatible), not by guessing — a real model would be
-    told the same way."""
+    decompose_goal's call from do_subagent_work's agentic-loop call by
+    system-prompt content (both are sent as the first message per
+    context/llm.py's _complete_openai_compatible), not by guessing — a
+    real model would be told the same way.
+
+    The agentic-loop branch always answers "done" on its first turn —
+    this fixture stands in for a model that completes the task
+    immediately, not one that actually uses read_file/write_file/etc.
+    Real multi-turn tool use is exercised directly against
+    harness/agentic_loop.py in test_agentic_loop.py, against a fixture
+    that inspects the tool-call sequence rather than a fixed daemon
+    account like this one."""
 
     def log_message(self, format, *args):  # noqa: A002 (stdlib signature) - quiet test output
         pass
@@ -171,9 +179,13 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
             system_content = messages[0]["content"] if messages and messages[0]["role"] == "system" else ""
             user_content = next(m["content"] for m in reversed(messages) if m["role"] == "user")
 
+            agentic_marker = "Your task:\n\n"
             if "JSON array" in system_content:
                 clauses = [c.strip() for c in user_content.split(";") if c.strip()] or [user_content]
                 content = json.dumps([{"objective": c} for c in clauses])
+            elif agentic_marker in system_content:
+                objective = system_content.split(agentic_marker, 1)[1]
+                content = json.dumps({"tool": "done", "result": f"completed: {objective}"})
             else:
                 content = f"completed: {user_content}"
 

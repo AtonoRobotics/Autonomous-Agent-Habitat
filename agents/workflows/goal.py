@@ -16,26 +16,28 @@ daemon's inference seam (context/llm.py, daemon/inference) — they are not
 canned responses, and this process never holds a model-provider credential
 itself: daemon_api_base_url + agent_token (the same two values every other
 daemon-calling step in this codebase already threads through — see
-actuate.py) are all either step needs. Neither is wired to the
-tool-calling harness (agents/harness/) yet: do_subagent_work is a
-single-turn model completion answering the objective directly, not an
-agentic loop with VFS/tool access. That harness integration is real
-remaining work, stated plainly rather than papered over by a placeholder
-that looked finished. Both steps propagate ModelNotConfiguredError
-(context/llm.py) if no provider is registered on the daemon — they fail
-loudly, not by returning a fake result.
+actuate.py) are all either step needs. do_subagent_work runs a real
+agentic tool-calling loop (harness/agentic_loop.py) against an isolated
+VFS root, not a single-turn completion — see that module's docstring for
+the tool-call protocol and why it isn't native function-calling. Both
+steps propagate ModelNotConfiguredError (context/llm.py) if no provider
+is registered on the daemon — they fail loudly, not by returning a fake
+result.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import tempfile
 from typing import Any
 
 from dbos import DBOS, Queue
 
 from context.llm import from_env
 from context.observability import agent_run_span, inject_trace_context
+from harness.vfs import VFS
+from harness.agentic_loop import run_agentic_loop
 from memory.working import project_working_memory
 from . import ontology
 from .memory_hooks import recall_context, retain_outcome
@@ -111,19 +113,23 @@ def decompose_goal(
     return tasks
 
 
-_SUBAGENT_SYSTEM_PROMPT = """You are an isolated sub-agent completing one task on behalf of a manager agent. \
-Address the objective directly and return your result. Your response is the \
-only thing the manager will see — it does not see how you arrived at it."""
+def _workspace_root() -> str:
+    """Root directory subagent VFS roots are nested under, one per run_id
+    — AMH_WORKSPACE_ROOT for a real deployment's durable-enough scratch
+    space; a per-process tmp dir otherwise. Not itself durable state (a
+    subagent's files are its own working scratch, not part of the
+    ontology) — see harness/vfs.py."""
+    return os.environ.get("AMH_WORKSPACE_ROOT", os.path.join(tempfile.gettempdir(), "amh-workspaces"))
 
 
 @DBOS.step()
 def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, daemon_api_base_url: str, agent_token: str) -> dict[str, Any]:
-    """Real model call answering objective directly, through the daemon's
-    inference seam. Returns a condensed result only (per Artifact D's
+    """Runs a real agentic tool-calling loop (harness/agentic_loop.py)
+    against an isolated VFS root scoped to this run — not a single-turn
+    completion. Returns a condensed result only (per Artifact D's
     context_ref/trace_ref design: the manager never sees the child's full
-    transcript unless it asks). This is a single-turn completion, not yet
-    an agentic tool-calling loop — see this module's top-level doc
-    comment.
+    transcript unless it asks); the full turn-by-turn transcript lives in
+    the run's own VFS root, reachable only via that explicit handle.
 
     Working memory (memory.working.project_working_memory) surfaces the
     parent goal's text as context — without it, a subagent sees only its
@@ -132,16 +138,14 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
 
     working_memory = project_working_memory(db_path, run_id)
     if working_memory and working_memory.goal_text:
-        user_content = f"Overall goal: {working_memory.goal_text}\n\nYour task: {objective}"
+        full_objective = f"Overall goal: {working_memory.goal_text}\n\nYour task: {objective}"
     else:
-        user_content = objective
+        full_objective = objective
 
     client = from_env(daemon_api_base_url, agent_token)
-    result_text = client.complete(
-        system=_SUBAGENT_SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_content}],
-    )
-    return {"task_id": task_id, "status": "done", "summary": result_text}
+    vfs = VFS(os.path.join(_workspace_root(), run_id))
+    loop_result = run_agentic_loop(full_objective, vfs, client)
+    return {"task_id": task_id, "status": "done", "summary": loop_result.result}
 
 
 @DBOS.workflow()

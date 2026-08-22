@@ -269,6 +269,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/inference/embed",
 		s.Auth.RequireRole(s.handleInferenceEmbed, authn.RoleAgent, authn.RoleOperator))
 
+	// OpenAI-compatible facade over the same inference seam, for external
+	// services that speak that wire format directly (e.g. Hindsight's
+	// HINDSIGHT_API_LLM_BASE_URL/HINDSIGHT_API_EMBEDDINGS_OPENAI_BASE_URL)
+	// rather than a custom AMH client class. Same auth tier as
+	// /v1/inference/* — the caller's agent token IS the "api_key".
+	mux.HandleFunc("POST /v1/openai/chat/completions",
+		s.Auth.RequireRole(s.handleOpenAIChatCompletions, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/openai/embeddings",
+		s.Auth.RequireRole(s.handleOpenAIEmbeddings, authn.RoleAgent, authn.RoleOperator))
+
 	return mux
 }
 

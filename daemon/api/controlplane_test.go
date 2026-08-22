@@ -494,6 +494,194 @@ func TestInferenceEmbed_AnthropicProvider_ReturnsBadRequest(t *testing.T) {
 	}
 }
 
+// ── OpenAI-compatible facade ─────────────────────────────────────────────
+
+func TestOpenAIChatCompletions_RealRoundTripThroughRegisteredProvider(t *testing.T) {
+	var gotAuth string
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the real answer"}}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProvider(t, ts, fakeProvider.URL)
+
+	// "<provider>/<model>" convention: the part before the first "/"
+	// selects the registered AMH account, matching litellm/OpenRouter.
+	body, _ := json.Marshal(map[string]any{
+		"model": "test-fake/test-model",
+		"messages": []map[string]string{
+			{"role": "system", "content": "be helpful"},
+			{"role": "user", "content": "hi"},
+		},
+	})
+	resp := postJSON(t, ts.URL+"/v1/openai/chat/completions", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, mustReadAll(t, resp.Body))
+	}
+	var result openAIChatCompletionResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result.Choices) != 1 || result.Choices[0].Message.Content != "the real answer" {
+		t.Fatalf("expected the real provider text in choices[0], got %+v", result)
+	}
+	if result.Choices[0].Message.Role != "assistant" || result.Object != "chat.completion" {
+		t.Fatalf("expected a real chat.completion-shaped response, got %+v", result)
+	}
+	if result.ID == "" || result.Created == 0 {
+		t.Fatalf("expected a real id and created timestamp, got %+v", result)
+	}
+	// The fake provider account was registered with api_key "test-key" —
+	// proving the facade resolved the AMH-registered credential, not the
+	// caller's own agent bearer token, as the provider's Authorization.
+	if gotAuth != "Bearer test-key" {
+		t.Fatalf("expected the provider to see its registered credential, got %q", gotAuth)
+	}
+}
+
+func TestOpenAIChatCompletions_BareModelDefaultsProvider(t *testing.T) {
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"default provider answer"}}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	// No "/" in "model": provider defaults the same way
+	// inference.Request.Provider's default ("anthropic") already does.
+	registerFakeModelProviderNamed(t, ts, "anthropic", fakeProvider.URL)
+
+	body, _ := json.Marshal(map[string]any{
+		"model":    "test-model",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	resp := postJSON(t, ts.URL+"/v1/openai/chat/completions", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, mustReadAll(t, resp.Body))
+	}
+	var result openAIChatCompletionResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Choices[0].Message.Content != "default provider answer" {
+		t.Fatalf("expected the default-provider answer, got %+v", result)
+	}
+}
+
+func TestOpenAIChatCompletions_NoAccountRegistered_ReturnsOpenAIShapedError(t *testing.T) {
+	ts := newTestServer(t, true)
+	body, _ := json.Marshal(map[string]any{
+		"model":    "nonexistent/x",
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	})
+	resp := postJSON(t, ts.URL+"/v1/openai/chat/completions", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("expected 404 for an unregistered provider, got %d", resp.StatusCode)
+	}
+	var result openAIErrorResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Error.Message == "" || result.Error.Type == "" {
+		t.Fatalf("expected an OpenAI-shaped {error:{message,type}} body, got %+v", result)
+	}
+}
+
+func TestOpenAIChatCompletions_RequiresModel(t *testing.T) {
+	ts := newTestServer(t, true)
+	body, _ := json.Marshal(map[string]any{"messages": []map[string]string{{"role": "user", "content": "hi"}}})
+	resp := postJSON(t, ts.URL+"/v1/openai/chat/completions", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when model is missing, got %d", resp.StatusCode)
+	}
+}
+
+func TestOpenAIEmbeddings_RealRoundTripThroughRegisteredProvider(t *testing.T) {
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/embeddings" {
+			t.Errorf("expected path /embeddings, got %q", r.URL.Path)
+		}
+		w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3],"index":0}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProvider(t, ts, fakeProvider.URL)
+
+	// Real OpenAI embeddings API accepts "input" as a bare string, not
+	// just an array — the facade's openAIEmbedInput must accept both.
+	body, _ := json.Marshal(map[string]any{"model": "test-fake/test-embed-model", "input": "hello world"})
+	resp := postJSON(t, ts.URL+"/v1/openai/embeddings", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, mustReadAll(t, resp.Body))
+	}
+	var result openAIEmbeddingsResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if result.Object != "list" || len(result.Data) != 1 {
+		t.Fatalf("expected a real list-shaped response, got %+v", result)
+	}
+	if result.Data[0].Object != "embedding" || result.Data[0].Embedding[0] != 0.1 {
+		t.Fatalf("expected the real provider's embedding, got %+v", result.Data[0])
+	}
+}
+
+func TestOpenAIEmbeddings_ArrayInput(t *testing.T) {
+	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var decoded struct {
+			Input []string `json:"input"`
+		}
+		json.NewDecoder(r.Body).Decode(&decoded)
+		if len(decoded.Input) != 2 {
+			t.Errorf("expected both inputs to reach the provider, got %+v", decoded.Input)
+		}
+		w.Write([]byte(`{"data":[{"embedding":[0.1],"index":0},{"embedding":[0.2],"index":1}]}`))
+	}))
+	defer fakeProvider.Close()
+
+	ts := newTestServer(t, true)
+	registerFakeModelProvider(t, ts, fakeProvider.URL)
+
+	body, _ := json.Marshal(map[string]any{"model": "test-fake/m", "input": []string{"a", "b"}})
+	resp := postJSON(t, ts.URL+"/v1/openai/embeddings", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.StatusCode, mustReadAll(t, resp.Body))
+	}
+	var result openAIEmbeddingsResponse
+	json.NewDecoder(resp.Body).Decode(&result)
+	if len(result.Data) != 2 {
+		t.Fatalf("expected two embeddings back, got %+v", result)
+	}
+}
+
+func TestOpenAIEmbeddings_RequiresModelAndInput(t *testing.T) {
+	ts := newTestServer(t, true)
+
+	body, _ := json.Marshal(map[string]any{"input": "hi"})
+	resp := postJSON(t, ts.URL+"/v1/openai/embeddings", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when model is missing, got %d", resp.StatusCode)
+	}
+
+	body2, _ := json.Marshal(map[string]any{"model": "test-fake/m"})
+	resp2 := postJSON(t, ts.URL+"/v1/openai/embeddings", testAgentToken, body2)
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 when input is missing, got %d", resp2.StatusCode)
+	}
+}
+
+func TestOpenAIRoutes_503WhenCredentialStoreDisabled(t *testing.T) {
+	ts := newTestServer(t, false)
+	body, _ := json.Marshal(map[string]any{"model": "x", "messages": []map[string]string{{"role": "user", "content": "hi"}}})
+	resp := postJSON(t, ts.URL+"/v1/openai/chat/completions", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when the credential store isn't configured, got %d", resp.StatusCode)
+	}
+}
+
 func mustReadAll(t *testing.T, r io.Reader) []byte {
 	t.Helper()
 	b, err := io.ReadAll(r)

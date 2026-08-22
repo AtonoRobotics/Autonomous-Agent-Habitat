@@ -17,6 +17,10 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
@@ -632,4 +636,204 @@ func (s *Server) handleInferenceEmbed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, inferenceEmbedResponse{Embeddings: result.Embeddings, Dimension: result.Dimension})
+}
+
+// ── OpenAI-compatible facade ─────────────────────────────────────────────
+//
+// /v1/inference/complete and /v1/inference/embed above are AMH's own wire
+// shape. This facade exists for external services this codebase does not
+// control the internals of — Hindsight (agents/memory episodic/knowledge
+// projection) is the first — that can only be pointed at a model provider
+// via a standard OpenAI-compatible base_url + api_key, not by writing a
+// custom client class against them the way memory/graph_llm.py does for
+// Graphiti. It is real, general infrastructure: any OpenAI-SDK-based tool
+// can be given AMH model custody this way, not just Hindsight.
+//
+// The caller's agent bearer token IS the "api_key" (sent as
+// "Authorization: Bearer <token>" by every OpenAI-compatible client) —
+// authenticated by the same RequireRole middleware as every other agent
+// route; no separate credential is issued.
+//
+// Real OpenAI wire format has one "model" string, but selecting an AMH
+// account needs both a provider (which registered credential) and a model
+// name (what to ask that provider for) — the same two fields
+// inferenceCompleteRequest keeps separate. This facade reuses the
+// "<provider>/<model>" convention litellm and OpenRouter already use for
+// exactly this: split model on the first "/"; no "/" means the whole
+// string is the model and the provider defaults the same way
+// inference.Request.Provider already does (see providerOrDefault).
+
+func splitOpenAIModel(model string) (provider, actualModel string) {
+	if i := strings.IndexByte(model, '/'); i >= 0 {
+		return model[:i], model[i+1:]
+	}
+	return "", model
+}
+
+type openAIChatMessage struct {
+	Role    string `json:"role"`
+	Content string `json:"content"`
+}
+
+type openAIChatCompletionRequest struct {
+	Model     string              `json:"model"`
+	Messages  []openAIChatMessage `json:"messages"`
+	MaxTokens int                 `json:"max_tokens,omitempty"`
+}
+
+type openAIChatChoice struct {
+	Index        int               `json:"index"`
+	Message      openAIChatMessage `json:"message"`
+	FinishReason string            `json:"finish_reason"`
+}
+
+type openAIChatCompletionResponse struct {
+	ID      string             `json:"id"`
+	Object  string             `json:"object"`
+	Created int64              `json:"created"`
+	Model   string             `json:"model"`
+	Choices []openAIChatChoice `json:"choices"`
+}
+
+type openAIErrorBody struct {
+	Message string `json:"message"`
+	Type    string `json:"type"`
+}
+
+type openAIErrorResponse struct {
+	Error openAIErrorBody `json:"error"`
+}
+
+func writeOpenAIError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, openAIErrorResponse{Error: openAIErrorBody{Message: message, Type: "invalid_request_error"}})
+}
+
+// splitOpenAIMessages separates a leading system message (OpenAI puts
+// system in the messages array; inference.Request keeps it as a separate
+// field) from the rest.
+func splitOpenAIMessages(in []openAIChatMessage) (system string, rest []inference.Message) {
+	start := 0
+	if len(in) > 0 && in[0].Role == "system" {
+		system = in[0].Content
+		start = 1
+	}
+	rest = make([]inference.Message, 0, len(in)-start)
+	for _, m := range in[start:] {
+		rest = append(rest, inference.Message{Role: m.Role, Content: m.Content})
+	}
+	return system, rest
+}
+
+func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if s.inferenceUnavailable(w) {
+		return
+	}
+	var req openAIChatCompletionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Model == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	provider, model := splitOpenAIModel(req.Model)
+	system, messages := splitOpenAIMessages(req.Messages)
+
+	text, err := s.Inference.Complete(r.Context(), inference.Request{
+		Provider:  provider,
+		Model:     model,
+		System:    system,
+		Messages:  messages,
+		MaxTokens: req.MaxTokens,
+	})
+	if err != nil {
+		writeOpenAIError(w, inferenceErrorStatus(err), err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, openAIChatCompletionResponse{
+		ID:      "chatcmpl-" + uuid.NewString(),
+		Object:  "chat.completion",
+		Created: time.Now().Unix(),
+		Model:   req.Model,
+		Choices: []openAIChatChoice{{
+			Index:        0,
+			Message:      openAIChatMessage{Role: "assistant", Content: text},
+			FinishReason: "stop",
+		}},
+	})
+}
+
+// openAIEmbedInput accepts either a single string or a list of strings —
+// the real OpenAI embeddings API supports both.
+type openAIEmbedInput []string
+
+func (in *openAIEmbedInput) UnmarshalJSON(data []byte) error {
+	var single string
+	if err := json.Unmarshal(data, &single); err == nil {
+		*in = openAIEmbedInput{single}
+		return nil
+	}
+	var many []string
+	if err := json.Unmarshal(data, &many); err != nil {
+		return err
+	}
+	*in = openAIEmbedInput(many)
+	return nil
+}
+
+type openAIEmbeddingsRequest struct {
+	Model string           `json:"model"`
+	Input openAIEmbedInput `json:"input"`
+}
+
+type openAIEmbeddingDatum struct {
+	Object    string    `json:"object"`
+	Index     int       `json:"index"`
+	Embedding []float32 `json:"embedding"`
+}
+
+type openAIEmbeddingsResponse struct {
+	Object string                 `json:"object"`
+	Model  string                 `json:"model"`
+	Data   []openAIEmbeddingDatum `json:"data"`
+}
+
+func (s *Server) handleOpenAIEmbeddings(w http.ResponseWriter, r *http.Request) {
+	if s.inferenceUnavailable(w) {
+		return
+	}
+	var req openAIEmbeddingsRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeOpenAIError(w, http.StatusBadRequest, "invalid request body: "+err.Error())
+		return
+	}
+	if req.Model == "" {
+		writeOpenAIError(w, http.StatusBadRequest, "model is required")
+		return
+	}
+	if len(req.Input) == 0 {
+		writeOpenAIError(w, http.StatusBadRequest, "input is required")
+		return
+	}
+	provider, model := splitOpenAIModel(req.Model)
+
+	result, err := s.Inference.Embed(r.Context(), inference.EmbedRequest{
+		Provider: provider,
+		Model:    model,
+		Input:    []string(req.Input),
+	})
+	if err != nil {
+		status := inferenceErrorStatus(err)
+		if errors.Is(err, inference.ErrEmbedNotSupported) {
+			status = http.StatusBadRequest
+		}
+		writeOpenAIError(w, status, err.Error())
+		return
+	}
+	data := make([]openAIEmbeddingDatum, len(result.Embeddings))
+	for i, e := range result.Embeddings {
+		data[i] = openAIEmbeddingDatum{Object: "embedding", Index: i, Embedding: e}
+	}
+	writeJSON(w, http.StatusOK, openAIEmbeddingsResponse{Object: "list", Model: req.Model, Data: data})
 }

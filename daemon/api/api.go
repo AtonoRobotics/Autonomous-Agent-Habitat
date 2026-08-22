@@ -125,10 +125,26 @@ func (s *Server) Handler() http.Handler {
 		s.Auth.RequireRole(s.handleQuiesceExtension, authn.RoleOperator))
 	mux.HandleFunc("POST /v1/extensions/dispose",
 		s.Auth.RequireRole(s.handleDisposeExtension, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/rollback",
+		s.Auth.RequireRole(s.handleRollbackExtension, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/extensions",
 		s.Auth.RequireRole(s.handleListExtensions, authn.RoleAgent, authn.RoleOperator))
 	mux.HandleFunc("GET /v1/extensions/get",
 		s.Auth.RequireRole(s.handleGetExtension, authn.RoleAgent, authn.RoleOperator))
+
+	// Context effects (§15 acceptance invariant #3 / §5.1 "Cordis temporal
+	// composability") — an active extension self-reporting the
+	// core-mediated effects it creates and disposes. Agent-or-operator at
+	// this coarse role gate, same shape as /v1/operations' mutating
+	// routes: the fine-grained "only this exact extension instance, via
+	// its own capability token" check happens inside the handler
+	// (authorizeAsExtension in controlplane.go), not here.
+	mux.HandleFunc("POST /v1/extensions/context-effects",
+		s.Auth.RequireRole(s.handleRegisterContextEffect, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("POST /v1/extensions/context-effects/{effectID}/dispose",
+		s.Auth.RequireRole(s.handleDisposeContextEffect, authn.RoleAgent, authn.RoleOperator))
+	mux.HandleFunc("GET /v1/extensions/context-effects",
+		s.Auth.RequireRole(s.handleListOutstandingContextEffects, authn.RoleAgent, authn.RoleOperator))
 
 	// Trusted signing keys (§14: "signed extension packs and compatibility
 	// qualification") — the operator-managed set of Ed25519 keys

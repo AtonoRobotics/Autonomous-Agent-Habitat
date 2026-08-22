@@ -49,7 +49,7 @@ func (s *Server) authorizeEffectOwner(w http.ResponseWriter, r *http.Request, ow
 		return true
 	}
 	token := r.Header.Get("X-AMH-Extension-Token")
-	extID, ok, err := s.Extensions.VerifyCapabilityToken(r.Context(), token)
+	extID, _, ok, err := s.Extensions.VerifyCapabilityToken(r.Context(), token)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, effectResponse{Error: err.Error()})
 		return false

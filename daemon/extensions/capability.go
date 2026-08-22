@@ -62,27 +62,30 @@ func hashToken(raw string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// VerifyCapabilityToken reports which currently-active extension a
-// capability token belongs to, if any — ok is false for an empty,
-// unrecognized, or since-revoked/replaced token, never an error; err is
-// reserved for a real infrastructure failure (a query that couldn't run
-// at all). Used by daemon/api's operations routes to enforce §15
-// acceptance invariant #5 ("an extension cannot mutate another
-// extension's owned effects") — see that call site's own doc comment
-// for why this narrow, purpose-built mechanism lives here rather than
-// in daemon/authn, whose own doc comment explicitly scopes it to two
-// static roles, not a general per-identity system.
-func (r *Registry) VerifyCapabilityToken(ctx context.Context, token string) (extensionID string, ok bool, err error) {
+// VerifyCapabilityToken reports which currently-active extension
+// instance a capability token belongs to, if any — ok is false for an
+// empty, unrecognized, or since-revoked/replaced token, never an error;
+// err is reserved for a real infrastructure failure (a query that
+// couldn't run at all). Returns both id and version, not just id: two
+// different versions of the same extension id can be simultaneously
+// active (nothing in Activate prevents it), each with its own distinct
+// token, so id alone would be ambiguous for a caller that needs to
+// authorize against one specific instance (see
+// daemon/api/controlplane.go's context-effect routes) — callers that
+// only ever needed id (daemon/api/operations.go's authorizeEffectOwner,
+// since effect_record.owner_extension_id carries no version) simply
+// ignore the extra return value.
+func (r *Registry) VerifyCapabilityToken(ctx context.Context, token string) (extensionID, extensionVersion string, ok bool, err error) {
 	if token == "" {
-		return "", false, nil
+		return "", "", false, nil
 	}
-	var id string
-	err = r.DB.QueryRowContext(ctx, `SELECT extension_id FROM extension_capability_token WHERE token_hash = $1`, hashToken(token)).Scan(&id)
+	var id, version string
+	err = r.DB.QueryRowContext(ctx, `SELECT extension_id, extension_version FROM extension_capability_token WHERE token_hash = $1`, hashToken(token)).Scan(&id, &version)
 	if errors.Is(err, sql.ErrNoRows) {
-		return "", false, nil
+		return "", "", false, nil
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("extensions: verify capability token: %w", err)
+		return "", "", false, fmt.Errorf("extensions: verify capability token: %w", err)
 	}
-	return id, true, nil
+	return id, version, true, nil
 }

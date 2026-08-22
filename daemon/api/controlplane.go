@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
@@ -131,6 +132,156 @@ func (s *Server) handleDisposeExtension(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	writeJSON(w, http.StatusOK, toExtensionResponse(ext))
+}
+
+type extensionRollbackRequest struct {
+	ID          string `json:"id"`
+	FromVersion string `json:"from_version"`
+	ToVersion   string `json:"to_version"`
+}
+
+// handleRollbackExtension is §15 acceptance invariant #11 ("rollback
+// restores the prior capability binding") over the operator surface —
+// one call in place of an operator scripting
+// quiesce+dispose+activate(prior version) by hand through the three
+// routes above.
+func (s *Server) handleRollbackExtension(w http.ResponseWriter, r *http.Request) {
+	var req extensionRollbackRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, extensionResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	ext, err := s.Extensions.Rollback(r.Context(), req.ID, req.FromVersion, req.ToVersion)
+	if err != nil {
+		writeJSON(w, extensionErrorStatus(err), extensionResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, toExtensionResponse(ext))
+}
+
+// ── Context effects (§15 acceptance invariant #3 / §5.1) ───────────────────
+
+type contextEffectResponse struct {
+	ID       string `json:"id,omitempty"`
+	Sequence int    `json:"sequence,omitempty"`
+	Kind     string `json:"kind,omitempty"`
+	Ref      string `json:"ref,omitempty"`
+	Error    string `json:"error,omitempty"`
+}
+
+func toContextEffectResponse(e extensions.ContextEffect) contextEffectResponse {
+	return contextEffectResponse{ID: e.ID, Sequence: e.Sequence, Kind: e.Kind, Ref: e.Ref}
+}
+
+func contextEffectErrorStatus(err error) int {
+	switch {
+	case errors.Is(err, extensions.ErrNotFound):
+		return http.StatusNotFound
+	case errors.Is(err, extensions.ErrInvalidState), errors.Is(err, extensions.ErrNotMostRecentlyRegistered),
+		errors.Is(err, extensions.ErrOutstandingContextEffects):
+		return http.StatusConflict
+	default:
+		return http.StatusBadRequest
+	}
+}
+
+// authorizeAsExtension enforces that only the extension instance itself
+// (via the capability token minted for it at Activate — see
+// daemon/extensions/capability.go) or an operator may register or
+// dispose a context effect on its behalf. Unlike
+// operations.go's authorizeEffectOwner, there is no "amh.core/" prefix
+// exemption here: no real core call site registers context effects, so
+// there is nothing to exempt. Writes the 403/500 response itself and
+// returns false on any failure, so callers can just `if !ok { return }`.
+func (s *Server) authorizeAsExtension(w http.ResponseWriter, r *http.Request, id, version string) bool {
+	if role, ok := authn.RoleFromContext(r.Context()); ok && role == authn.RoleOperator {
+		return true
+	}
+	token := r.Header.Get("X-AMH-Extension-Token")
+	extID, extVersion, ok, err := s.Extensions.VerifyCapabilityToken(r.Context(), token)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, contextEffectResponse{Error: err.Error()})
+		return false
+	}
+	if !ok || extID != id || extVersion != version {
+		writeJSON(w, http.StatusForbidden, contextEffectResponse{Error: "extensions: caller is not authorized to act on behalf of " + id + "@" + version})
+		return false
+	}
+	return true
+}
+
+type registerContextEffectRequest struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+	Kind    string `json:"kind"`
+	Ref     string `json:"ref"`
+}
+
+// handleRegisterContextEffect is an extension self-reporting that it
+// just created one core-mediated effect — see
+// daemon/extensions/context_effect.go's doc comment for why core
+// tracks order and completeness of this rather than executing the
+// disposer itself.
+func (s *Server) handleRegisterContextEffect(w http.ResponseWriter, r *http.Request) {
+	var req registerContextEffectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, contextEffectResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if !s.authorizeAsExtension(w, r, req.ID, req.Version) {
+		return
+	}
+	eff, err := s.Extensions.RegisterContextEffect(r.Context(), req.ID, req.Version, req.Kind, req.Ref)
+	if err != nil {
+		writeJSON(w, contextEffectErrorStatus(err), contextEffectResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusCreated, toContextEffectResponse(*eff))
+}
+
+type disposeContextEffectRequest struct {
+	ID      string `json:"id"`
+	Version string `json:"version"`
+}
+
+// handleDisposeContextEffect is an extension self-reporting that it
+// tore down one core-mediated effect it previously registered — fails
+// closed (409) unless effectID is the most recently registered,
+// still-outstanding effect for this instance (reverse registration
+// order, §5.1).
+func (s *Server) handleDisposeContextEffect(w http.ResponseWriter, r *http.Request) {
+	effectID := r.PathValue("effectID")
+	var req disposeContextEffectRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, contextEffectResponse{Error: "invalid request body: " + err.Error()})
+		return
+	}
+	if !s.authorizeAsExtension(w, r, req.ID, req.Version) {
+		return
+	}
+	if err := s.Extensions.DisposeContextEffect(r.Context(), req.ID, req.Version, effectID); err != nil {
+		writeJSON(w, contextEffectErrorStatus(err), contextEffectResponse{Error: err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, contextEffectResponse{ID: effectID})
+}
+
+// handleListOutstandingContextEffects is read access to what Dispose
+// itself checks — agent/operator readable, the same access level
+// handleGetExtension already has, since this is diagnostic visibility
+// (why is a Dispose refused?) rather than a mutation.
+func (s *Server) handleListOutstandingContextEffects(w http.ResponseWriter, r *http.Request) {
+	id, version := r.URL.Query().Get("id"), r.URL.Query().Get("version")
+	outstanding, err := s.Extensions.ListOutstandingContextEffects(r.Context(), id, version)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, contextEffectResponse{Error: err.Error()})
+		return
+	}
+	out := make([]contextEffectResponse, 0, len(outstanding))
+	for _, e := range outstanding {
+		out = append(out, toContextEffectResponse(e))
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleGetExtension(w http.ResponseWriter, r *http.Request) {

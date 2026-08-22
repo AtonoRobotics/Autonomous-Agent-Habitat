@@ -30,7 +30,7 @@ func TestMintAndVerifyCapabilityToken_RoundTrips(t *testing.T) {
 		t.Fatalf("expected a non-empty token")
 	}
 
-	id, ok, err := reg.VerifyCapabilityToken(ctx, token)
+	id, _, ok, err := reg.VerifyCapabilityToken(ctx, token)
 	if err != nil {
 		t.Fatalf("VerifyCapabilityToken: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestVerifyCapabilityToken_UnknownOrEmptyToken_IsNotOkNotError(t *testing.T)
 	reg := New(db)
 	ctx := context.Background()
 
-	id, ok, err := reg.VerifyCapabilityToken(ctx, "not-a-real-token")
+	id, _, ok, err := reg.VerifyCapabilityToken(ctx, "not-a-real-token")
 	if err != nil {
 		t.Fatalf("unknown token should not error: %v", err)
 	}
@@ -52,7 +52,7 @@ func TestVerifyCapabilityToken_UnknownOrEmptyToken_IsNotOkNotError(t *testing.T)
 		t.Fatalf("expected (\"\", false) for an unknown token, got (%q, %v)", id, ok)
 	}
 
-	id, ok, err = reg.VerifyCapabilityToken(ctx, "")
+	id, _, ok, err = reg.VerifyCapabilityToken(ctx, "")
 	if err != nil {
 		t.Fatalf("empty token should not error: %v", err)
 	}
@@ -79,10 +79,10 @@ func TestMintCapabilityToken_ReplacesThePreviousOneForTheSameIDVersion(t *testin
 		t.Fatalf("expected two distinct random tokens")
 	}
 
-	if _, ok, err := reg.VerifyCapabilityToken(ctx, first); err != nil || ok {
+	if _, _, ok, err := reg.VerifyCapabilityToken(ctx, first); err != nil || ok {
 		t.Fatalf("expected the first (replaced) token to no longer verify: ok=%v err=%v", ok, err)
 	}
-	id, ok, err := reg.VerifyCapabilityToken(ctx, second)
+	id, _, ok, err := reg.VerifyCapabilityToken(ctx, second)
 	if err != nil || !ok || id != "amh.test/widget" {
 		t.Fatalf("expected the second token to verify as amh.test/widget: id=%q ok=%v err=%v", id, ok, err)
 	}
@@ -102,7 +102,7 @@ func TestRevokeCapabilityToken_StopsItFromVerifying(t *testing.T) {
 		t.Fatalf("revoke: %v", err)
 	}
 
-	if _, ok, err := reg.VerifyCapabilityToken(ctx, token); err != nil || ok {
+	if _, _, ok, err := reg.VerifyCapabilityToken(ctx, token); err != nil || ok {
 		t.Fatalf("expected a revoked token to no longer verify: ok=%v err=%v", ok, err)
 	}
 }
@@ -132,8 +132,8 @@ func TestMintCapabilityToken_DistinctExtensionsGetDistinctTokens(t *testing.T) {
 		t.Fatalf("mint b: %v", err)
 	}
 
-	idA, okA, errA := reg.VerifyCapabilityToken(ctx, tokenA)
-	idB, okB, errB := reg.VerifyCapabilityToken(ctx, tokenB)
+	idA, _, okA, errA := reg.VerifyCapabilityToken(ctx, tokenA)
+	idB, _, okB, errB := reg.VerifyCapabilityToken(ctx, tokenB)
 	if errA != nil || errB != nil || !okA || !okB {
 		t.Fatalf("expected both tokens to verify: okA=%v errA=%v okB=%v errB=%v", okA, errA, okB, errB)
 	}

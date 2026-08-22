@@ -14,8 +14,8 @@ AMH is not a governance product, a security product, a physical-device stack, or
 
 1. **Small hard core, reversible extensions.** The core contains only invariants that every domain requires. Models, harness policies, tools, connectors, memory implementations, user surfaces, and domain behavior attach as replaceable extensions.
 2. **Python cognition, Go habitat daemon.** Python owns model-facing cognition. Go owns service supervision, extension hosting, local transport, resource isolation, and connector process I/O.
-3. **DBOS is the sole durable workflow engine in V1.** DBOS Transact uses SQLite on the single-node deployment. PostgreSQL is the scale path. Temporal is a documented migration alternative, not a configuration-equivalent fallback.
-4. **SQLite is authoritative persistent state.** DBOS workflow history, AMH records, extension registration, memory, knowledge, and evidence are stored or projected from SQLite. Neither an agent, NATS, nor an in-memory supervisor owns truth.
+3. **DBOS is the sole durable workflow engine.** DBOS Transact uses PostgreSQL as the sole, day-one authoritative store — not a smaller database staged for later replacement. Temporal is a documented migration alternative, not a configuration-equivalent fallback.
+4. **PostgreSQL is authoritative persistent state, from day one.** DBOS workflow history, AMH records, extension registration, memory, knowledge, and evidence are stored or projected from PostgreSQL. Neither an agent, NATS, nor an in-memory supervisor owns truth.
 5. **Context is a managed runtime resource.** Budgeting, offload, retrieval, compaction, cache discipline, and isolated subordinate contexts are first-class services.
 6. **Cordis spatiotemporal composition governs extension lifecycle.** Temporal composability tracks reversible software effects. Spatial composability declares provider/consumer dependencies and determines activation and teardown order. Cordis “spatial” is dependency composition, not physical geometry.
 7. **Reversibility is a policy property.** The core can evaluate declared, attested action properties through generic policy hooks. The extension that defines an action owns the meaning, verification, inverse, recovery, and domain policy for that action.
@@ -99,20 +99,20 @@ The daemon SHALL NOT independently advance, retry, or complete a DBOS workflow. 
 
 Cognition workers SHALL be replaceable. All state required to resume a durable run SHALL be reconstructible from durable records and scoped artifacts.
 
-### 3.3 DBOS and SQLite
+### 3.3 DBOS and PostgreSQL
 
-DBOS owns the durable workflow lifecycle. SQLite owns persisted truth.
+DBOS owns the durable workflow lifecycle. PostgreSQL owns persisted truth.
 
-The V1 system SHALL use:
+The system SHALL use:
 
 - DBOS queues/signals for durable workflow communication;
 - transactional inbox/outbox records for durable external delivery;
 - local gRPC for synchronous daemon/worker calls;
 - in-process channels only for disposable notification.
 
-NATS is not a V1 core dependency. A NATS/JetStream transport extension MAY be added when multi-process fan-out or multi-node topology justifies it.
+NATS is not a core dependency. A NATS/JetStream transport extension MAY be added when multi-process fan-out or multi-node topology justifies it.
 
-SQLite admission requires crash, power-loss, WAL recovery, disk-full, backup/restore, migration-with-pending-work, lock-contention, and Windows-service qualification. Failure of that qualification changes the V1 database to PostgreSQL; it does not permit weakening durability.
+PostgreSQL admission requires crash, power-loss, WAL recovery, disk-full, backup/restore, migration-with-pending-work, lock-contention, and Windows-service qualification. Failure of that qualification is a durability defect to fix, not license to weaken durability or fall back to a lesser store.
 
 Temporal is a migration target behind the AMH operation contract. Migrating requires workflow semantic compatibility tests and state migration; it is not a configuration swap.
 
@@ -346,33 +346,29 @@ The separate Physical AI extension owns:
 
 The extension uses AMH durable workflows, generic action envelope, policy hook, effect record, artifacts, memory projections, and extension lifecycle. The core never interprets a physical command.
 
-## 14. Deployment and roadmap
+## 14. Deployment
 
-### V0 — production foundation
+There is no staged rollout: every item below is day-one production scope, not a later phase.
 
 - Go daemon as Linux systemd and Windows Service;
 - Python cognition workers managed by `uv` and packaged per target OS;
 - DBOS/PostgreSQL durability qualification;
 - scoped artifact/VFS service and context budget manager;
-- one model provider and one MCP 2026-07-28 client;
+- provider routing and failover across model providers, and one MCP 2026-07-28 client;
 - extension resolver and reversible software effect journal;
 - generic policy hook;
 - OpenTelemetry tracing;
-- non-domain autonomous workflow surviving process and host restart.
-
-### V1 — autonomous habitat
-
+- non-domain autonomous workflow surviving process and host restart;
 - isolated subordinate-agent workflows with bounded concurrency;
 - five memory projections and hybrid retrieval;
 - coder agent and production sandbox;
 - MCP server and A2A 1.0 adapter;
-- provider routing and failover;
 - independent eval/canary/promotion/rollback;
 - connector and domain-extension SDKs;
 - signed extension packs and compatibility qualification;
 - backup/restore, upgrade/rollback, corruption recovery, resource exhaustion, and soak acceptance.
 
-Physical AI is a separately versioned extension. Its schedule does not redefine or block AMH core V1.
+Physical AI is a separate extension, designed, built, and released independently of the AMH core — not a later phase of it.
 
 ## 15. Acceptance invariants
 
@@ -400,7 +396,7 @@ The following earlier decisions are revoked and SHALL NOT be reintroduced:
 - generic core derivation or invocation of physical inverses;
 - LangGraph/DeepAgents checkpointer nested inside DBOS workflows;
 - DBOS-to-Temporal described as a configuration swap;
-- NATS as a mandatory V1 core dependency;
+- NATS as a mandatory core dependency;
 - private “A2A-derived” internal envelopes presented as A2A compatibility;
 - universal exactly-once claims for external effects.
 

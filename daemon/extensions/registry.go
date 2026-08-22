@@ -323,6 +323,19 @@ func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension,
 		return nil, fmt.Errorf("%w: %s@%s is %s, not quiescing (call Quiesce first)", ErrInvalidState, id, version, ext.Status)
 	}
 
+	// §15 acceptance invariant #3 / §5.1: an extension that registered a
+	// core-mediated effect (RegisterContextEffect) but never disposed it
+	// cannot be disposed itself — checked before teardown even starts, so
+	// a refused Dispose leaves the extension untouched (still quiescing),
+	// not half-torn-down.
+	outstanding, err := r.ListOutstandingContextEffects(ctx, id, version)
+	if err != nil {
+		return nil, err
+	}
+	if len(outstanding) > 0 {
+		return nil, fmt.Errorf("%w: %s@%s has %d outstanding (%+v)", ErrOutstandingContextEffects, id, version, len(outstanding), outstanding)
+	}
+
 	payload := map[string]string{"extension_id": id, "extension_version": version, "runtime_handle": ext.RuntimeHandle}
 	_, teardownErr := r.trackedLaunch(ctx, "extension_dispose", payload, func(ctx context.Context) (string, error) {
 		return ext.RuntimeHandle, r.l.teardown(ctx, id, version, ext.RuntimeHandle)

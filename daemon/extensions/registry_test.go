@@ -3,10 +3,13 @@ package extensions
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
@@ -340,6 +343,81 @@ func TestQuiesce_RefusesWhileActiveDependentExists(t *testing.T) {
 	reg.Dispose(ctx, "amh.test/consumer", "1.0.0")
 	if _, err := reg.Quiesce(ctx, "amh.test/producer", "1.0.0"); err != nil {
 		t.Fatalf("expected Quiesce to succeed once the dependent is disposed: %v", err)
+	}
+}
+
+func TestActivate_ProcessIsolation_RealProcessReceivesAWorkingCapabilityToken(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	dir := t.TempDir()
+	tokenFile := filepath.Join(dir, "token")
+	scriptFile := filepath.Join(dir, "echo-token.sh")
+	// launcher.go's IsolationProcess entrypoint parsing (strings.Fields)
+	// has no shell-quoting awareness, so a real script file — a single,
+	// space-free path as the entrypoint — is the reliable way to run
+	// more than one shell statement here. Must survive launch()'s 200ms
+	// "did it exit immediately" check, so write the real env var this
+	// process actually received, then sleep — "exec sleep" so the sleep
+	// process replaces this script's own process image rather than
+	// running as its child: teardown() below kills exactly the PID
+	// launch() recorded, and a plain (non-exec'd) "sleep 300" as a
+	// separate child process would survive that kill as an orphan still
+	// holding the stderr pipe open, hanging cmd.Wait() forever — the
+	// same reason the existing sleep-300-as-entrypoint test never wraps
+	// it in a shell at all.
+	script := "#!/bin/sh\nprintenv AMH_EXTENSION_TOKEN > " + tokenFile + "\nexec sleep 300\n"
+	if err := os.WriteFile(scriptFile, []byte(script), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+
+	m := baseManifest("amh.test/token-widget", "1.0.0")
+	m.Spec.Isolation = IsolationProcess
+	m.Spec.Entrypoint = scriptFile
+	if _, err := reg.Discover(ctx, m); err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+
+	active, err := reg.Activate(ctx, "amh.test/token-widget", "1.0.0")
+	if err != nil {
+		t.Fatalf("Activate: %v", err)
+	}
+	pid, err := parsePID(active.RuntimeHandle)
+	if err != nil {
+		t.Fatalf("parse runtime handle %q: %v", active.RuntimeHandle, err)
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+
+	var raw []byte
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		raw, err = os.ReadFile(tokenFile)
+		if err == nil && len(raw) > 0 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if len(raw) == 0 {
+		t.Fatalf("expected the real launched process to have written its AMH_EXTENSION_TOKEN env var to %s: %v", tokenFile, err)
+	}
+	token := strings.TrimSpace(string(raw))
+
+	id, ok, err := reg.VerifyCapabilityToken(ctx, token)
+	if err != nil {
+		t.Fatalf("VerifyCapabilityToken: %v", err)
+	}
+	if !ok || id != "amh.test/token-widget" {
+		t.Fatalf("expected the real process's own token to verify as amh.test/token-widget, got id=%q ok=%v", id, ok)
+	}
+
+	reg.Quiesce(ctx, "amh.test/token-widget", "1.0.0")
+	if _, err := reg.Dispose(ctx, "amh.test/token-widget", "1.0.0"); err != nil {
+		t.Fatalf("Dispose: %v", err)
+	}
+
+	if _, ok, err := reg.VerifyCapabilityToken(ctx, token); err != nil || ok {
+		t.Fatalf("expected the token to stop verifying after Dispose: ok=%v err=%v", ok, err)
 	}
 }
 

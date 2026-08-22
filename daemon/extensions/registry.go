@@ -243,11 +243,27 @@ func (r *Registry) Activate(ctx context.Context, id, version string) (*Extension
 
 	spec := Spec{Entrypoint: ext.Entrypoint, Isolation: ext.Isolation}
 	payload := map[string]string{"extension_id": id, "extension_version": version, "isolation": string(ext.Isolation)}
+
+	// in_process has no separate process to authenticate — it runs
+	// inside amh-daemon's own call stack, not as an HTTP caller of its
+	// own — so it mints no capability token at all (see capability.go
+	// and launcher.go's launch doc comment).
+	var token string
+	if ext.Isolation != IsolationInProcess {
+		var mintErr error
+		token, mintErr = mintCapabilityToken(ctx, r.DB, id, version)
+		if mintErr != nil {
+			_ = r.setStatus(ctx, id, version, StatusFailed, mintErr.Error())
+			return nil, fmt.Errorf("extensions: activate %s@%s: %w", id, version, mintErr)
+		}
+	}
+
 	runtimeHandle, err := r.trackedLaunch(ctx, "extension_activate", payload, func(ctx context.Context) (string, error) {
-		return r.l.launch(ctx, id, version, spec)
+		return r.l.launch(ctx, id, version, spec, token)
 	})
 	if err != nil {
 		_ = r.setStatus(ctx, id, version, StatusFailed, err.Error())
+		_ = revokeCapabilityToken(ctx, r.DB, id, version)
 		return nil, fmt.Errorf("extensions: activate %s@%s: %w", id, version, err)
 	}
 
@@ -308,11 +324,20 @@ func (r *Registry) Dispose(ctx context.Context, id, version string) (*Extension,
 	}
 
 	payload := map[string]string{"extension_id": id, "extension_version": version, "runtime_handle": ext.RuntimeHandle}
-	if _, err := r.trackedLaunch(ctx, "extension_dispose", payload, func(ctx context.Context) (string, error) {
+	_, teardownErr := r.trackedLaunch(ctx, "extension_dispose", payload, func(ctx context.Context) (string, error) {
 		return ext.RuntimeHandle, r.l.teardown(ctx, id, version, ext.RuntimeHandle)
-	}); err != nil {
-		_ = r.setStatus(ctx, id, version, StatusFailed, err.Error())
-		return nil, fmt.Errorf("extensions: dispose %s@%s: %w", id, version, err)
+	})
+	// Revoke unconditionally, even if teardown itself failed: the daemon's
+	// intent from calling Dispose at all is to stop trusting this
+	// instance, and leaving its capability token valid because the
+	// underlying process/container couldn't be killed cleanly would be a
+	// second, worse problem than a zombie process — fail closed on
+	// access, the same posture every other "did the mutation actually
+	// succeed" branch in this package already takes.
+	_ = revokeCapabilityToken(ctx, r.DB, id, version)
+	if teardownErr != nil {
+		_ = r.setStatus(ctx, id, version, StatusFailed, teardownErr.Error())
+		return nil, fmt.Errorf("extensions: dispose %s@%s: %w", id, version, teardownErr)
 	}
 
 	if _, err := r.DB.ExecContext(ctx, `

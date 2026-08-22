@@ -186,12 +186,22 @@ func (e *Engine) Propose(ctx context.Context, req ProposeRequest) (*Effect, erro
 	return e.Get(ctx, effectID)
 }
 
-// MarkDispatchPending consumes the admitting PolicyDecision (failing
-// closed if it's already consumed, expired, or digest-mismatched — see
-// daemon/policy.Consume) and, only once that succeeds, transitions the
-// effect to dispatch_pending: the caller's durable commitment to attempt
-// the actual external call next.
-func (e *Engine) MarkDispatchPending(ctx context.Context, effectID string) (*Effect, error) {
+// MarkDispatchPending consumes the admitting PolicyDecision, binding it
+// to dispatchPayload — the actual payload about to ship, hashed fresh
+// right here rather than re-reading the digest Propose stored — and,
+// only once that succeeds, transitions the effect to dispatch_pending:
+// the caller's durable commitment to attempt the actual external call
+// next. This is what makes §15 acceptance invariant #6 ("policy dispatch
+// is bound to the admitted action digest and fails closed after expiry
+// or mutation") a real, checkable property rather than an unenforced
+// intention: passing eff.ForwardDigest back to itself here would make
+// daemon/policy.Consume's digest check compare a stored value against
+// itself, so a payload mutated after admission could never be caught.
+// Fails closed (see daemon/policy.Consume) if the decision is already
+// consumed, expired, not admitted, or — the case this parameter exists
+// for — dispatchPayload's digest doesn't match what was actually
+// admitted.
+func (e *Engine) MarkDispatchPending(ctx context.Context, effectID string, dispatchPayload any) (*Effect, error) {
 	eff, err := e.Get(ctx, effectID)
 	if err != nil {
 		return nil, err
@@ -199,7 +209,11 @@ func (e *Engine) MarkDispatchPending(ctx context.Context, effectID string) (*Eff
 	if eff.State != StateAdmitted {
 		return nil, fmt.Errorf("%w: %s is %s, not admitted", ErrInvalidTransition, effectID, eff.State)
 	}
-	if err := e.Policy.Consume(ctx, eff.DecisionID, eff.ForwardDigest); err != nil {
+	digest, err := policy.Digest(dispatchPayload)
+	if err != nil {
+		return nil, fmt.Errorf("operations: digest dispatch payload: %w", err)
+	}
+	if err := e.Policy.Consume(ctx, eff.DecisionID, digest); err != nil {
 		return nil, fmt.Errorf("operations: consume decision for dispatch: %w", err)
 	}
 	if err := e.updateState(ctx, effectID, eff.RowVersion, `state = 'dispatch_pending'`); err != nil {

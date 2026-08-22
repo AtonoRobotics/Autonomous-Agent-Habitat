@@ -87,6 +87,20 @@ def list_open_goals(dsn: str) -> list[tuple[str, str]]:
     return [(row[0], row[1]) for row in rows]
 
 
+def list_canceled_goal_ids(dsn: str) -> list[str]:
+    """Every goal currently 'canceled' — read-only, ids only (no text
+    needed by the caller). workflows/dispatcher.py's
+    cancel_interrupted_goals_once polls this to find goals whose DBOS
+    workflow may still be running and needs to actually be told to stop —
+    see that function's doc comment for why repeatedly cancelling an
+    already-cancelled or already-finished workflow is harmless, so no
+    "already handled" bookkeeping is needed here either, mirroring
+    list_open_goals's own no-claim-step reasoning."""
+    with connect(dsn) as conn:
+        rows = conn.execute("SELECT id FROM goal WHERE status = 'canceled'").fetchall()
+    return [row[0] for row in rows]
+
+
 def create_task(dsn: str, goal_id: str, objective: str) -> str:
     task_id = str(uuid.uuid4())
     with connect(dsn) as conn:

@@ -3,6 +3,7 @@ package extensions
 import (
 	"context"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 	"sync"
@@ -14,11 +15,19 @@ import (
 // the docker CLI directly — Registry never does.
 type launcher struct {
 	mu        sync.Mutex
-	processes map[string]*exec.Cmd // runtime key -> live process, isolation=process only
+	processes map[string]*runningProcess // runtime key -> live process, isolation=process only
+}
+
+// runningProcess pairs a started *exec.Cmd with the one and only channel
+// its Wait() result is ever delivered to — see launch()'s doc comment on
+// why exactly one goroutine may ever call cmd.Wait().
+type runningProcess struct {
+	cmd  *exec.Cmd
+	done chan error
 }
 
 func newLauncher() *launcher {
-	return &launcher{processes: make(map[string]*exec.Cmd)}
+	return &launcher{processes: make(map[string]*runningProcess)}
 }
 
 // runtimeKey identifies one launched instance for later teardown.
@@ -30,8 +39,15 @@ func runtimeKey(id, version string) string {
 // runtime handle recorded on the extension row (PID for process, container
 // ID for container, a fixed marker for in_process). wasm has no runtime in
 // this environment — Activate refuses it explicitly rather than pretending
-// to launch it (see Registry.Activate).
-func (l *launcher) launch(ctx context.Context, id, version string, spec Spec) (string, error) {
+// to launch it (see Registry.Activate). token is this instance's freshly
+// minted capability token (see capability.go) — injected as
+// AMH_EXTENSION_TOKEN into the launched process/container's environment
+// for process/container isolation, where it can present that token back
+// to daemon/operations' HTTP routes to prove which extension it is (§15
+// acceptance invariant #5). in_process has no separate process to inject
+// into (it runs inside amh-daemon's own call stack) and mints no token at
+// all — see Registry.Activate.
+func (l *launcher) launch(ctx context.Context, id, version string, spec Spec, token string) (string, error) {
 	switch spec.Isolation {
 	case IsolationInProcess:
 		return "in_process:" + runtimeKey(id, version), nil
@@ -49,12 +65,18 @@ func (l *launcher) launch(ctx context.Context, id, version string, spec Spec) (s
 		// actual long-lived instance. teardown() (via Registry.Dispose)
 		// is this process's only intended termination path.
 		cmd := exec.Command(fields[0], fields[1:]...)
+		cmd.Env = append(os.Environ(), "AMH_EXTENSION_TOKEN="+token)
 		var stderr strings.Builder
 		cmd.Stderr = &stderr
 		if err := cmd.Start(); err != nil {
 			return "", fmt.Errorf("extensions: start process entrypoint %q: %w", spec.Entrypoint, err)
 		}
 
+		// Exactly one goroutine ever calls cmd.Wait() for this process,
+		// for its entire lifetime — Go's os/exec explicitly forbids
+		// concurrent or repeated Wait() calls on the same Cmd (it hangs,
+		// not merely errors). teardown() below consumes this same `done`
+		// channel rather than calling cmd.Wait() itself a second time.
 		done := make(chan error, 1)
 		go func() { done <- cmd.Wait() }()
 
@@ -70,15 +92,14 @@ func (l *launcher) launch(ctx context.Context, id, version string, spec Spec) (s
 			return "", fmt.Errorf("extensions: process %q exited immediately with status 0 instead of staying up", spec.Entrypoint)
 		case <-time.After(200 * time.Millisecond):
 			l.mu.Lock()
-			l.processes[runtimeKey(id, version)] = cmd
+			l.processes[runtimeKey(id, version)] = &runningProcess{cmd: cmd, done: done}
 			l.mu.Unlock()
-			go func() { <-done }() // finish reaping once torn down
 			return fmt.Sprintf("pid:%d", cmd.Process.Pid), nil
 		}
 
 	case IsolationContainer:
 		name := "amh-ext-" + sanitizeContainerName(runtimeKey(id, version))
-		out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--name", name, spec.Entrypoint).CombinedOutput()
+		out, err := exec.CommandContext(ctx, "docker", "run", "-d", "--name", name, "-e", "AMH_EXTENSION_TOKEN="+token, spec.Entrypoint).CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("extensions: docker run %q: %w: %s", spec.Entrypoint, err, strings.TrimSpace(string(out)))
 		}
@@ -105,14 +126,17 @@ func (l *launcher) teardown(ctx context.Context, id, version, runtimeHandle stri
 	case strings.HasPrefix(runtimeHandle, "pid:"):
 		key := runtimeKey(id, version)
 		l.mu.Lock()
-		cmd, ok := l.processes[key]
+		rp, ok := l.processes[key]
 		delete(l.processes, key)
 		l.mu.Unlock()
-		if ok && cmd.Process != nil {
-			if err := cmd.Process.Kill(); err != nil && !strings.Contains(err.Error(), "process already finished") {
+		if ok && rp.cmd.Process != nil {
+			if err := rp.cmd.Process.Kill(); err != nil && !strings.Contains(err.Error(), "process already finished") {
 				return fmt.Errorf("extensions: kill process %s: %w", runtimeHandle, err)
 			}
-			cmd.Wait()
+			// Reap via the one goroutine launch() already started to
+			// call cmd.Wait() — not a second, concurrent Wait() call of
+			// our own (see runningProcess's doc comment).
+			<-rp.done
 			return nil
 		}
 		return fmt.Errorf("extensions: no live process handle for %s (runtime_handle=%s) — likely a daemon restart; process may need manual cleanup", key, runtimeHandle)

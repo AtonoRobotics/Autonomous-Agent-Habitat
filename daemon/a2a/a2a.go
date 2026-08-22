@@ -373,11 +373,18 @@ func taskStateToGoalState(s TaskState) string {
 	}
 }
 
-// CancelTask marks a non-terminal goal canceled. See the package doc
-// comment: for a goal already 'active', this updates only the AMH-side
-// record — there is no hook from Go into DBOS's own workflow-cancellation
-// API, so an in-flight pursue_goal run is not actually interrupted by
-// this call today.
+// CancelTask marks a non-terminal goal canceled. This call itself is
+// still Go-side bookkeeping only — there remains no direct hook from Go
+// into DBOS's own workflow-cancellation API, since Go and the Python
+// cognition layer are separate processes with no synchronous call path
+// between them. But this row flip is no longer cosmetic for a goal
+// already 'active': agents/workflows/dispatcher.py's
+// cancel_interrupted_goals_once polls for exactly this state on its
+// existing interval and calls DBOS.cancel_workflow(...,
+// cancel_children=True) for real, so an in-flight pursue_goal run (and
+// its already-started run_subagent children) does get genuinely stopped
+// — asynchronously, within one dispatcher poll interval, not
+// synchronously within this HTTP call.
 func (s *Store) CancelTask(ctx context.Context, id string) (*Task, error) {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {

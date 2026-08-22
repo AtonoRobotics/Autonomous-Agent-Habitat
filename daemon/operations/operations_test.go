@@ -15,13 +15,21 @@ func testEngine(t *testing.T) *Engine {
 	return New(db, policy.New(db))
 }
 
+// dispatchPayloadFor is the exact payload proposeVerified admits under
+// operationID — MarkDispatchPending now hashes whatever payload it's
+// given fresh (§15 invariant #6), so a test that means to walk the real
+// happy path must pass back the same payload that was admitted.
+func dispatchPayloadFor(operationID string) any {
+	return map[string]any{"op": operationID}
+}
+
 func proposeVerified(t *testing.T, e *Engine, operationID string) *Effect {
 	t.Helper()
 	eff, err := e.Propose(context.Background(), ProposeRequest{
 		OperationID:      operationID,
 		OwnerExtensionID: "amh.test/widget",
 		EffectType:       "amh.test/do-thing",
-		Payload:          map[string]any{"op": operationID},
+		Payload:          dispatchPayloadFor(operationID),
 		Reversibility:    policy.ReversibilityVerified,
 	})
 	if err != nil {
@@ -62,7 +70,7 @@ func TestFullHappyPath_ProposeDispatchObserveConfirm(t *testing.T) {
 	e := testEngine(t)
 	eff := proposeVerified(t, e, "op-1")
 
-	eff, err := e.MarkDispatchPending(context.Background(), eff.EffectID)
+	eff, err := e.MarkDispatchPending(context.Background(), eff.EffectID, dispatchPayloadFor("op-1"))
 	if err != nil {
 		t.Fatalf("MarkDispatchPending: %v", err)
 	}
@@ -113,8 +121,44 @@ func TestMarkDispatchPending_RequiresAdmitted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
-	if _, err := e.MarkDispatchPending(context.Background(), eff.EffectID); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := e.MarkDispatchPending(context.Background(), eff.EffectID, map[string]any{}); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition for a needs_approval effect, got %v", err)
+	}
+}
+
+// TestMarkDispatchPending_PayloadMutatedAfterAdmission_FailsClosed is the
+// direct proof of §15 acceptance invariant #6 ("policy dispatch is bound
+// to the admitted action digest ... after ... mutation"): an effect
+// admitted for one payload must not be dispatchable under a different
+// one, and the failure must be the real digest-mismatch check — not a
+// pass-through that always agrees with itself.
+func TestMarkDispatchPending_PayloadMutatedAfterAdmission_FailsClosed(t *testing.T) {
+	e := testEngine(t)
+	eff := proposeVerified(t, e, "op-1")
+
+	mutated := map[string]any{"op": "op-1", "amount": 1_000_000}
+	if _, err := e.MarkDispatchPending(context.Background(), eff.EffectID, mutated); !errors.Is(err, policy.ErrDigestMismatch) {
+		t.Fatalf("expected ErrDigestMismatch for a payload that differs from the admitted one, got %v", err)
+	}
+
+	// Fails closed, not merely "returns an error": the effect must stay
+	// admitted, not silently advance to dispatch_pending.
+	got, err := e.Get(context.Background(), eff.EffectID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.State != StateAdmitted {
+		t.Fatalf("expected the effect to remain admitted after a digest mismatch, got %s", got.State)
+	}
+
+	// The original, correct payload still dispatches — a mismatch on one
+	// attempt must not have poisoned or consumed the decision.
+	dispatched, err := e.MarkDispatchPending(context.Background(), eff.EffectID, dispatchPayloadFor("op-1"))
+	if err != nil {
+		t.Fatalf("MarkDispatchPending with the real payload: %v", err)
+	}
+	if dispatched.State != StateDispatchPending {
+		t.Fatalf("expected dispatch_pending, got %s", dispatched.State)
 	}
 }
 
@@ -146,7 +190,7 @@ func TestReconcileInterrupted_MarksStuckDispatchedEffects(t *testing.T) {
 	e := testEngine(t)
 
 	stuck := proposeVerified(t, e, "op-stuck")
-	stuck, err := e.MarkDispatchPending(context.Background(), stuck.EffectID)
+	stuck, err := e.MarkDispatchPending(context.Background(), stuck.EffectID, dispatchPayloadFor("op-stuck"))
 	if err != nil {
 		t.Fatalf("MarkDispatchPending: %v", err)
 	}
@@ -187,7 +231,7 @@ func TestReconcileInterrupted_MarksStuckDispatchedEffects(t *testing.T) {
 func TestReconcileInterrupted_ThenResolve_ReachesReconciled(t *testing.T) {
 	e := testEngine(t)
 	eff := proposeVerified(t, e, "op-1")
-	eff, err := e.MarkDispatchPending(context.Background(), eff.EffectID)
+	eff, err := e.MarkDispatchPending(context.Background(), eff.EffectID, dispatchPayloadFor("op-1"))
 	if err != nil {
 		t.Fatalf("MarkDispatchPending: %v", err)
 	}

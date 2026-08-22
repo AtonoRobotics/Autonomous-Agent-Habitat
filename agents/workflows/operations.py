@@ -101,10 +101,16 @@ def propose(
         return _post(url, agent_token, body)
 
 
-def mark_dispatch_pending(daemon_api_base_url: str, agent_token: str, effect_id: str) -> dict:
+def mark_dispatch_pending(daemon_api_base_url: str, agent_token: str, effect_id: str, payload: dict) -> dict:
+    """payload must be the exact payload about to be dispatched — the
+    daemon hashes it fresh and binds dispatch to that digest (§15
+    acceptance invariant #6: "policy dispatch is bound to the admitted
+    action digest and fails closed after expiry or mutation"). Passing
+    anything other than the payload propose() actually admitted raises
+    OperationsError (the daemon returns 409)."""
     url = f"{daemon_api_base_url}/v1/operations/{effect_id}/dispatch-pending"
     with tool_call_span("operations:dispatch_pending", **{"amh.api.url": url}):
-        return _post(url, agent_token, {})
+        return _post(url, agent_token, {"payload": payload})
 
 
 def mark_dispatched(daemon_api_base_url: str, agent_token: str, effect_id: str, external_command_id: str = "") -> dict:

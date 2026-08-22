@@ -17,6 +17,7 @@
 package authn
 
 import (
+	"context"
 	"crypto/subtle"
 	"errors"
 	"net/http"
@@ -109,7 +110,16 @@ func allows(role Role, allowed []Role) bool {
 // header or an unrecognized token, 403 for a recognized token whose role
 // isn't permitted here (e.g. an agent token hitting an operator-only
 // route) — distinguishing "who are you" from "you can't do that" per
-// normal HTTP semantics.
+// normal HTTP semantics. The authenticated role is also stashed on the
+// request context (see RoleFromContext) — a small, additive capability
+// still within this package's two-role scope, not a step toward a
+// broader identity system: it lets a downstream handler answer "is this
+// specifically an operator," the same question RequireRole itself
+// already answers for whole routes, for a narrower per-resource check a
+// route-level allow-list can't express (see daemon/api/operations.go's
+// authorizeEffectOwner, which uses it to let an operator override a
+// per-extension ownership check the same way operators already override
+// every other agent-vs-operator distinction in this codebase).
 func (a *Authenticator) RequireRole(next http.HandlerFunc, allowed ...Role) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		token, err := bearerToken(r)
@@ -126,6 +136,19 @@ func (a *Authenticator) RequireRole(next http.HandlerFunc, allowed ...Role) http
 			http.Error(w, ErrRoleNotAllowed.Error(), http.StatusForbidden)
 			return
 		}
-		next.ServeHTTP(w, r)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), roleContextKey{}, role)))
 	}
+}
+
+// roleContextKey is unexported so only this package can set the value
+// RoleFromContext reads — a caller can't spoof it by setting a same-named
+// key of their own type.
+type roleContextKey struct{}
+
+// RoleFromContext returns the role RequireRole authenticated this
+// request as, if the request went through RequireRole at all (false
+// otherwise — e.g. called outside any handler RequireRole wrapped).
+func RoleFromContext(ctx context.Context) (Role, bool) {
+	role, ok := ctx.Value(roleContextKey{}).(Role)
+	return role, ok
 }

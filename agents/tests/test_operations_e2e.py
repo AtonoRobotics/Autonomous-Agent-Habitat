@@ -48,7 +48,7 @@ def test_full_happy_path_admitted_through_confirmed(daemon):
     eff = propose(daemon.base_url, daemon.agent_token, "op-2", "amh.core/test", "test_effect", {"x": 1}, "verified")
     effect_id = eff["effect_id"]
 
-    pending = mark_dispatch_pending(daemon.base_url, daemon.agent_token, effect_id)
+    pending = mark_dispatch_pending(daemon.base_url, daemon.agent_token, effect_id, {"x": 1})
     assert pending["state"] == "dispatch_pending"
 
     dispatched = mark_dispatched(daemon.base_url, daemon.agent_token, effect_id, external_command_id="cmd-1")
@@ -66,7 +66,7 @@ def test_full_happy_path_admitted_through_confirmed(daemon):
 def test_resolve_failed_carries_the_caller_supplied_error(daemon):
     eff = propose(daemon.base_url, daemon.agent_token, "op-3", "amh.core/test", "test_effect", {"x": 1}, "verified")
     effect_id = eff["effect_id"]
-    mark_dispatch_pending(daemon.base_url, daemon.agent_token, effect_id)
+    mark_dispatch_pending(daemon.base_url, daemon.agent_token, effect_id, {"x": 1})
     mark_dispatched(daemon.base_url, daemon.agent_token, effect_id)
     mark_observed(daemon.base_url, daemon.agent_token, effect_id)
 
@@ -81,7 +81,25 @@ def test_invalid_transition_raises_operations_error(daemon):
     eff = propose(daemon.base_url, daemon.agent_token, "op-4", "amh.core/test", "test_effect", {"x": 1}, "none")
     with pytest.raises(OperationsError):
         # needs_approval -> dispatch_pending requires admitted first.
-        mark_dispatch_pending(daemon.base_url, daemon.agent_token, eff["effect_id"])
+        mark_dispatch_pending(daemon.base_url, daemon.agent_token, eff["effect_id"], {"x": 1})
+
+
+def test_mark_dispatch_pending_with_mutated_payload_fails_closed(daemon):
+    """§15 acceptance invariant #6: dispatch is bound to the digest of
+    the payload actually admitted — a caller presenting a different
+    payload at dispatch time must be rejected, not silently waved
+    through, and the effect must stay admitted rather than advance."""
+    eff = propose(daemon.base_url, daemon.agent_token, "op-6", "amh.core/test", "test_effect", {"x": 1}, "verified")
+    effect_id = eff["effect_id"]
+
+    with pytest.raises(OperationsError):
+        mark_dispatch_pending(daemon.base_url, daemon.agent_token, effect_id, {"x": 999})
+
+    fetched = get_effect(daemon.base_url, daemon.agent_token, effect_id)
+    assert fetched["state"] == "admitted"
+
+    pending = mark_dispatch_pending(daemon.base_url, daemon.agent_token, effect_id, {"x": 1})
+    assert pending["state"] == "dispatch_pending"
 
 
 def test_list_effects_by_operation_round_trips(daemon):

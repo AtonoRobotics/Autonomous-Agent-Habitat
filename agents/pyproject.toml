@@ -29,7 +29,7 @@ dev = [
 [tool.setuptools]
 # Flat layout: each subsystem is its own top-level importable package,
 # matching the monorepo layout in docs/AMH-SPECIFICATION.md Artifact A.
-packages = ["harness", "coder", "context", "memory", "kb", "selfimprove", "selfimprove.selfimprovepb", "workflows", "workflows.policypb", "workflows.operationspb"]
+packages = ["harness", "coder", "context", "context.inferencepb", "memory", "kb", "selfimprove", "selfimprove.selfimprovepb", "workflows", "workflows.policypb", "workflows.operationspb"]
 
 [build-system]
 requires = ["setuptools>=68"]

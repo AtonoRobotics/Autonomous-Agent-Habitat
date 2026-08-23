@@ -9,9 +9,11 @@ import (
 
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/inferencepb"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/operationspb"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/policypb"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/selfimprovepb"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/selfimprove"
@@ -20,26 +22,29 @@ import (
 // Server is the gRPC counterpart of daemon/api.Server — one more
 // supervised child of amh-daemon, alongside the HTTP api server it runs
 // next to (see this package's doc comment for the split). Phase 1 wired
-// PolicyService; Phase 2 added OperationsService; Phase 3 adds
-// SelfImproveService (read-only — see selfimprove.proto) to the same
-// *grpc.Server; Phase 4 adds inference as it migrates.
+// PolicyService; Phase 2 added OperationsService; Phase 3 added
+// SelfImproveService (read-only — see selfimprove.proto); Phase 4 (final)
+// adds InferenceService to the same *grpc.Server. Inference is nil-safe
+// (may be nil when AMH_CREDENTIAL_KEY is unset) the same soft-disable
+// posture api.Server.Inference already has.
 type Server struct {
 	Addr        string
 	Policy      *policy.Engine
 	Operations  *operations.Engine
 	Extensions  *extensions.Registry
 	SelfImprove *selfimprove.Engine
+	Inference   *inference.Router
 	Auth        *authn.Authenticator
 	Log         *slog.Logger
 
 	srv *grpc.Server
 }
 
-func New(addr string, pol *policy.Engine, ops *operations.Engine, ext *extensions.Registry, si *selfimprove.Engine, auth *authn.Authenticator, log *slog.Logger) *Server {
+func New(addr string, pol *policy.Engine, ops *operations.Engine, ext *extensions.Registry, si *selfimprove.Engine, inf *inference.Router, auth *authn.Authenticator, log *slog.Logger) *Server {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Server{Addr: addr, Policy: pol, Operations: ops, Extensions: ext, SelfImprove: si, Auth: auth, Log: log}
+	return &Server{Addr: addr, Policy: pol, Operations: ops, Extensions: ext, SelfImprove: si, Inference: inf, Auth: auth, Log: log}
 }
 
 func mergeRoles(maps ...requiredRoles) requiredRoles {
@@ -56,11 +61,12 @@ func mergeRoles(maps ...requiredRoles) requiredRoles {
 // supervisor.Child.Run's signature — see daemon/api.Server.Run, which
 // this mirrors for the HTTP/2-based transport instead of HTTP/1.1+JSON.
 func (s *Server) Run(ctx context.Context) error {
-	roles := mergeRoles(policyRoles(), operationsRoles(), selfimproveRoles())
+	roles := mergeRoles(policyRoles(), operationsRoles(), selfimproveRoles(), inferenceRoles())
 	grpcSrv := grpc.NewServer(grpc.UnaryInterceptor(authInterceptor(s.Auth, roles)))
 	policypb.RegisterPolicyServiceServer(grpcSrv, &policyServer{Policy: s.Policy})
 	operationspb.RegisterOperationsServiceServer(grpcSrv, &operationsServer{Operations: s.Operations, Extensions: s.Extensions})
 	selfimprovepb.RegisterSelfImproveServiceServer(grpcSrv, &selfimproveServer{SelfImprove: s.SelfImprove})
+	inferencepb.RegisterInferenceServiceServer(grpcSrv, &inferenceServer{Inference: s.Inference})
 	s.srv = grpcSrv
 
 	lis, err := net.Listen("tcp", s.Addr)

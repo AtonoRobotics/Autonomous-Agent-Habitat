@@ -1,0 +1,83 @@
+// InferenceService — daemon/inference's model-provider seam
+// (docs/AMH-SPECIFICATION.md §2.1), over gRPC instead of HTTP+JSON.
+//
+// Phase 4 (final phase) of the gRPC migration (see contracts/proto/
+// policy.proto's header comment for the migration's overall scope/
+// rationale). Deliberately last: this is the hottest, highest-volume call
+// path in the whole daemon (every model completion, token count, and
+// embedding call an agent makes) and the one with the largest blast
+// radius if something regresses — every other internal service moved
+// first so this final cutover has the least amount still changing under
+// it. Migrates exactly the three routes daemon/api/controlplane.go's own
+// "Inference (the model-provider seam)" section documents as the
+// AMH-native wire shape (/v1/inference/complete, /v1/inference/count-tokens,
+// /v1/inference/embed) — NOT the separate /v1/openai/chat/completions and
+// /v1/openai/embeddings facade routes, which exist specifically so an
+// external service that only speaks the OpenAI HTTP wire format (e.g.
+// Hindsight's HINDSIGHT_API_LLM_BASE_URL) can be pointed at this daemon
+// without writing an AMH-specific client; those have an inherently
+// external caller and stay on daemon/api's HTTP surface exactly like
+// every other browser/external-protocol route this migration has left
+// alone (control-plane UI, A2A/MCP, accounts/computers/extensions).
+syntax = "proto3";
+
+package amh.inference.v1;
+
+option go_package = "github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/inferencepb";
+
+service InferenceService {
+  // Complete — mirrors POST /v1/inference/complete.
+  rpc Complete(CompleteRequest) returns (CompleteResponse);
+
+  // CountTokens — mirrors POST /v1/inference/count-tokens. Only
+  // implemented daemon-side for the anthropic provider kind.
+  rpc CountTokens(CompleteRequest) returns (CountTokensResponse);
+
+  // Embed — mirrors POST /v1/inference/embed. Only implemented
+  // daemon-side for the openai_compatible provider kind.
+  rpc Embed(EmbedRequest) returns (EmbedResponse);
+}
+
+message Message {
+  string role = 1;
+  string content = 2;
+}
+
+// CompleteRequest doubles as CountTokens' request (max_tokens is simply
+// ignored there) — the same reuse daemon/api/controlplane.go's HTTP
+// handlers already make (handleInferenceCountTokens decodes the same
+// inferenceCompleteRequest handleInferenceComplete does).
+message CompleteRequest {
+  string provider = 1;
+  repeated string providers = 2;
+  string model = 3;
+  string system = 4;
+  repeated Message messages = 5;
+  int32 max_tokens = 6;
+}
+
+message CompleteResponse {
+  string text = 1;
+  int32 input_tokens = 2;
+  int32 output_tokens = 3;
+}
+
+message CountTokensResponse {
+  int32 input_tokens = 1;
+}
+
+message EmbedRequest {
+  string provider = 1;
+  repeated string providers = 2;
+  string model = 3;
+  repeated string input = 4;
+}
+
+message EmbedFloatVector {
+  repeated float values = 1;
+}
+
+message EmbedResponse {
+  repeated EmbedFloatVector embeddings = 1;
+  int32 dimension = 2;
+}

@@ -26,12 +26,12 @@ Every MCP tool call is proposed as an external effect through
 workflows/operations.py (daemon/operations — §4) before it runs, over
 gRPC (Phase 2 of the gRPC migration — workflows/operations.py's module
 doc comment) via a daemon_grpc_addr threaded through run_agentic_loop's
-own signature, alongside model_client's daemon_api_base_url/agent_token
-for the (still HTTP, Phase 4) inference calls. This is deliberately
-track-only, not enforcing: see _propose_mcp_effect's doc comment for why
-the loop never waits for or acts on the resulting decision, and
-workflows/operations.py's module doc comment for why these calls aren't
-@DBOS.step()-wrapped here.
+own signature — the same daemon_grpc_addr model_client itself now uses
+for its (also gRPC, Phase 4) inference calls, since both moved off HTTP.
+This is deliberately track-only, not enforcing: see _propose_mcp_effect's
+doc comment for why the loop never waits for or acts on the resulting
+decision, and workflows/operations.py's module doc comment for why these
+calls aren't @DBOS.step()-wrapped here.
 
 Physical actuation (workflows/actuate.py) is deliberately still not a
 loop tool — that needs a policy decision about which tools an isolated

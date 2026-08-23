@@ -8,16 +8,16 @@ own key.
 
 Graphiti's own concrete clients (OpenAIClient, AnthropicClient, ...) all
 speak their provider's native wire format directly via that provider's
-SDK. The daemon's /v1/inference/complete route is not that wire format —
+SDK. The daemon's InferenceService.Complete RPC is not that wire format —
 it is AMH's own {provider, providers, model, system, messages, max_tokens}
 -> {text} shape (see context/llm.py's docstring). So Graphiti is pointed
 at the daemon by implementing its client interfaces directly against
 ModelClient.complete()/.embed(), not by attempting base_url compatibility
 with an OpenAI-shaped client.
 
-ModelClient's HTTP calls are synchronous (urllib), while Graphiti's
-client interfaces are async — bridged here with asyncio.to_thread rather
-than introducing a second, async HTTP stack for the same daemon route.
+ModelClient's gRPC calls are synchronous, while Graphiti's client
+interfaces are async — bridged here with asyncio.to_thread rather than
+introducing a second, async gRPC stack for the same daemon route.
 """
 
 from __future__ import annotations
@@ -84,7 +84,7 @@ class DaemonGraphitiLLMClient(LLMClient):
         model_client = self._model_client
         if requested_model != model_client.model:
             model_client = ModelClient(
-                daemon_api_base_url=model_client.daemon_api_base_url,
+                daemon_grpc_addr=model_client.daemon_grpc_addr,
                 agent_token=model_client.agent_token,
                 model=requested_model,
                 provider=model_client.provider,

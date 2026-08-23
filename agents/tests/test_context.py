@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from concurrent import futures
 
+import grpc
 import pytest
 
 from context.budget import BudgetManager, Turn
 from context.compactor import Checkpoint, Compactor, extractive_summarize, llm_summarize
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 from context.llm import ModelClient
 
 
@@ -164,37 +165,29 @@ def test_compaction_is_idempotent_shape_across_repeated_runs():
     assert len(budget.turns) == 4
 
 
-class _FakeDaemon(BaseHTTPRequestHandler):
+class _FakeInferenceService(inference_pb2_grpc.InferenceServiceServicer):
     """Stands in for the daemon's inference seam, same pattern as
-    test_llm.py's fixture — a real HTTP server, not a mocked ModelClient,
+    test_llm.py's fixture — a real grpc.Server, not a mocked ModelClient,
     so llm_summarize is verified against the real request/response cycle
     it will actually run in production."""
 
-    response_body = b"{}"
+    complete_response = inference_pb2.CompleteResponse()
 
-    def log_message(self, format, *args):
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(type(self).response_body)
+    def Complete(self, request, context):
+        return type(self).complete_response
 
 
 @pytest.fixture()
 def fake_daemon():
-    server = HTTPServer(("127.0.0.1", 0), _FakeDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    _FakeDaemon.response_body = b"{}"
+    _FakeInferenceService.complete_response = inference_pb2.CompleteResponse()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(_FakeInferenceService(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield f"127.0.0.1:{port}"
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 def test_llm_summarize_parses_the_models_structured_checkpoint_json(fake_daemon):
@@ -213,8 +206,8 @@ def test_llm_summarize_parses_the_models_structured_checkpoint_json(fake_daemon)
         "active_plan": "water zone A then zone B",
         "artifact_references": ["/workspace/notes/plan.md"],
     }
-    _FakeDaemon.response_body = json.dumps({"text": json.dumps(model_response)}).encode()
-    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5", provider="anthropic")
+    _FakeInferenceService.complete_response = inference_pb2.CompleteResponse(text=json.dumps(model_response))
+    client = ModelClient(daemon_grpc_addr=fake_daemon, agent_token="tok", model="claude-sonnet-5", provider="anthropic")
     turns = [Turn(role="user", content="watered zone A", tokens=1)]
 
     checkpoint = llm_summarize(client)(turns, "water the greenhouse plants")
@@ -226,8 +219,8 @@ def test_llm_summarize_raises_on_non_json_response(fake_daemon):
     """Same fail-honest posture as decompose_goal: a malformed model
     response is a real error, never silently swapped for an empty or
     fabricated Checkpoint."""
-    _FakeDaemon.response_body = json.dumps({"text": "not json at all"}).encode()
-    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5", provider="anthropic")
+    _FakeInferenceService.complete_response = inference_pb2.CompleteResponse(text="not json at all")
+    client = ModelClient(daemon_grpc_addr=fake_daemon, agent_token="tok", model="claude-sonnet-5", provider="anthropic")
     turns = [Turn(role="user", content="hello", tokens=1)]
 
     with pytest.raises(ValueError, match="not valid JSON"):

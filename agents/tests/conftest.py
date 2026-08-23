@@ -201,11 +201,15 @@ def register_model_provider_account(daemon, model_server_url: str, provider: str
 @pytest.fixture()
 def fake_model_server(daemon, monkeypatch):
     """Starts the fake model HTTP server, registers it as a real
-    "test-fake" provider account on the real running daemon, and points
-    ADAPTER_MODEL/ADAPTER_PROVIDER at it — the only things workflows.goal's
-    from_env() reads from this process's own environment now;
-    daemon_api_base_url/agent_token flow explicitly through the workflow
-    call graph instead (see workflows/goal.py)."""
+    "test-fake" provider account on the real running daemon (over the
+    daemon's still-HTTP accounts/credentials admin routes — see
+    register_model_provider_account), and points ADAPTER_MODEL/
+    ADAPTER_PROVIDER at it — the only things workflows.goal's from_env()
+    reads from this process's own environment now; daemon_grpc_addr/
+    agent_token flow explicitly through the workflow call graph instead
+    (see workflows/goal.py), and are used by from_env() to reach the
+    daemon's gRPC InferenceService, not this fixture's own HTTP server
+    directly."""
     port = _find_free_port()
     server = ThreadingHTTPServer(("127.0.0.1", port), _FakeModelHandler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)

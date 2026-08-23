@@ -120,14 +120,14 @@ def capturing_model_server(daemon, monkeypatch):
 
 def test_decompose_goal_uses_the_real_promoted_prompt_not_the_hardcoded_default(daemon, db_path, capturing_model_server):
     """The actual live-capability-switch proof: a real promoted
-    CandidateVersion changes what decompose_goal's real HTTP call to the
+    CandidateVersion changes what decompose_goal's real gRPC call to the
     daemon's inference seam actually sends — not just durable
     bookkeeping nobody reads."""
     from workflows.goal import decompose_goal
 
     _promote_prompt_candidate(daemon, "PROMOTED SYSTEM PROMPT — respond with a JSON array of one task.")
 
-    decompose_goal("goal-1", "do the thing", db_path, daemon.base_url, daemon.grpc_addr, daemon.agent_token)
+    decompose_goal("goal-1", "do the thing", db_path, daemon.grpc_addr, daemon.agent_token)
 
     assert _CapturingModelHandler.captured_system == "PROMOTED SYSTEM PROMPT — respond with a JSON array of one task."
 
@@ -135,6 +135,6 @@ def test_decompose_goal_uses_the_real_promoted_prompt_not_the_hardcoded_default(
 def test_decompose_goal_falls_back_to_the_hardcoded_default_when_nothing_promoted(daemon, db_path, capturing_model_server):
     from workflows.goal import _DECOMPOSE_SYSTEM_PROMPT, decompose_goal
 
-    decompose_goal("goal-2", "do another thing", db_path, daemon.base_url, daemon.grpc_addr, daemon.agent_token)
+    decompose_goal("goal-2", "do another thing", db_path, daemon.grpc_addr, daemon.agent_token)
 
     assert _CapturingModelHandler.captured_system == _DECOMPOSE_SYSTEM_PROMPT

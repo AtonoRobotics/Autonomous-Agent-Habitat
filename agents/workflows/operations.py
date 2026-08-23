@@ -6,12 +6,12 @@ for Phase 1 and contracts/proto/operations.proto's header comment for this
 phase's scope/rationale): this module used to be an HTTP+JSON client of
 daemon/api's /v1/operations/* routes. Its one real production call site
 (harness/agentic_loop.py's MCP tool-call tracking, called from
-workflows/goal.py's do_subagent_work) now needs a daemon_grpc_addr
-alongside the daemon_api_base_url it still needs for daemon/inference
-(Phase 4, not yet migrated) — both values thread down the same durable
-workflow call graph they already did (agents/workflows/dispatcher.py ->
-pursue_goal -> ... -> _propose_mcp_effect), one new parameter, not a new
-plumbing mechanism.
+workflows/goal.py's do_subagent_work) needs a daemon_grpc_addr, which
+threads down the same durable workflow call graph
+agents/workflows/dispatcher.py's daemon_api_base_url used to
+(pursue_goal -> ... -> _propose_mcp_effect) — daemon_api_base_url itself
+is gone from that call graph now that Phase 4 (daemon/inference, the
+graph's other HTTP consumer) has migrated too.
 
 Deliberately plain functions, not @DBOS.step()-decorated like
 workflows/policy.py's decide()/consume(). policy.py's step decoration was

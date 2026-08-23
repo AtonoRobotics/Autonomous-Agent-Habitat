@@ -23,6 +23,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/inference"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/mcp"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
@@ -168,11 +169,19 @@ func main() {
 	// worker call path moves off HTTP+JSON onto local gRPC, service by
 	// service, alongside — not instead of — apiSrv's HTTP surface. See
 	// daemon/grpcapi's package doc comment for the full migration scope.
-	// It gets its own *policy.Engine/*extensions.Registry (thin, stateless
-	// wrappers over db, same as ReconcileInterrupted's *policy.Engine
-	// above) rather than sharing apiSrv's internal ones, since api.Server
-	// only exposes Extensions, not Policy.
-	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), operations.New(db, policy.New(db)), extensions.New(db), selfimprove.New(db), auth, log)
+	// It gets its own *policy.Engine/*extensions.Registry/*inference.Router
+	// (thin wrappers over db/creds, same as ReconcileInterrupted's
+	// *policy.Engine above) rather than sharing apiSrv's internal ones —
+	// consistent even where api.Server does export the equivalent field
+	// (Policy), so this doesn't depend on api.Server's own field
+	// visibility staying exactly as it is today.
+	grpcOps := operations.New(db, policy.New(db))
+	var grpcInference *inference.Router
+	if creds != nil {
+		grpcInference = inference.New(creds)
+		grpcInference.Operations = grpcOps
+	}
+	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), grpcOps, extensions.New(db), selfimprove.New(db), grpcInference, auth, log)
 
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)

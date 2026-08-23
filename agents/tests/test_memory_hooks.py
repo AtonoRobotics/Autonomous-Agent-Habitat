@@ -2,10 +2,12 @@
 the first real consumers of episodic (Hindsight) and semantic/entity
 (Graphiti/Neo4j) memory in this codebase.
 
-Every test here sets ADAPTER_MODEL/routes ModelClient at a stand-in HTTP
+Every test here sets ADAPTER_MODEL/routes ModelClient at a stand-in gRPC
 daemon (same "real protocol, fake remote counterpart" pattern as
 test_llm.py/test_memory_graph.py) — real requests reach real code, only
-the remote counterpart is a fixture.
+the remote counterpart is a fixture. Hindsight itself (fake_hindsight
+below) is a genuinely separate external HTTP service, unaffected by the
+daemon's own gRPC migration.
 
 Graphiti's success path (a real search() call returning real facts) is
 not verified here: graphiti-core's installed KuzuDriver cannot execute
@@ -24,47 +26,45 @@ just isn't enabled here."
 from __future__ import annotations
 
 import json
+from concurrent import futures
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
 
+import grpc
 import pytest
 
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 from workflows.memory_hooks import recall_context, retain_outcome
 
 
-class _FakeInferenceDaemon(BaseHTTPRequestHandler):
-    """Stands in for the daemon's /v1/inference/* routes. Completions
-    always return "{}" (a real model's valid answer for "nothing to
-    extract"); embeddings return a fixed-dimension deterministic vector."""
+class _FakeInferenceDaemon(inference_pb2_grpc.InferenceServiceServicer):
+    """Stands in for the daemon's InferenceService.Complete/Embed RPCs.
+    Completions always return "{}" (a real model's valid answer for
+    "nothing to extract"); embeddings return a fixed-dimension
+    deterministic vector."""
 
-    def log_message(self, format, *args):
-        pass
+    def Complete(self, request, context):
+        return inference_pb2.CompleteResponse(text="{}")
 
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
-        if self.path == "/v1/inference/embed":
-            response = json.dumps({"embeddings": [[0.1] * 8 for _ in body["input"]], "dimension": 8}).encode()
-        else:
-            response = json.dumps({"text": "{}"}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(response)
+    def Embed(self, request, context):
+        return inference_pb2.EmbedResponse(
+            embeddings=[inference_pb2.EmbedFloatVector(values=[0.1] * 8) for _ in request.input],
+            dimension=8,
+        )
 
 
 @pytest.fixture()
 def fake_daemon(monkeypatch):
     monkeypatch.setenv("ADAPTER_MODEL", "test-fake-model")
     monkeypatch.setenv("ADAPTER_EMBEDDING_MODEL", "test-fake-embedding-model")
-    server = HTTPServer(("127.0.0.1", 0), _FakeInferenceDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(_FakeInferenceDaemon(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield f"127.0.0.1:{port}"
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 def _clear_memory_env(monkeypatch):

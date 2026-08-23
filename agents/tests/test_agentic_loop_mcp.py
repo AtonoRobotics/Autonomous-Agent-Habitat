@@ -11,12 +11,11 @@ import json
 import os
 import shutil
 from concurrent import futures
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
 
 import grpc
 import pytest
 
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 from context.llm import ModelClient
 from harness.agentic_loop import MCPServerSpec, mcp_servers_from_env, run_agentic_loop
 from harness.vfs import VFS
@@ -34,50 +33,41 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class _ScriptedDaemon(BaseHTTPRequestHandler):
-    """Stands in for the real daemon's model-completion route only —
-    agentic_loop.py's MCP effect-tracking calls go over gRPC now (Phase 2
-    of the gRPC migration), handled by _FakeOperationsService below, not
-    this HTTP server."""
+class _ScriptedDaemon(inference_pb2_grpc.InferenceServiceServicer):
+    """Stands in for the real daemon's InferenceService.Complete RPC only
+    — agentic_loop.py's MCP effect-tracking calls go over gRPC too (Phase
+    2 of the gRPC migration), handled by _FakeOperationsService below, a
+    separate fake gRPC service registered on the same server."""
 
     responses: list[str] = []
     call_count = 0
     last_system_prompt = ""
 
-    def log_message(self, format, *args):
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
+    def Complete(self, request, context):
         cls = type(self)
-
-        cls.last_system_prompt = body.get("system", "")
+        cls.last_system_prompt = request.system
         text = cls.responses[cls.call_count]
         cls.call_count += 1
-        response = json.dumps({"text": text}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(response)
+        return inference_pb2.CompleteResponse(text=text)
 
 
 @pytest.fixture()
 def scripted_daemon():
     _ScriptedDaemon.responses = []
     _ScriptedDaemon.call_count = 0
-    server = HTTPServer(("127.0.0.1", 0), _ScriptedDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    _ScriptedDaemon.last_system_prompt = ""
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(_ScriptedDaemon(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield f"127.0.0.1:{port}"
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 def _client(scripted_daemon) -> ModelClient:
-    return ModelClient(daemon_api_base_url=scripted_daemon, agent_token="tok", model="test-model")
+    return ModelClient(daemon_grpc_addr=scripted_daemon, agent_token="tok", model="test-model")
 
 
 class _FakeOperationsService(operations_pb2_grpc.OperationsServiceServicer):

@@ -53,7 +53,7 @@ func registerProviderAccount(t *testing.T, creds *credentials.Store, provider st
 func TestComplete_NoAccountRegistered_ReturnsProviderNotConfigured(t *testing.T) {
 	db := testDB(t)
 	router := New(testCredentials(t, db))
-	_, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	_, _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}})
 	if err == nil {
 		t.Fatalf("expected ErrProviderNotConfigured")
 	}
@@ -76,7 +76,7 @@ func TestComplete_Anthropic_RealRequestShapeAndResponseParsing(t *testing.T) {
 	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "sk-ant-test", "base_url": fake.URL})
 
 	router := New(creds)
-	result, err := router.Complete(context.Background(), Request{
+	result, _, err := router.Complete(context.Background(), Request{
 		Provider: "anthropic", Model: "claude-sonnet-5", System: "be helpful",
 		Messages: []Message{{Role: "user", Content: "hello"}},
 	})
@@ -97,6 +97,35 @@ func TestComplete_Anthropic_RealRequestShapeAndResponseParsing(t *testing.T) {
 	}
 }
 
+// TestComplete_Anthropic_CapturesRealTokenUsage is §2.1/§14's per-goal/
+// run/model cost accounting (AMH-LEDGER.md Tier 1): Anthropic's own
+// response already carries real usage.input_tokens/output_tokens —
+// this proves the router actually captures it instead of discarding it
+// at the parse step.
+func TestComplete_Anthropic_CapturesRealTokenUsage(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"the real answer"}],"usage":{"input_tokens":123,"output_tokens":45}}`))
+	}))
+	defer fake.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "sk-ant-test", "base_url": fake.URL})
+
+	router := New(creds)
+	_, usage, err := router.Complete(context.Background(), Request{
+		Provider: "anthropic", Model: "claude-sonnet-5",
+		Messages: []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if usage.InputTokens != 123 || usage.OutputTokens != 45 {
+		t.Fatalf("expected real usage {123, 45}, got %+v", usage)
+	}
+}
+
 func TestComplete_AnthropicOAuth_UsesBearerNotAPIKeyHeader(t *testing.T) {
 	var sawAuthHeader, sawAPIKeyHeader string
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -114,7 +143,7 @@ func TestComplete_AnthropicOAuth_UsesBearerNotAPIKeyHeader(t *testing.T) {
 	})
 
 	router := New(creds)
-	if _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+	if _, _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if sawAuthHeader != "Bearer oauth-token-xyz" {
@@ -157,7 +186,7 @@ func TestComplete_ExpiredOAuthToken_RefreshesAndRotatesInPlace(t *testing.T) {
 	creds.PutCredential(context.Background(), credentials.SubjectAccount, acct.ID, envelope)
 
 	router := New(creds)
-	if _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+	if _, _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
 	if sawAccessToken != "Bearer brand-new-token" {
@@ -166,7 +195,7 @@ func TestComplete_ExpiredOAuthToken_RefreshesAndRotatesInPlace(t *testing.T) {
 
 	// The rotated credential must be persisted — a second call must not
 	// need to refresh again.
-	if _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+	if _, _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
 		t.Fatalf("second Complete: %v", err)
 	}
 	if completeCallCount != 2 {
@@ -212,7 +241,7 @@ func TestComplete_OpenAICompatible_RealRequestShapeAndResponseParsing(t *testing
 	registerProviderAccount(t, creds, "glm", map[string]string{"kind": "openai_compatible", "api_key": "glm-key", "base_url": fake.URL})
 
 	router := New(creds)
-	result, err := router.Complete(context.Background(), Request{
+	result, _, err := router.Complete(context.Background(), Request{
 		Provider: "glm", Model: "glm-4.6", System: "be helpful",
 		Messages: []Message{{Role: "user", Content: "hi"}},
 	})
@@ -229,6 +258,32 @@ func TestComplete_OpenAICompatible_RealRequestShapeAndResponseParsing(t *testing
 	first := messages[0].(map[string]any)
 	if first["role"] != "system" || first["content"] != "be helpful" {
 		t.Fatalf("expected system message first, got %v", first)
+	}
+}
+
+// TestComplete_OpenAICompatible_CapturesRealTokenUsage mirrors the
+// Anthropic case for the OpenAI-compatible response shape
+// (usage.prompt_tokens/completion_tokens).
+func TestComplete_OpenAICompatible_CapturesRealTokenUsage(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"glm's answer"}}],"usage":{"prompt_tokens":77,"completion_tokens":9}}`))
+	}))
+	defer fake.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "glm", map[string]string{"kind": "openai_compatible", "api_key": "glm-key", "base_url": fake.URL})
+
+	router := New(creds)
+	_, usage, err := router.Complete(context.Background(), Request{
+		Provider: "glm", Model: "glm-4.6",
+		Messages: []Message{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if usage.InputTokens != 77 || usage.OutputTokens != 9 {
+		t.Fatalf("expected real usage {77, 9}, got %+v", usage)
 	}
 }
 
@@ -255,7 +310,7 @@ func TestComplete_ProviderErrorPropagates(t *testing.T) {
 	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "bad-key", "base_url": fake.URL})
 
 	router := New(creds)
-	_, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}})
+	_, _, err := router.Complete(context.Background(), Request{Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}})
 	if err == nil {
 		t.Fatalf("expected the provider's 401 to propagate as an error")
 	}
@@ -280,7 +335,7 @@ func TestComplete_FailsOverToSecondProviderOnFirstFailure(t *testing.T) {
 	registerProviderAccount(t, creds, "backup", map[string]string{"kind": "anthropic", "api_key": "k2", "base_url": backup.URL})
 
 	router := New(creds)
-	result, err := router.Complete(context.Background(), Request{
+	result, _, err := router.Complete(context.Background(), Request{
 		Providers: []string{"primary", "backup"},
 		Model:     "claude-sonnet-5",
 		Messages:  []Message{{Role: "user", Content: "hi"}},
@@ -314,7 +369,7 @@ func TestComplete_FirstProviderSucceeds_SecondNeverCalled(t *testing.T) {
 	registerProviderAccount(t, creds, "backup", map[string]string{"kind": "anthropic", "api_key": "k2", "base_url": backup.URL})
 
 	router := New(creds)
-	result, err := router.Complete(context.Background(), Request{
+	result, _, err := router.Complete(context.Background(), Request{
 		Providers: []string{"primary", "backup"},
 		Model:     "claude-sonnet-5",
 		Messages:  []Message{{Role: "user", Content: "hi"}},
@@ -344,7 +399,7 @@ func TestComplete_AllProvidersFail_ReturnsJoinedErrorNamingEach(t *testing.T) {
 	// in the chain must also be reported, not silently skipped.
 
 	router := New(creds)
-	_, err := router.Complete(context.Background(), Request{
+	_, _, err := router.Complete(context.Background(), Request{
 		Providers: []string{"primary", "backup"},
 		Model:     "claude-sonnet-5",
 		Messages:  []Message{{Role: "user", Content: "hi"}},
@@ -402,7 +457,7 @@ func TestComplete_DefaultsProviderToAnthropic(t *testing.T) {
 	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "k", "base_url": fake.URL})
 
 	router := New(creds)
-	if _, err := router.Complete(context.Background(), Request{Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
+	if _, _, err := router.Complete(context.Background(), Request{Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}}}); err != nil {
 		t.Fatalf("expected empty Provider to default to anthropic: %v", err)
 	}
 }

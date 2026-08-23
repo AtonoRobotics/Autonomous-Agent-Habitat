@@ -551,7 +551,9 @@ type inferenceCompleteRequest struct {
 }
 
 type inferenceCompleteResponse struct {
-	Text  string `json:"text,omitempty"`
+	Text         string `json:"text,omitempty"`
+	InputTokens  int    `json:"input_tokens,omitempty"`
+	OutputTokens int    `json:"output_tokens,omitempty"`
 	Error string `json:"error,omitempty"`
 }
 
@@ -598,7 +600,7 @@ func (s *Server) handleInferenceComplete(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusBadRequest, inferenceCompleteResponse{Error: "model is required"})
 		return
 	}
-	text, err := s.Inference.Complete(r.Context(), inference.Request{
+	text, usage, err := s.Inference.Complete(r.Context(), inference.Request{
 		Provider:  req.Provider,
 		Providers: req.Providers,
 		Model:     req.Model,
@@ -610,7 +612,7 @@ func (s *Server) handleInferenceComplete(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, inferenceErrorStatus(err), inferenceCompleteResponse{Error: err.Error()})
 		return
 	}
-	writeJSON(w, http.StatusOK, inferenceCompleteResponse{Text: text})
+	writeJSON(w, http.StatusOK, inferenceCompleteResponse{Text: text, InputTokens: usage.InputTokens, OutputTokens: usage.OutputTokens})
 }
 
 func (s *Server) handleInferenceCountTokens(w http.ResponseWriter, r *http.Request) {
@@ -742,6 +744,16 @@ type openAIChatCompletionResponse struct {
 	Created int64              `json:"created"`
 	Model   string             `json:"model"`
 	Choices []openAIChatChoice `json:"choices"`
+	Usage   openAIUsage        `json:"usage"`
+}
+
+// openAIUsage is the standard OpenAI chat-completion usage shape —
+// populated with this Router.Complete call's real provider-reported
+// token counts, not this codebase's own char-based approximation.
+type openAIUsage struct {
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
 }
 
 type openAIErrorBody struct {
@@ -789,7 +801,7 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 	provider, model := splitOpenAIModel(req.Model)
 	system, messages := splitOpenAIMessages(req.Messages)
 
-	text, err := s.Inference.Complete(r.Context(), inference.Request{
+	text, usage, err := s.Inference.Complete(r.Context(), inference.Request{
 		Provider:  provider,
 		Model:     model,
 		System:    system,
@@ -810,6 +822,11 @@ func (s *Server) handleOpenAIChatCompletions(w http.ResponseWriter, r *http.Requ
 			Message:      openAIChatMessage{Role: "assistant", Content: text},
 			FinishReason: "stop",
 		}},
+		Usage: openAIUsage{
+			PromptTokens:     usage.InputTokens,
+			CompletionTokens: usage.OutputTokens,
+			TotalTokens:      usage.InputTokens + usage.OutputTokens,
+		},
 	})
 }
 

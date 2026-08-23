@@ -408,7 +408,7 @@ func registerFakeModelProviderNamed(t *testing.T, ts *httptest.Server, provider,
 
 func TestInferenceComplete_RealRoundTripThroughRegisteredProvider(t *testing.T) {
 	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the real answer"}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the real answer"}}],"usage":{"prompt_tokens":42,"completion_tokens":8}}`))
 	}))
 	defer fakeProvider.Close()
 
@@ -428,6 +428,9 @@ func TestInferenceComplete_RealRoundTripThroughRegisteredProvider(t *testing.T) 
 	json.NewDecoder(resp.Body).Decode(&result)
 	if result.Text != "the real answer" {
 		t.Fatalf("expected the real provider text, got %q", result.Text)
+	}
+	if result.InputTokens != 42 || result.OutputTokens != 8 {
+		t.Fatalf("expected the real provider's reported token usage {42, 8}, got {%d, %d}", result.InputTokens, result.OutputTokens)
 	}
 }
 
@@ -581,7 +584,7 @@ func TestOpenAIChatCompletions_RealRoundTripThroughRegisteredProvider(t *testing
 	var gotAuth string
 	fakeProvider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuth = r.Header.Get("Authorization")
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the real answer"}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"the real answer"}}],"usage":{"prompt_tokens":11,"completion_tokens":3}}`))
 	}))
 	defer fakeProvider.Close()
 
@@ -618,6 +621,11 @@ func TestOpenAIChatCompletions_RealRoundTripThroughRegisteredProvider(t *testing
 	// caller's own agent bearer token, as the provider's Authorization.
 	if gotAuth != "Bearer test-key" {
 		t.Fatalf("expected the provider to see its registered credential, got %q", gotAuth)
+	}
+	// Standard OpenAI usage shape, populated with the real provider's own
+	// reported token counts — a real OpenAI-compatible client reads this.
+	if result.Usage.PromptTokens != 11 || result.Usage.CompletionTokens != 3 || result.Usage.TotalTokens != 14 {
+		t.Fatalf("expected real usage {11, 3, 14}, got %+v", result.Usage)
 	}
 }
 

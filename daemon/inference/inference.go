@@ -94,6 +94,17 @@ type Request struct {
 	MaxTokens int
 }
 
+// Usage is a provider's own reported token accounting for one Complete
+// call — real input/output token counts, not this codebase's own
+// approximation (see agents/context/budget.py's char-based fallback for
+// where that approximation is used instead, when no real count is
+// available). Zero-valued when a provider's response carried no usage
+// block, not an error — see anthropicComplete/openAICompatibleComplete.
+type Usage struct {
+	InputTokens  int
+	OutputTokens int
+}
+
 var (
 	ErrProviderNotConfigured = errors.New("inference: no active account is registered for this provider")
 	ErrProviderCallFailed    = errors.New("inference: the model provider call failed")
@@ -187,33 +198,42 @@ func New(creds *credentials.Store) *Router {
 // usable. Every provider's failure is preserved (errors.Join) in the
 // returned error so a caller can see exactly what was tried, not just the
 // last attempt.
-func (r *Router) Complete(ctx context.Context, req Request) (string, error) {
+func (r *Router) Complete(ctx context.Context, req Request) (string, Usage, error) {
 	var errs []error
 	for _, provider := range providerChain(req) {
-		text, err := r.completeOne(ctx, provider, req)
+		result, err := r.completeOne(ctx, provider, req)
 		if err == nil {
-			return text, nil
+			return result.Text, result.Usage, nil
 		}
 		errs = append(errs, fmt.Errorf("provider %q: %w", provider, err))
 	}
-	return "", errors.Join(append([]error{ErrAllProvidersFailed}, errs...)...)
+	return "", Usage{}, errors.Join(append([]error{ErrAllProvidersFailed}, errs...)...)
 }
 
-func (r *Router) completeOne(ctx context.Context, provider string, req Request) (string, error) {
+// completionResult bundles Complete's two return values so completeOne
+// can stay a single-T call through trackEffect's generic signature.
+type completionResult struct {
+	Text  string
+	Usage Usage
+}
+
+func (r *Router) completeOne(ctx context.Context, provider string, req Request) (completionResult, error) {
 	env, err := r.resolveCredential(ctx, provider)
 	if err != nil {
-		return "", err
+		return completionResult{}, err
 	}
 	return trackEffect(ctx, r.Operations, "amh.core/inference.complete", provider,
 		map[string]any{"provider": provider, "model": req.Model},
-		func(ctx context.Context) (string, error) {
+		func(ctx context.Context) (completionResult, error) {
 			switch env.Kind {
 			case "anthropic":
-				return r.anthropicComplete(ctx, env, req)
+				text, usage, err := r.anthropicComplete(ctx, env, req)
+				return completionResult{Text: text, Usage: usage}, err
 			case "openai_compatible":
-				return r.openAICompatibleComplete(ctx, env, req)
+				text, usage, err := r.openAICompatibleComplete(ctx, env, req)
+				return completionResult{Text: text, Usage: usage}, err
 			default:
-				return "", fmt.Errorf("inference: account credential has unknown kind %q", env.Kind)
+				return completionResult{}, fmt.Errorf("inference: account credential has unknown kind %q", env.Kind)
 			}
 		})
 }
@@ -428,14 +448,14 @@ func bearerFor(env credentialEnvelope) (string, error) {
 	return "", fmt.Errorf("inference: credential envelope has neither api_key nor oauth")
 }
 
-func (r *Router) anthropicComplete(ctx context.Context, env credentialEnvelope, req Request) (string, error) {
+func (r *Router) anthropicComplete(ctx context.Context, env credentialEnvelope, req Request) (string, Usage, error) {
 	baseURL := env.BaseURL
 	if baseURL == "" {
 		baseURL = "https://api.anthropic.com"
 	}
 	key, err := bearerFor(env)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	maxTokens := req.MaxTokens
 	if maxTokens == 0 {
@@ -450,22 +470,26 @@ func (r *Router) anthropicComplete(ctx context.Context, env credentialEnvelope, 
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/v1/messages", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	setAnthropicHeaders(httpReq, env, key)
 
 	resp, respBody, err := r.doJSON(httpReq)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	var payload struct {
 		Content []struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Usage struct {
+			InputTokens  int `json:"input_tokens"`
+			OutputTokens int `json:"output_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &payload); err != nil {
-		return "", fmt.Errorf("inference: parse anthropic response (status %d): %w", resp.StatusCode, err)
+		return "", Usage{}, fmt.Errorf("inference: parse anthropic response (status %d): %w", resp.StatusCode, err)
 	}
 	var text strings.Builder
 	for _, block := range payload.Content {
@@ -473,7 +497,7 @@ func (r *Router) anthropicComplete(ctx context.Context, env credentialEnvelope, 
 			text.WriteString(block.Text)
 		}
 	}
-	return text.String(), nil
+	return text.String(), Usage{InputTokens: payload.Usage.InputTokens, OutputTokens: payload.Usage.OutputTokens}, nil
 }
 
 func (r *Router) anthropicCountTokens(ctx context.Context, env credentialEnvelope, req Request) (int, error) {
@@ -523,13 +547,13 @@ func setAnthropicHeaders(httpReq *http.Request, env credentialEnvelope, key stri
 	}
 }
 
-func (r *Router) openAICompatibleComplete(ctx context.Context, env credentialEnvelope, req Request) (string, error) {
+func (r *Router) openAICompatibleComplete(ctx context.Context, env credentialEnvelope, req Request) (string, Usage, error) {
 	if env.BaseURL == "" {
-		return "", fmt.Errorf("inference: openai_compatible credential is missing base_url")
+		return "", Usage{}, fmt.Errorf("inference: openai_compatible credential is missing base_url")
 	}
 	key, err := bearerFor(env)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	messages := make([]map[string]string, 0, len(req.Messages)+1)
 	if req.System != "" {
@@ -550,14 +574,14 @@ func (r *Router) openAICompatibleComplete(ctx context.Context, env credentialEnv
 
 	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(env.BaseURL, "/")+"/chat/completions", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Authorization", "Bearer "+key)
 
 	_, respBody, err := r.doJSON(httpReq)
 	if err != nil {
-		return "", err
+		return "", Usage{}, err
 	}
 	var payload struct {
 		Choices []struct {
@@ -565,14 +589,19 @@ func (r *Router) openAICompatibleComplete(ctx context.Context, env credentialEnv
 				Content string `json:"content"`
 			} `json:"message"`
 		} `json:"choices"`
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
 	}
 	if err := json.Unmarshal(respBody, &payload); err != nil {
-		return "", fmt.Errorf("inference: parse openai-compatible response: %w", err)
+		return "", Usage{}, fmt.Errorf("inference: parse openai-compatible response: %w", err)
 	}
 	if len(payload.Choices) == 0 {
-		return "", fmt.Errorf("inference: openai-compatible response had no choices: %s", string(respBody))
+		return "", Usage{}, fmt.Errorf("inference: openai-compatible response had no choices: %s", string(respBody))
 	}
-	return payload.Choices[0].Message.Content, nil
+	usage := Usage{InputTokens: payload.Usage.PromptTokens, OutputTokens: payload.Usage.CompletionTokens}
+	return payload.Choices[0].Message.Content, usage, nil
 }
 
 // trackEffect wraps fn — one provider attempt — with daemon/operations

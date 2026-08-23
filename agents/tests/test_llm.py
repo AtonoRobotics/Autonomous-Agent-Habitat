@@ -105,6 +105,36 @@ def test_complete_sends_real_request_and_parses_real_response(fake_daemon):
     assert _FakeDaemon.captured_body["messages"] == [{"role": "user", "content": "hi"}]
 
 
+def test_complete_with_usage_returns_real_token_counts(fake_daemon):
+    """§2.1/§14 cost accounting (AMH-LEDGER.md Tier 1): the daemon's
+    /v1/inference/complete response now carries the provider's real
+    input_tokens/output_tokens — complete_with_usage is the seam that
+    surfaces them to a caller that wants to record real usage, without
+    changing complete()'s existing plain-string return (many callers
+    already depend on that shape)."""
+    _FakeDaemon.response_body = json.dumps({"text": "the real answer", "input_tokens": 123, "output_tokens": 45}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="my-agent-token", model="claude-sonnet-5", provider="anthropic")
+
+    result = client.complete_with_usage(system="be helpful", messages=[{"role": "user", "content": "hi"}])
+
+    assert result.text == "the real answer"
+    assert result.input_tokens == 123
+    assert result.output_tokens == 45
+
+
+def test_complete_with_usage_defaults_to_zero_when_daemon_omits_usage(fake_daemon):
+    """A daemon build predating usage capture (or a provider response
+    with no usage block) must not crash the caller — zero, not a
+    fabricated guess."""
+    _FakeDaemon.response_body = json.dumps({"text": "ok"}).encode()
+    client = ModelClient(daemon_api_base_url=fake_daemon, agent_token="tok", model="claude-sonnet-5")
+
+    result = client.complete_with_usage(system="", messages=[{"role": "user", "content": "hi"}])
+
+    assert result.input_tokens == 0
+    assert result.output_tokens == 0
+
+
 def test_complete_sends_providers_failover_chain_when_set(fake_daemon):
     _FakeDaemon.response_body = json.dumps({"text": "the real answer"}).encode()
     client = ModelClient(

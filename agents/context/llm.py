@@ -38,6 +38,19 @@ class ModelNotConfiguredError(Exception):
 
 
 @dataclass
+class CompletionResult:
+    """complete_with_usage()'s return: the model's real text plus the
+    provider's own reported token counts. input_tokens/output_tokens
+    default to 0, never fabricated, for a response that carried no
+    usage block (an older daemon build, or a provider this codebase
+    hasn't wired usage-parsing for yet)."""
+
+    text: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
 class ModelClient:
     """One agent's route to the daemon's inference seam. daemon_api_base_url
     and agent_token are the same values every other daemon-calling client
@@ -70,6 +83,25 @@ class ModelClient:
 
     def complete(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> str:
         """Returns the model's real text response, via the daemon."""
+        return self._complete(system, messages, max_tokens)["text"]
+
+    def complete_with_usage(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> CompletionResult:
+        """Same real call as complete(), plus the provider's own reported
+        token usage — see CompletionResult. A separate method rather than
+        widening complete()'s return: complete() already has many callers
+        that depend on its plain-string shape (decompose_goal,
+        llm_summarize, the agentic loop's per-turn call), and none of them
+        need usage — this is for the one real caller that does (agentic_loop.py,
+        to accumulate real per-run token counts for §2.1/§14's cost
+        accounting)."""
+        result = self._complete(system, messages, max_tokens)
+        return CompletionResult(
+            text=result["text"],
+            input_tokens=result.get("input_tokens", 0),
+            output_tokens=result.get("output_tokens", 0),
+        )
+
+    def _complete(self, system: str, messages: list[dict[str, str]], max_tokens: int) -> dict:
         payload = {
             "provider": self.provider,
             "providers": self.providers or [],
@@ -78,8 +110,7 @@ class ModelClient:
             "messages": messages,
             "max_tokens": max_tokens,
         }
-        result = self._post("/v1/inference/complete", payload)
-        return result["text"]
+        return self._post("/v1/inference/complete", payload)
 
     def count_tokens(self, system: str, messages: list[dict[str, str]]) -> int:
         """Returns the provider's real input token count, via the daemon.

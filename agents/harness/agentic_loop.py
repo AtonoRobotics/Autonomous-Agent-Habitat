@@ -117,6 +117,8 @@ class LoopResult:
     result: str
     turns_used: int
     compacted: bool
+    tokens_in: int = 0
+    tokens_out: int = 0
 
 
 class LoopBudgetExceededError(Exception):
@@ -219,9 +221,14 @@ async def _run_agentic_loop_async(
         system = _SYSTEM_PROMPT_TEMPLATE.format(objective=objective, tool_catalog="\n".join(catalog_lines))
 
         compacted_any = False
+        tokens_in_total = 0
+        tokens_out_total = 0
         for turn_index in range(max_turns):
             messages = [{"role": t.role, "content": t.content} for t in budget.turns] or [_BOOTSTRAP_MESSAGE]
-            response_text = await asyncio.to_thread(model_client.complete, system, messages)
+            completion = await asyncio.to_thread(model_client.complete_with_usage, system, messages)
+            response_text = completion.text
+            tokens_in_total += completion.input_tokens
+            tokens_out_total += completion.output_tokens
             budget.add_turn("assistant", response_text)
 
             try:
@@ -235,7 +242,13 @@ async def _run_agentic_loop_async(
                 raise UnknownToolError(f"unknown tool {tool!r} — must be one of {sorted(all_tool_names)}")
 
             if tool == "done":
-                return LoopResult(result=str(action.get("result", "")), turns_used=turn_index + 1, compacted=compacted_any)
+                return LoopResult(
+                    result=str(action.get("result", "")),
+                    turns_used=turn_index + 1,
+                    compacted=compacted_any,
+                    tokens_in=tokens_in_total,
+                    tokens_out=tokens_out_total,
+                )
 
             args = action.get("args", {})
             if tool in mcp_tool_lookup:

@@ -124,3 +124,6 @@ Stated plainly rather than hidden in a roadmap: this repository has never obtain
 `docs/AMH-SPECIFICATION.md` is normative — it states what the core is required to provide, what belongs to an extension, and what is explicitly excluded. Read §1 (governing decisions) and §2 (system boundary) before adding anything to `daemon/` or `agents/workflows/`; if what you're adding is domain-specific, it almost certainly belongs in an extension under `extensions/`, not in core.
 
 `contracts/` schemas are the stable, versioned interface between core and extensions. A domain extension publishes its own namespaced schemas; it does not modify a core schema to add a domain entity.
+
+
+Read the [independent architecture comparison](docs/ARCHITECTURE-COMPARISON.md) when deciding whether AMH, DeepSeek Harness/Cordis, or a composed architecture is the correct solution for a requirement.

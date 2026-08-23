@@ -152,6 +152,21 @@ def test_complete_with_usage_defaults_to_zero_when_daemon_omits_usage(fake_daemo
 
     assert result.input_tokens == 0
     assert result.output_tokens == 0
+    assert result.cost_usd == 0.0
+
+
+def test_complete_with_usage_returns_the_daemons_real_cost_usd(fake_daemon):
+    """§2.1/§14 cost accounting: the daemon computes cost_usd from its
+    own pricing table (daemon/inference/pricing.go) and this client just
+    surfaces that real number — it does no pricing math of its own."""
+    _FakeInferenceService.complete_response = inference_pb2.CompleteResponse(
+        text="the real answer", input_tokens=1_000_000, output_tokens=1_000_000, cost_usd=18.0
+    )
+    client = ModelClient(daemon_grpc_addr=fake_daemon, agent_token="tok", model="claude-sonnet-5")
+
+    result = client.complete_with_usage(system="", messages=[{"role": "user", "content": "hi"}])
+
+    assert result.cost_usd == 18.0
 
 
 def test_complete_sends_providers_failover_chain_when_set(fake_daemon):

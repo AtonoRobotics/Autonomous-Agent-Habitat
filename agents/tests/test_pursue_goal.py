@@ -15,6 +15,8 @@ import sys
 import textwrap
 import uuid
 
+import pytest
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 
@@ -69,7 +71,13 @@ def test_run_subagent_records_real_token_usage_onto_the_run(db_path, daemon, fak
     """§2.1/§14 cost accounting (AMH-LEDGER.md Tier 1): run_subagent must
     persist the agentic loop's real, provider-reported token usage onto
     run.tokens_in/tokens_out — not leave those columns permanently at
-    their schema default of 0."""
+    their schema default of 0. cost_usd stays 0 here (not an error): the
+    real end-to-end fixture runs a fake local model server as
+    ADAPTER_MODEL="test-fake-model" (see conftest.fake_model_server),
+    which daemon/inference/pricing.go's table deliberately has no entry
+    for — see test_record_tokens_accumulates_cost_usd_in_postgres below
+    for direct proof the accumulation SQL itself is correct for a real,
+    priced amount."""
     from dbos import DBOS
 
     from workflows import ontology
@@ -90,12 +98,40 @@ def test_run_subagent_records_real_token_usage_onto_the_run(db_path, daemon, fak
     import psycopg
 
     conn = psycopg.connect(db_path)
-    row = conn.execute("SELECT tokens_in, tokens_out FROM run WHERE task_id = %s", (task_id,)).fetchone()
+    row = conn.execute("SELECT tokens_in, tokens_out, cost_usd FROM run WHERE task_id = %s", (task_id,)).fetchone()
     conn.close()
     assert row is not None
-    tokens_in, tokens_out = row
+    tokens_in, tokens_out, cost_usd = row
     assert tokens_in > 0
     assert tokens_out > 0
+    assert cost_usd == 0.0
+
+
+def test_record_tokens_accumulates_cost_usd_in_postgres(db_path):
+    """Direct proof of ontology.record_tokens's real SQL, independent of
+    which model a test fixture happens to have configured: two calls on
+    the same run must add cost_usd, the same additive behavior
+    tokens_in/tokens_out already had before cost_usd existed."""
+    from workflows import ontology
+
+    goal_id = str(uuid.uuid4())
+    ontology.ensure_goal(db_path, goal_id, "a goal")
+    task_id = ontology.create_task(db_path, goal_id, "a task")
+    run_id = ontology.create_run(db_path, task_id)
+
+    ontology.record_tokens(db_path, run_id, tokens_in=1_000_000, tokens_out=1_000_000, cost_usd=18.0)
+    ontology.record_tokens(db_path, run_id, tokens_in=100, tokens_out=50, cost_usd=0.5)
+
+    import psycopg
+
+    conn = psycopg.connect(db_path)
+    row = conn.execute("SELECT tokens_in, tokens_out, cost_usd FROM run WHERE id = %s", (run_id,)).fetchone()
+    conn.close()
+    assert row is not None
+    tokens_in, tokens_out, cost_usd = row
+    assert tokens_in == 1_000_100
+    assert tokens_out == 1_000_050
+    assert cost_usd == pytest.approx(18.5)
 
 
 def test_pursue_goal_survives_process_restart(db_path, tmp_path, daemon, fake_model_server):

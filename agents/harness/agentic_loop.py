@@ -122,6 +122,7 @@ class LoopResult:
     compacted: bool
     tokens_in: int = 0
     tokens_out: int = 0
+    cost_usd: float = 0.0
 
 
 class LoopBudgetExceededError(Exception):
@@ -227,12 +228,14 @@ async def _run_agentic_loop_async(
         compacted_any = False
         tokens_in_total = 0
         tokens_out_total = 0
+        cost_usd_total = 0.0
         for turn_index in range(max_turns):
             messages = [{"role": t.role, "content": t.content} for t in budget.turns] or [_BOOTSTRAP_MESSAGE]
             completion = await asyncio.to_thread(model_client.complete_with_usage, system, messages)
             response_text = completion.text
             tokens_in_total += completion.input_tokens
             tokens_out_total += completion.output_tokens
+            cost_usd_total += completion.cost_usd
             budget.add_turn("assistant", response_text)
 
             try:
@@ -254,6 +257,7 @@ async def _run_agentic_loop_async(
                     compacted=compacted_any,
                     tokens_in=tokens_in_total,
                     tokens_out=tokens_out_total,
+                    cost_usd=cost_usd_total,
                 )
 
             args = action.get("args", {})

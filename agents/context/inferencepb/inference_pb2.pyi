@@ -31,14 +31,16 @@ class CompleteRequest(_message.Message):
     def __init__(self, provider: _Optional[str] = ..., providers: _Optional[_Iterable[str]] = ..., model: _Optional[str] = ..., system: _Optional[str] = ..., messages: _Optional[_Iterable[_Union[Message, _Mapping]]] = ..., max_tokens: _Optional[int] = ...) -> None: ...
 
 class CompleteResponse(_message.Message):
-    __slots__ = ("text", "input_tokens", "output_tokens")
+    __slots__ = ("text", "input_tokens", "output_tokens", "cost_usd")
     TEXT_FIELD_NUMBER: _ClassVar[int]
     INPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_TOKENS_FIELD_NUMBER: _ClassVar[int]
+    COST_USD_FIELD_NUMBER: _ClassVar[int]
     text: str
     input_tokens: int
     output_tokens: int
-    def __init__(self, text: _Optional[str] = ..., input_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ...) -> None: ...
+    cost_usd: float
+    def __init__(self, text: _Optional[str] = ..., input_tokens: _Optional[int] = ..., output_tokens: _Optional[int] = ..., cost_usd: _Optional[float] = ...) -> None: ...
 
 class CountTokensResponse(_message.Message):
     __slots__ = ("input_tokens",)

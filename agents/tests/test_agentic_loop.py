@@ -26,20 +26,23 @@ from harness.vfs import VFS
 class _ScriptedDaemon(inference_pb2_grpc.InferenceServiceServicer):
     responses: list[str] = []
     usages: list[tuple[int, int]] = []
+    costs: list[float] = []
     call_count = 0
 
     def Complete(self, request, context):
         cls = type(self)
         text = cls.responses[cls.call_count]
         input_tokens, output_tokens = cls.usages[cls.call_count] if cls.usages else (0, 0)
+        cost_usd = cls.costs[cls.call_count] if cls.costs else 0.0
         cls.call_count += 1
-        return inference_pb2.CompleteResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens)
+        return inference_pb2.CompleteResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost_usd)
 
 
 @pytest.fixture()
 def scripted_daemon():
     _ScriptedDaemon.responses = []
     _ScriptedDaemon.usages = []
+    _ScriptedDaemon.costs = []
     _ScriptedDaemon.call_count = 0
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
     inference_pb2_grpc.add_InferenceServiceServicer_to_server(_ScriptedDaemon(), server)
@@ -86,6 +89,22 @@ def test_accumulates_real_token_usage_across_turns(scripted_daemon, tmp_path):
 
     assert result.tokens_in == 130
     assert result.tokens_out == 25
+
+
+def test_accumulates_real_cost_usd_across_turns(scripted_daemon, tmp_path):
+    """§2.1/§14 cost accounting: the loop must sum each turn's real
+    daemon-computed cost_usd the same way it sums tokens — this is the
+    seam do_subagent_work reads to record a run's real cost_usd."""
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "write_file", "args": {"path": "notes.txt", "content": "hello"}}),
+        json.dumps({"tool": "done", "result": "done"}),
+    ]
+    _ScriptedDaemon.costs = [0.0125, 0.003]
+    vfs = VFS(str(tmp_path / "run-cost"))
+
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon), scripted_daemon)
+
+    assert result.cost_usd == pytest.approx(0.0155)
 
 
 def test_a_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):

@@ -167,6 +167,7 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
         "summary": loop_result.result,
         "tokens_in": loop_result.tokens_in,
         "tokens_out": loop_result.tokens_out,
+        "cost_usd": loop_result.cost_usd,
     }
 
 
@@ -180,19 +181,18 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_grpc_addr: s
     DBOS.start_workflow runs this on its own worker thread with no
     ambient OTel context otherwise.
 
-    Known gap: real token usage (run.tokens_in/tokens_out, §2.1/§14) is
-    only recorded on the success path — do_subagent_work raising before
-    returning (LoopBudgetExceededError, an unknown-tool error, etc.)
-    means whatever partial usage that run accrued is not captured, since
-    harness.agentic_loop.LoopResult is never constructed for a run that
-    didn't reach "done". cost_usd is not recorded at all yet — no
-    $/token pricing table exists anywhere in this codebase."""
+    Known gap: real token usage and cost (run.tokens_in/tokens_out/
+    cost_usd, §2.1/§14) are only recorded on the success path —
+    do_subagent_work raising before returning (LoopBudgetExceededError,
+    an unknown-tool error, etc.) means whatever partial usage/cost that
+    run accrued is not captured, since harness.agentic_loop.LoopResult is
+    never constructed for a run that didn't reach "done"."""
     with agent_run_span(agent_id=task_id, trace_context=trace_context):
         run_id = ontology.create_run(db_path, task_id)
         ontology.set_task_status(db_path, task_id, "active")
         try:
             result = do_subagent_work(task_id, objective, db_path, run_id, daemon_grpc_addr, agent_token)
-            ontology.record_tokens(db_path, run_id, result.get("tokens_in", 0), result.get("tokens_out", 0))
+            ontology.record_tokens(db_path, run_id, result.get("tokens_in", 0), result.get("tokens_out", 0), result.get("cost_usd", 0.0))
             ontology.set_task_status(db_path, task_id, "done")
             ontology.end_run(db_path, run_id, "ok")
             return result

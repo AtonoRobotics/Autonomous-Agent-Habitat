@@ -134,18 +134,20 @@ def end_run(dsn: str, run_id: str, status: str = "ok") -> None:
         )
 
 
-def record_tokens(dsn: str, run_id: str, tokens_in: int, tokens_out: int) -> None:
-    """Adds this run's real model-provider token usage (see
-    harness.agentic_loop.LoopResult, sourced from context.llm's
-    complete_with_usage — never fabricated) onto run.tokens_in/tokens_out
-    (store/migrations/0001_init.sql), which existed unused until now.
-    Additive rather than an overwrite so a run that calls this more than
-    once accumulates correctly. cost_usd stays untouched here — no
-    $/token pricing table exists anywhere in this codebase yet."""
+def record_tokens(dsn: str, run_id: str, tokens_in: int, tokens_out: int, cost_usd: float = 0.0) -> None:
+    """Adds this run's real model-provider token usage and dollar cost
+    (see harness.agentic_loop.LoopResult, sourced from context.llm's
+    complete_with_usage — never fabricated) onto run.tokens_in/
+    tokens_out/cost_usd (store/migrations/0001_init.sql), which existed
+    unused until now. Additive rather than an overwrite so a run that
+    calls this more than once accumulates correctly. cost_usd is 0 for a
+    model daemon/inference's pricing table has no entry for
+    (daemon/inference/pricing.go's CostUSD) — not an error, just an
+    unpriced model."""
     with connect(dsn) as conn:
         conn.execute(
-            "UPDATE run SET tokens_in = tokens_in + %s, tokens_out = tokens_out + %s WHERE id = %s",
-            (tokens_in, tokens_out, run_id),
+            "UPDATE run SET tokens_in = tokens_in + %s, tokens_out = tokens_out + %s, cost_usd = cost_usd + %s WHERE id = %s",
+            (tokens_in, tokens_out, cost_usd, run_id),
         )
 
 

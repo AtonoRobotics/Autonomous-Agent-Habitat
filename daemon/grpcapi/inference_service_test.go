@@ -115,6 +115,11 @@ func TestComplete_Anthropic_RealRequestShapeAndResponseOverGRPC(t *testing.T) {
 	if resp.InputTokens != 12 || resp.OutputTokens != 3 {
 		t.Fatalf("expected real usage to round-trip, got in=%d out=%d", resp.InputTokens, resp.OutputTokens)
 	}
+	// §2.1/§14: claude-sonnet-5 pricing.go rate is $3/M input, $15/M
+	// output — 12 in + 3 out is 12*3e-6 + 3*15e-6 = $0.000081.
+	if want := 0.000081; resp.CostUsd < want-1e-9 || resp.CostUsd > want+1e-9 {
+		t.Fatalf("expected cost_usd ~%v, got %v", want, resp.CostUsd)
+	}
 	if capturedAuth != "sk-ant-test" {
 		t.Fatalf("expected the real api key to reach the provider, got %q", capturedAuth)
 	}

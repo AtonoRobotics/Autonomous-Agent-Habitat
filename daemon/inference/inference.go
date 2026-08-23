@@ -103,6 +103,12 @@ type Request struct {
 type Usage struct {
 	InputTokens  int
 	OutputTokens int
+	// CostUSD is this call's real dollar cost, computed from
+	// modelPricing (pricing.go) — 0, not an error, for a model with no
+	// pricing entry (see CostUSD's doc comment). Only Complete populates
+	// this; CountTokens/Embed don't feed §2.1/§14's run.tokens_in/
+	// tokens_out accounting and have no cost use yet.
+	CostUSD float64
 }
 
 var (
@@ -225,16 +231,22 @@ func (r *Router) completeOne(ctx context.Context, provider string, req Request) 
 	return trackEffect(ctx, r.Operations, "amh.core/inference.complete", provider,
 		map[string]any{"provider": provider, "model": req.Model},
 		func(ctx context.Context) (completionResult, error) {
+			var text string
+			var usage Usage
+			var err error
 			switch env.Kind {
 			case "anthropic":
-				text, usage, err := r.anthropicComplete(ctx, env, req)
-				return completionResult{Text: text, Usage: usage}, err
+				text, usage, err = r.anthropicComplete(ctx, env, req)
 			case "openai_compatible":
-				text, usage, err := r.openAICompatibleComplete(ctx, env, req)
-				return completionResult{Text: text, Usage: usage}, err
+				text, usage, err = r.openAICompatibleComplete(ctx, env, req)
 			default:
 				return completionResult{}, fmt.Errorf("inference: account credential has unknown kind %q", env.Kind)
 			}
+			if err != nil {
+				return completionResult{}, err
+			}
+			usage.CostUSD, _ = CostUSD(req.Model, usage)
+			return completionResult{Text: text, Usage: usage}, nil
 		},
 		// §9 acceptance invariant #9: the model's real response text is
 		// the trajectory content worth persisting durably, so a completion

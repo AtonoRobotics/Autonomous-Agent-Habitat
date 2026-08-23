@@ -91,7 +91,7 @@ func (s *inferenceServer) Complete(ctx context.Context, req *inferencepb.Complet
 	if err != nil {
 		return nil, inferenceErrorStatus(err)
 	}
-	return &inferencepb.CompleteResponse{Text: text, InputTokens: int32(usage.InputTokens), OutputTokens: int32(usage.OutputTokens)}, nil
+	return &inferencepb.CompleteResponse{Text: text, InputTokens: int32(usage.InputTokens), OutputTokens: int32(usage.OutputTokens), CostUsd: usage.CostUSD}, nil
 }
 
 func (s *inferenceServer) CountTokens(ctx context.Context, req *inferencepb.CompleteRequest) (*inferencepb.CountTokensResponse, error) {

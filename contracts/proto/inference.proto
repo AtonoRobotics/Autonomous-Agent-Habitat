@@ -60,6 +60,13 @@ message CompleteResponse {
   string text = 1;
   int32 input_tokens = 2;
   int32 output_tokens = 3;
+  // Real dollar cost of this completion, computed daemon-side from a
+  // static $/million-token pricing table (daemon/inference/pricing.go)
+  // keyed on the request's exact model string. 0 for a model this
+  // codebase has no pricing data for — not an error, and not
+  // distinguishable on the wire from "genuinely free"; see
+  // daemon/inference.CostUSD's doc comment.
+  double cost_usd = 4;
 }
 
 message CountTokensResponse {

@@ -184,10 +184,17 @@ func (x *CompleteRequest) GetMaxTokens() int32 {
 }
 
 type CompleteResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Text          string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
-	InputTokens   int32                  `protobuf:"varint,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
-	OutputTokens  int32                  `protobuf:"varint,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	state        protoimpl.MessageState `protogen:"open.v1"`
+	Text         string                 `protobuf:"bytes,1,opt,name=text,proto3" json:"text,omitempty"`
+	InputTokens  int32                  `protobuf:"varint,2,opt,name=input_tokens,json=inputTokens,proto3" json:"input_tokens,omitempty"`
+	OutputTokens int32                  `protobuf:"varint,3,opt,name=output_tokens,json=outputTokens,proto3" json:"output_tokens,omitempty"`
+	// Real dollar cost of this completion, computed daemon-side from a
+	// static $/million-token pricing table (daemon/inference/pricing.go)
+	// keyed on the request's exact model string. 0 for a model this
+	// codebase has no pricing data for — not an error, and not
+	// distinguishable on the wire from "genuinely free"; see
+	// daemon/inference.CostUSD's doc comment.
+	CostUsd       float64 `protobuf:"fixed64,4,opt,name=cost_usd,json=costUsd,proto3" json:"cost_usd,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -239,6 +246,13 @@ func (x *CompleteResponse) GetInputTokens() int32 {
 func (x *CompleteResponse) GetOutputTokens() int32 {
 	if x != nil {
 		return x.OutputTokens
+	}
+	return 0
+}
+
+func (x *CompleteResponse) GetCostUsd() float64 {
+	if x != nil {
+		return x.CostUsd
 	}
 	return 0
 }
@@ -466,11 +480,12 @@ const file_inference_proto_rawDesc = "" +
 	"\x06system\x18\x04 \x01(\tR\x06system\x125\n" +
 	"\bmessages\x18\x05 \x03(\v2\x19.amh.inference.v1.MessageR\bmessages\x12\x1d\n" +
 	"\n" +
-	"max_tokens\x18\x06 \x01(\x05R\tmaxTokens\"n\n" +
+	"max_tokens\x18\x06 \x01(\x05R\tmaxTokens\"\x89\x01\n" +
 	"\x10CompleteResponse\x12\x12\n" +
 	"\x04text\x18\x01 \x01(\tR\x04text\x12!\n" +
 	"\finput_tokens\x18\x02 \x01(\x05R\vinputTokens\x12#\n" +
-	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens\"8\n" +
+	"\routput_tokens\x18\x03 \x01(\x05R\foutputTokens\x12\x19\n" +
+	"\bcost_usd\x18\x04 \x01(\x01R\acostUsd\"8\n" +
 	"\x13CountTokensResponse\x12!\n" +
 	"\finput_tokens\x18\x01 \x01(\x05R\vinputTokens\"t\n" +
 	"\fEmbedRequest\x12\x1a\n" +

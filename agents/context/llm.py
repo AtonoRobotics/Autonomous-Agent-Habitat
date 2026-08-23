@@ -51,11 +51,14 @@ class CompletionResult:
     provider's own reported token counts. input_tokens/output_tokens
     default to 0, never fabricated, for a response that carried no
     usage block (an older daemon build, or a provider this codebase
-    hasn't wired usage-parsing for yet)."""
+    hasn't wired usage-parsing for yet). cost_usd defaults to 0 the same
+    way for a model daemon/inference's pricing table (pricing.go) has no
+    entry for — not an error, just an unpriced model (§2.1/§14)."""
 
     text: str
     input_tokens: int = 0
     output_tokens: int = 0
+    cost_usd: float = 0.0
 
 
 # See workflows/policy.py's identical _channels/_channel pattern: one
@@ -136,7 +139,7 @@ class ModelClient:
             resp = self._stub().Complete(req, metadata=self._metadata(), timeout=120)
         except grpc.RpcError as e:
             raise ModelNotConfiguredError(f"inference Complete call failed: {e.details() or e.code().name}") from e
-        return CompletionResult(text=resp.text, input_tokens=resp.input_tokens, output_tokens=resp.output_tokens)
+        return CompletionResult(text=resp.text, input_tokens=resp.input_tokens, output_tokens=resp.output_tokens, cost_usd=resp.cost_usd)
 
     def count_tokens(self, system: str, messages: list[dict[str, str]]) -> int:
         """Returns the provider's real input token count, via the daemon.

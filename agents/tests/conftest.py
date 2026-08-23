@@ -72,17 +72,22 @@ class DaemonHandle:
     agent_token: str
     operator_token: str
     mcp_base_url: str
+    grpc_addr: str
 
 
 @pytest.fixture(scope="module")
 def go_binaries(tmp_path_factory):
     """Builds amh-daemon once per test module."""
     bin_dir = tmp_path_factory.mktemp("bin")
-    env = dict(os.environ, GOTOOLCHAIN="local")
     out = str(bin_dir / "amh-daemon")
+    # Deliberately not GOTOOLCHAIN=local: go.mod's `go` directive can name a
+    # newer toolchain than whatever's installed as the base `go` binary
+    # (e.g. after a dependency bump), and the default GOTOOLCHAIN=auto
+    # switches to it automatically — using an already-downloaded toolchain
+    # from the module cache when there is one, network only if there isn't.
     subprocess.run(
         ["go", "build", "-o", out, "./daemon/cmd/amh-daemon"],
-        cwd=REPO_ROOT, env=env, check=True, capture_output=True, text=True,
+        cwd=REPO_ROOT, env=dict(os.environ), check=True, capture_output=True, text=True,
     )
     return {"daemon": out}
 
@@ -228,6 +233,7 @@ def daemon(go_binaries, db_path, tmp_path):
     api_port = _find_free_port()
     health_port = _find_free_port()
     mcp_port = _find_free_port()
+    grpc_port = _find_free_port()
     env = dict(
         os.environ,
         DATABASE_URL=db_path,
@@ -235,6 +241,7 @@ def daemon(go_binaries, db_path, tmp_path):
         AMH_DAEMON_PORT=str(health_port),
         AMH_API_PORT=str(api_port),
         AMH_MCP_PORT=str(mcp_port),
+        AMH_GRPC_PORT=str(grpc_port),
         HABITAT_ROUTINE_TICK_MS="60000",
         AMH_API_AGENT_TOKEN=TEST_AGENT_TOKEN,
         AMH_API_OPERATOR_TOKEN=TEST_OPERATOR_TOKEN,
@@ -245,9 +252,10 @@ def daemon(go_binaries, db_path, tmp_path):
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     base_url = f"http://127.0.0.1:{api_port}"
     mcp_base_url = f"http://127.0.0.1:{mcp_port}"
+    grpc_addr = f"127.0.0.1:{grpc_port}"
     try:
         _wait_for_health(health_port)
-        yield DaemonHandle(base_url=base_url, agent_token=TEST_AGENT_TOKEN, operator_token=TEST_OPERATOR_TOKEN, mcp_base_url=mcp_base_url)
+        yield DaemonHandle(base_url=base_url, agent_token=TEST_AGENT_TOKEN, operator_token=TEST_OPERATOR_TOKEN, mcp_base_url=mcp_base_url, grpc_addr=grpc_addr)
     finally:
         proc.terminate()
         try:

@@ -20,6 +20,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/cognition"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/mcp"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/observability"
@@ -152,6 +153,17 @@ func main() {
 	requireSignatures := getenv("AMH_EXTENSIONS_REQUIRE_SIGNATURES", "false") == "true"
 	apiSrv := api.New(host+":"+apiPort, db, dbURL, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
 
+	// grpcapi is Phase 1 of the gRPC migration (docs/AMH-SPECIFICATION.md
+	// §3.1/§3.3): the internal, purely synchronous Go-daemon <->
+	// Python-cognition-worker call path moves off HTTP+JSON onto local
+	// gRPC, service by service, alongside — not instead of — apiSrv's HTTP
+	// surface. See daemon/grpcapi's package doc comment for the full
+	// migration scope. It gets its own *policy.Engine (a thin, stateless
+	// wrapper over db, same as ReconcileInterrupted's above) rather than
+	// sharing apiSrv's internal one, since api.Server doesn't expose it.
+	grpcPort := getenv("AMH_GRPC_PORT", "8095")
+	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), auth, log)
+
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)
 
@@ -174,6 +186,7 @@ func main() {
 	sup.Add(supervisor.Child{Name: "scheduler", Run: sched.Run})
 	sup.Add(supervisor.Child{Name: "health", Run: healthSrv.Run})
 	sup.Add(supervisor.Child{Name: "api", Run: apiSrv.Run})
+	sup.Add(supervisor.Child{Name: "grpcapi", Run: grpcSrv.Run})
 	sup.Add(supervisor.Child{Name: "mcp", Run: mcpSrv.Run})
 	sup.Add(supervisor.Child{Name: "a2a", Run: a2aSrv.Run})
 	sup.Add(supervisor.Child{Name: "cognition-worker", Run: cognitionWorker.Run})

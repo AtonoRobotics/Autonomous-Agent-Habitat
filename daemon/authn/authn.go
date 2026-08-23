@@ -75,6 +75,15 @@ func (a *Authenticator) roleFor(token string) (Role, bool) {
 	return "", false
 }
 
+// Authenticate is roleFor exported for a non-HTTP transport (daemon/
+// grpcapi's auth interceptor) to reuse the exact same constant-time
+// token comparison RequireRole uses — one real implementation of "which
+// role does this token belong to," not a second copy that could drift
+// from the HTTP one.
+func (a *Authenticator) Authenticate(token string) (Role, bool) {
+	return a.roleFor(token)
+}
+
 func bearerToken(r *http.Request) (string, error) {
 	header := r.Header.Get("Authorization")
 	const prefix = "Bearer "

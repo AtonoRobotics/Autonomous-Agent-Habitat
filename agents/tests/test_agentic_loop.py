@@ -155,6 +155,30 @@ def test_path_escaping_the_vfs_root_is_a_tool_error_not_a_crash(scripted_daemon,
     assert result.result == "refused to read outside my root"
 
 
+def test_builtin_tool_args_failing_contract_validation_is_fed_back_not_raised(scripted_daemon, tmp_path):
+    """§11 recovery ownership ('Invalid model/tool output | contract
+    validator'): write_file called with a non-string 'path' must be
+    caught by real schema validation (harness/contract_validator.py's
+    BUILTIN_ARG_SCHEMAS) before _dispatch_builtin_tool ever runs. Before
+    this validator existed, this exact input crashed the whole loop —
+    vfs.write_file does `self.root / path`, and pathlib's `/` operator
+    raises a bare TypeError on a non-str/PathLike operand, which isn't
+    one of _dispatch_builtin_tool's caught exception types. Real schema
+    validation catches it first and feeds it back as a recoverable
+    error turn instead, the same posture every other tool-execution
+    error already gets."""
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "write_file", "args": {"path": 123, "content": "hi"}}),
+        json.dumps({"tool": "done", "result": "gave up, args were invalid"}),
+    ]
+    vfs = VFS(str(tmp_path / "run-contract-builtin"))
+
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon))
+
+    assert result.result == "gave up, args were invalid"
+    assert vfs.ls(".") == []
+
+
 def test_write_todos_persists_to_the_vfs(scripted_daemon, tmp_path):
     _ScriptedDaemon.responses = [
         json.dumps({"tool": "write_todos", "args": {"items": ["step one", "step two"]}}),

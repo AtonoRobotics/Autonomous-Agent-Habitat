@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://amh.dev/schemas/v1/agent-action.schema.json",
+  "title": "AMH Agent Action",
+  "description": "One turn of a model's response inside agents/harness/agentic_loop.py's ReAct-style tool-calling protocol (see _SYSTEM_PROMPT_TEMPLATE) — the model's entire response every turn must be exactly one of these, per §11's 'Invalid model/tool output | contract validator' recovery-ownership row. Deliberately permissive on args' internal shape: per-tool argument validation (built-in tools against a fixed schema, MCP tools against the tool's own server-declared input_schema) happens as a separate step in agentic_loop.py, not here — this schema only pins down the envelope every action must have.",
+  "type": "object",
+  "required": ["tool"],
+  "properties": {
+    "tool": { "type": "string", "minLength": 1 },
+    "args": { "type": "object" },
+    "result": { "type": "string" }
+  }
+}

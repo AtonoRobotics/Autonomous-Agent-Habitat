@@ -1,7 +1,10 @@
-"""Tests for selfimprove/candidates.py (daemon/selfimprove's
-GET /v1/selfimprove/candidates over real HTTP) and for decompose_goal's
-real use of get_promoted_prompt — the first live capability switch on a
-promoted CandidateVersion anywhere in this codebase (§10).
+"""Tests for selfimprove/candidates.py (daemon/grpcapi's
+SelfImproveService.ListCandidates over real gRPC — the write-side
+candidate lifecycle driven directly here still uses daemon/api's HTTP
+routes, since nothing besides this test module calls them) and for
+decompose_goal's real use of get_promoted_prompt — the first live
+capability switch on a promoted CandidateVersion anywhere in this
+codebase (§10).
 """
 
 from __future__ import annotations
@@ -48,14 +51,14 @@ def _promote_prompt_candidate(daemon, ref: str) -> str:
 
 
 def test_get_promoted_prompt_returns_default_when_nothing_promoted(daemon):
-    result = get_promoted_prompt(daemon.base_url, daemon.agent_token, "the hardcoded default")
+    result = get_promoted_prompt(daemon.grpc_addr, daemon.agent_token, "the hardcoded default")
     assert result == "the hardcoded default"
 
 
 def test_get_promoted_prompt_returns_the_real_promoted_content(daemon):
     _promote_prompt_candidate(daemon, "a genuinely different, real promoted prompt")
 
-    result = get_promoted_prompt(daemon.base_url, daemon.agent_token, "the hardcoded default")
+    result = get_promoted_prompt(daemon.grpc_addr, daemon.agent_token, "the hardcoded default")
 
     assert result == "a genuinely different, real promoted prompt"
 
@@ -63,11 +66,11 @@ def test_get_promoted_prompt_returns_the_real_promoted_content(daemon):
 def test_list_candidates_filters_by_class_and_status(daemon):
     _promote_prompt_candidate(daemon, "filtered prompt")
 
-    promoted = list_candidates(daemon.base_url, daemon.agent_token, candidate_class="prompt", status="promoted")
+    promoted = list_candidates(daemon.grpc_addr, daemon.agent_token, candidate_class="prompt", status="promoted")
     assert len(promoted) == 1
     assert promoted[0]["ref"] == "filtered prompt"
 
-    none_generated = list_candidates(daemon.base_url, daemon.agent_token, candidate_class="prompt", status="generated")
+    none_generated = list_candidates(daemon.grpc_addr, daemon.agent_token, candidate_class="prompt", status="generated")
     assert none_generated == []
 
 
@@ -124,7 +127,7 @@ def test_decompose_goal_uses_the_real_promoted_prompt_not_the_hardcoded_default(
 
     _promote_prompt_candidate(daemon, "PROMOTED SYSTEM PROMPT — respond with a JSON array of one task.")
 
-    decompose_goal("goal-1", "do the thing", db_path, daemon.base_url, daemon.agent_token)
+    decompose_goal("goal-1", "do the thing", db_path, daemon.base_url, daemon.grpc_addr, daemon.agent_token)
 
     assert _CapturingModelHandler.captured_system == "PROMOTED SYSTEM PROMPT — respond with a JSON array of one task."
 
@@ -132,6 +135,6 @@ def test_decompose_goal_uses_the_real_promoted_prompt_not_the_hardcoded_default(
 def test_decompose_goal_falls_back_to_the_hardcoded_default_when_nothing_promoted(daemon, db_path, capturing_model_server):
     from workflows.goal import _DECOMPOSE_SYSTEM_PROMPT, decompose_goal
 
-    decompose_goal("goal-2", "do another thing", db_path, daemon.base_url, daemon.agent_token)
+    decompose_goal("goal-2", "do another thing", db_path, daemon.base_url, daemon.grpc_addr, daemon.agent_token)
 
     assert _CapturingModelHandler.captured_system == _DECOMPOSE_SYSTEM_PROMPT

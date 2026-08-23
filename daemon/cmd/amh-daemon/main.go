@@ -28,6 +28,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/operations"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/policy"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/scheduler"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/selfimprove"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/store"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/supervisor"
 )
@@ -171,7 +172,7 @@ func main() {
 	// wrappers over db, same as ReconcileInterrupted's *policy.Engine
 	// above) rather than sharing apiSrv's internal ones, since api.Server
 	// only exposes Extensions, not Policy.
-	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), operations.New(db, policy.New(db)), extensions.New(db), auth, log)
+	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), operations.New(db, policy.New(db)), extensions.New(db), selfimprove.New(db), auth, log)
 
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)

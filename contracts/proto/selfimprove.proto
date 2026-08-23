@@ -1,0 +1,57 @@
+// SelfImproveService — daemon/selfimprove's candidate-lifecycle read path
+// only (docs/AMH-SPECIFICATION.md §10), over gRPC instead of HTTP+JSON.
+//
+// Phase 3 of the gRPC migration (see contracts/proto/policy.proto's header
+// comment for the migration's overall scope/rationale). Deliberately
+// narrower than Phases 1-2: only GetCandidate/ListCandidates move here.
+// Those are the only two selfimprove routes with a real internal
+// (agent-facing, non-browser, non-external-protocol) Python caller —
+// agents/selfimprove/candidates.py's list_candidates/get_promoted_prompt,
+// which agents/workflows/goal.py's decompose_goal calls to read a
+// promoted "prompt"-class candidate. Every other selfimprove route
+// (Generate, RecordEval, Canary, Promote, Demote, Rollback, Reject) is
+// either operator-only tooling with no Python client at all, or — for
+// Generate — has no real caller yet either; there is no reason to move
+// routes nothing here actually calls, so they stay on
+// daemon/api/selfimprove.go's existing HTTP surface.
+syntax = "proto3";
+
+package amh.selfimprove.v1;
+
+option go_package = "github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/selfimprovepb";
+
+service SelfImproveService {
+  // GetCandidate — mirrors GET /v1/selfimprove/candidates/{candidateID}.
+  rpc GetCandidate(GetCandidateRequest) returns (CandidateVersion);
+
+  // ListCandidates — mirrors GET /v1/selfimprove/candidates, optionally
+  // filtered by candidate_class and/or status.
+  rpc ListCandidates(ListCandidatesRequest) returns (ListCandidatesResponse);
+}
+
+message GetCandidateRequest {
+  string id = 1;
+}
+
+message ListCandidatesRequest {
+  string candidate_class = 1;
+  string status = 2;
+}
+
+message ListCandidatesResponse {
+  repeated CandidateVersion candidates = 1;
+}
+
+message CandidateVersion {
+  string id = 1;
+  string candidate_class = 2;
+  string ref = 3;
+  string status = 4;
+  string generated_by = 5;
+  string created_at = 6;
+  string canary_at = 7;
+  string promoted_at = 8;
+  string demoted_at = 9;
+  string rolled_back_at = 10;
+  string rollback_target_id = 11;
+}

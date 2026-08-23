@@ -82,7 +82,7 @@ to a single-element array. Do not include any text outside the JSON array."""
 
 @DBOS.step()
 def decompose_goal(
-    goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, agent_token: str, memory_context: str = ""
+    goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str, memory_context: str = ""
 ) -> list[dict[str, str]]:
     """Decomposes goal_text into tasks via a real model call through the
     daemon's inference seam, parses the model's JSON response, and
@@ -101,7 +101,7 @@ def decompose_goal(
     bookkeeping — otherwise the hardcoded default exactly as before."""
     ontology.ensure_goal(db_path, goal_id, goal_text)
 
-    system_prompt = get_promoted_prompt(daemon_api_base_url, agent_token, _DECOMPOSE_SYSTEM_PROMPT)
+    system_prompt = get_promoted_prompt(daemon_grpc_addr, agent_token, _DECOMPOSE_SYSTEM_PROMPT)
     user_content = f"{memory_context}\n\n{goal_text}" if memory_context else goal_text
     client = from_env(daemon_api_base_url, agent_token)
     response_text = client.complete(
@@ -247,7 +247,7 @@ def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url:
     configured (see memory_hooks's module docstring)."""
     with agent_run_span(agent_id=goal_id):
         memory_context = recall_context(goal_text, daemon_api_base_url, agent_token)
-        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token, memory_context)
+        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, daemon_grpc_addr, agent_token, memory_context)
 
         handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, daemon_grpc_addr, agent_token) for t in tasks]
         gathered = [h.get_result() for h in handles]

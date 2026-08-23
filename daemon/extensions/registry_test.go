@@ -67,6 +67,46 @@ func TestDiscover_ValidatesAndPersists(t *testing.T) {
 	}
 }
 
+// TestDiscover_SecondExtensionsNamespacedSchema_NeverTouchesCoreSchemas is
+// the direct proof of §12's "extensions publish their own namespaced
+// schemas, never modify core schemas" — previously only true because
+// only one real extension (extensions/control-plane-ui) existed to
+// (not) test it against. There is no code path anywhere in this daemon
+// that writes to contracts/*.schema.json at runtime — they are static
+// repo files — so this holds by construction; this test proves it
+// directly rather than by inspection, by discovering a second, genuinely
+// distinct extension that declares its own namespaced schema reference
+// and confirming contracts/ontology.schema.json's real on-disk bytes are
+// byte-for-byte unchanged before and after.
+func TestDiscover_SecondExtensionsNamespacedSchema_NeverTouchesCoreSchemas(t *testing.T) {
+	ontologySchemaPath := filepath.Join("..", "..", "contracts", "ontology.schema.json")
+	before, err := os.ReadFile(ontologySchemaPath)
+	if err != nil {
+		t.Fatalf("read ontology schema before Discover: %v", err)
+	}
+
+	db := testDB(t)
+	reg := New(db)
+
+	second := baseManifest("amh.acme/second-extension", "1.0.0")
+	second.Spec.Schemas = []string{"https://amh.acme.example/schemas/v1/widget.schema.json"}
+	ext, err := reg.Discover(context.Background(), second)
+	if err != nil {
+		t.Fatalf("Discover second extension: %v", err)
+	}
+	if ext.Status != StatusDiscovered {
+		t.Fatalf("expected status discovered, got %s", ext.Status)
+	}
+
+	after, err := os.ReadFile(ontologySchemaPath)
+	if err != nil {
+		t.Fatalf("read ontology schema after Discover: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("contracts/ontology.schema.json changed after discovering a second extension's own namespaced schema — core schemas must never be modified by an extension")
+	}
+}
+
 func TestDiscover_RejectsInvalidManifest(t *testing.T) {
 	db := testDB(t)
 	reg := New(db)

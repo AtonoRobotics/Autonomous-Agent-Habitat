@@ -45,4 +45,6 @@ deploy/       Linux and Windows service packaging
 
 Read [the governing specification](docs/AMH-SPECIFICATION.md) before implementation. Domain extensions must consume the contracts in `contracts/` and must not add domain entities to the AMH core ontology.
 
+Read the [independent architecture comparison](docs/ARCHITECTURE-COMPARISON.md) when deciding whether AMH, DeepSeek Harness/Cordis, or a composed architecture is the correct solution for a requirement.
+
 **Authoritative revision:** 10 — 2026-08-21.

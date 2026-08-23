@@ -29,6 +29,7 @@
     "attempt": { "type": "integer", "minimum": 0 },
     "sequence": { "type": "integer", "minimum": 0 },
     "observationRef": { "type": "string", "format": "uri-reference" },
+    "observationPayload": { "type": "string" },
     "error": {
       "type": "object",
       "additionalProperties": false,

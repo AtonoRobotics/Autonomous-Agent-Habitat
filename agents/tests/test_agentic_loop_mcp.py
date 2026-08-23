@@ -10,14 +10,16 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from concurrent import futures
 
+import grpc
 import pytest
 
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 from context.llm import ModelClient
 from harness.agentic_loop import MCPServerSpec, mcp_servers_from_env, run_agentic_loop
 from harness.vfs import VFS
+from workflows.operationspb import operations_pb2, operations_pb2_grpc
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 SERVER_ENTRYPOINT = os.path.join(
@@ -31,70 +33,83 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-class _ScriptedDaemon(BaseHTTPRequestHandler):
-    """Stands in for the real daemon on two distinct routes: model
-    completions (any path other than /v1/operations, matching the shape
-    the pre-existing tests already relied on) and the operations-tracking
-    calls agentic_loop.py's MCP call site now also makes against the same
-    daemon_api_base_url. operations_calls records every /v1/operations
-    POST body so tests can assert on what was proposed; operations_status
-    lets a test script a failure response to prove tracking failures don't
-    block the underlying tool call."""
+class _ScriptedDaemon(inference_pb2_grpc.InferenceServiceServicer):
+    """Stands in for the real daemon's InferenceService.Complete RPC only
+    — agentic_loop.py's MCP effect-tracking calls go over gRPC too (Phase
+    2 of the gRPC migration), handled by _FakeOperationsService below, a
+    separate fake gRPC service registered on the same server."""
 
     responses: list[str] = []
     call_count = 0
     last_system_prompt = ""
-    operations_calls: list[dict] = []
-    operations_status = 201
 
-    def log_message(self, format, *args):
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
+    def Complete(self, request, context):
         cls = type(self)
-
-        if self.path.startswith("/v1/operations"):
-            cls.operations_calls.append(body)
-            response = json.dumps({"effect_id": "test-effect", "state": "needs_approval"}).encode()
-            self.send_response(cls.operations_status)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(response)
-            return
-
-        cls.last_system_prompt = body.get("system", "")
+        cls.last_system_prompt = request.system
         text = cls.responses[cls.call_count]
         cls.call_count += 1
-        response = json.dumps({"text": text}).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(response)
+        return inference_pb2.CompleteResponse(text=text)
 
 
 @pytest.fixture()
 def scripted_daemon():
     _ScriptedDaemon.responses = []
     _ScriptedDaemon.call_count = 0
-    _ScriptedDaemon.operations_calls = []
-    _ScriptedDaemon.operations_status = 201
-    server = HTTPServer(("127.0.0.1", 0), _ScriptedDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    _ScriptedDaemon.last_system_prompt = ""
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(_ScriptedDaemon(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield f"127.0.0.1:{port}"
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 def _client(scripted_daemon) -> ModelClient:
-    return ModelClient(daemon_api_base_url=scripted_daemon, agent_token="tok", model="test-model")
+    return ModelClient(daemon_grpc_addr=scripted_daemon, agent_token="tok", model="test-model")
 
 
-def test_loop_calls_a_real_mcp_tool_and_sees_its_real_effect(scripted_daemon, tmp_path):
+class _FakeOperationsService(operations_pb2_grpc.OperationsServiceServicer):
+    """A real grpc.Server-hosted OperationsService standing in for
+    daemon/grpcapi's real one — the gRPC counterpart of _ScriptedDaemon's
+    old HTTP /v1/operations branch. calls records every real Propose
+    request this process received (as a plain dict, decoding payload_json
+    back to a dict for easy assertion); fail, when set, makes Propose
+    abort with an INTERNAL error to prove tracking failures don't block
+    the underlying MCP tool call."""
+
+    calls: list[dict] = []
+    fail = False
+
+    def Propose(self, request, context):
+        cls = type(self)
+        cls.calls.append({
+            "owner_extension_id": request.owner_extension_id,
+            "effect_type": request.effect_type,
+            "reversibility": request.reversibility,
+            "payload": json.loads(request.payload_json),
+        })
+        if cls.fail:
+            context.abort(grpc.StatusCode.INTERNAL, "simulated tracking failure")
+        return operations_pb2.Effect(effect_id="test-effect", state="needs_approval")
+
+
+@pytest.fixture()
+def fake_operations_server():
+    _FakeOperationsService.calls = []
+    _FakeOperationsService.fail = False
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    operations_pb2_grpc.add_OperationsServiceServicer_to_server(_FakeOperationsService(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    try:
+        yield f"127.0.0.1:{port}"
+    finally:
+        server.stop(grace=1)
+
+
+def test_loop_calls_a_real_mcp_tool_and_sees_its_real_effect(scripted_daemon, fake_operations_server, tmp_path):
     mcp_root = tmp_path / "mcp-root"
     mcp_root.mkdir()
     mcp_server = MCPServerSpec(name="fs", command="node", args=[SERVER_ENTRYPOINT, str(mcp_root)])
@@ -107,7 +122,7 @@ def test_loop_calls_a_real_mcp_tool_and_sees_its_real_effect(scripted_daemon, tm
     ]
     vfs = VFS(str(tmp_path / "vfs-root"))
 
-    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), fake_operations_server, mcp_servers=[mcp_server])
 
     assert result.result == "wrote and re-read the file over MCP"
     assert result.turns_used == 3
@@ -115,7 +130,7 @@ def test_loop_calls_a_real_mcp_tool_and_sees_its_real_effect(scripted_daemon, tm
     assert (mcp_root / "hello.txt").read_text() == "hello from the loop via MCP"
 
 
-def test_system_prompt_lists_the_real_mcp_tool_catalog(scripted_daemon, tmp_path):
+def test_system_prompt_lists_the_real_mcp_tool_catalog(scripted_daemon, fake_operations_server, tmp_path):
     mcp_root = tmp_path / "mcp-root"
     mcp_root.mkdir()
     mcp_server = MCPServerSpec(name="fs", command="node", args=[SERVER_ENTRYPOINT, str(mcp_root)])
@@ -123,7 +138,7 @@ def test_system_prompt_lists_the_real_mcp_tool_catalog(scripted_daemon, tmp_path
     _ScriptedDaemon.responses = [json.dumps({"tool": "done", "result": "looked at the tools"})]
     vfs = VFS(str(tmp_path / "vfs-root"))
 
-    run_agentic_loop("just look", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+    run_agentic_loop("just look", vfs, _client(scripted_daemon), fake_operations_server, mcp_servers=[mcp_server])
 
     # The tool catalog in the system prompt was built from the real
     # server's real list_tools() response, not a hand-written stand-in.
@@ -131,7 +146,7 @@ def test_system_prompt_lists_the_real_mcp_tool_catalog(scripted_daemon, tmp_path
     assert "mcp__fs__read_text_file" in _ScriptedDaemon.last_system_prompt
 
 
-def test_mcp_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):
+def test_mcp_tool_error_is_fed_back_not_raised(scripted_daemon, fake_operations_server, tmp_path):
     mcp_root = tmp_path / "mcp-root"
     mcp_root.mkdir()
     mcp_server = MCPServerSpec(name="fs", command="node", args=[SERVER_ENTRYPOINT, str(mcp_root)])
@@ -142,13 +157,13 @@ def test_mcp_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):
     ]
     vfs = VFS(str(tmp_path / "vfs-root"))
 
-    result = run_agentic_loop("read a missing file over MCP", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+    result = run_agentic_loop("read a missing file over MCP", vfs, _client(scripted_daemon), fake_operations_server, mcp_servers=[mcp_server])
 
     assert result.result == "the file was missing, gave up"
     assert result.turns_used == 2
 
 
-def test_mcp_tool_args_failing_contract_validation_is_fed_back_not_sent_to_the_server(scripted_daemon, tmp_path):
+def test_mcp_tool_args_failing_contract_validation_is_fed_back_not_sent_to_the_server(scripted_daemon, fake_operations_server, tmp_path):
     """§11 recovery ownership ('Invalid model/tool output | contract
     validator'): calling the real filesystem server's write_file with a
     numeric 'path' (its own real input_schema requires a string) must be
@@ -166,12 +181,12 @@ def test_mcp_tool_args_failing_contract_validation_is_fed_back_not_sent_to_the_s
     ]
     vfs = VFS(str(tmp_path / "vfs-root"))
 
-    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), fake_operations_server, mcp_servers=[mcp_server])
 
     assert result.result == "gave up, args were invalid"
     assert list(mcp_root.iterdir()) == []
     # A rejected-before-dispatch call is never proposed as an effect either.
-    assert _ScriptedDaemon.operations_calls == []
+    assert _FakeOperationsService.calls == []
 
 
 def test_mcp_servers_from_env_is_empty_when_unset(monkeypatch):
@@ -188,9 +203,9 @@ def test_mcp_servers_from_env_parses_real_config(monkeypatch):
     assert specs == [MCPServerSpec(name="fs", command="node", args=["server.js", "/tmp"], env={"FOO": "bar"})]
 
 
-def test_mcp_tool_call_proposes_an_operations_effect(scripted_daemon, tmp_path):
+def test_mcp_tool_call_proposes_an_operations_effect(scripted_daemon, fake_operations_server, tmp_path):
     """Each MCP tool call is proposed as an external effect (§4) through
-    workflows/operations.py before it runs — asserting the real HTTP POST
+    workflows/operations.py before it runs — asserting the real gRPC call
     landed on the daemon, not just that the loop still works."""
     mcp_root = tmp_path / "mcp-root"
     mcp_root.mkdir()
@@ -203,21 +218,21 @@ def test_mcp_tool_call_proposes_an_operations_effect(scripted_daemon, tmp_path):
     ]
     vfs = VFS(str(tmp_path / "vfs-root"))
 
-    run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+    run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), fake_operations_server, mcp_servers=[mcp_server])
 
-    assert len(_ScriptedDaemon.operations_calls) == 1
-    proposed = _ScriptedDaemon.operations_calls[0]
+    assert len(_FakeOperationsService.calls) == 1
+    proposed = _FakeOperationsService.calls[0]
     assert proposed["owner_extension_id"] == "amh.core/mcp-client"
     assert proposed["effect_type"] == "mcp_tool_call:fs:write_file"
     assert proposed["reversibility"] == "none"
     assert proposed["payload"] == {"server": "fs", "tool": "write_file", "args": {"path": write_path, "content": "hi"}}
 
 
-def test_mcp_tool_call_still_runs_when_effect_tracking_fails(scripted_daemon, tmp_path):
+def test_mcp_tool_call_still_runs_when_effect_tracking_fails(scripted_daemon, fake_operations_server, tmp_path):
     """A daemon-side failure to record the operations effect (e.g. the
-    /v1/operations route erroring) must not block or fail the underlying
+    gRPC Propose call erroring) must not block or fail the underlying
     MCP tool call — tracking is best-effort, never a gate."""
-    _ScriptedDaemon.operations_status = 500
+    _FakeOperationsService.fail = True
 
     mcp_root = tmp_path / "mcp-root"
     mcp_root.mkdir()
@@ -230,7 +245,7 @@ def test_mcp_tool_call_still_runs_when_effect_tracking_fails(scripted_daemon, tm
     ]
     vfs = VFS(str(tmp_path / "vfs-root"))
 
-    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), fake_operations_server, mcp_servers=[mcp_server])
 
     assert result.result == "wrote it despite tracking failure"
     assert (mcp_root / "hello.txt").read_text() == "still written"

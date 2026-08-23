@@ -146,12 +146,15 @@ func TestFullHappyPath_ProposeDispatchObserveConfirm(t *testing.T) {
 		t.Fatalf("expected dispatched with external_command_id, got %+v", eff)
 	}
 
-	eff, err = e.MarkObserved(context.Background(), eff.EffectID, "artifact://obs-1")
+	eff, err = e.MarkObserved(context.Background(), eff.EffectID, "artifact://obs-1", "the real observed content")
 	if err != nil {
 		t.Fatalf("MarkObserved: %v", err)
 	}
 	if eff.State != StateObserved {
 		t.Fatalf("expected observed, got %s", eff.State)
+	}
+	if eff.ObservationPayload != "the real observed content" {
+		t.Fatalf("expected observation_payload to round-trip, got %q", eff.ObservationPayload)
 	}
 
 	eff, err = e.Resolve(context.Background(), eff.EffectID, StateConfirmed, nil)
@@ -226,7 +229,7 @@ func TestMarkDispatchPending_PayloadMutatedAfterAdmission_FailsClosed(t *testing
 func TestMarkObserved_RequiresDispatched(t *testing.T) {
 	e := testEngine(t)
 	eff := proposeVerified(t, e, "op-1")
-	if _, err := e.MarkObserved(context.Background(), eff.EffectID, "ref"); !errors.Is(err, ErrInvalidTransition) {
+	if _, err := e.MarkObserved(context.Background(), eff.EffectID, "ref", ""); !errors.Is(err, ErrInvalidTransition) {
 		t.Fatalf("expected ErrInvalidTransition for a still-admitted effect, got %v", err)
 	}
 }

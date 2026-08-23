@@ -126,6 +126,64 @@ func TestComplete_Anthropic_CapturesRealTokenUsage(t *testing.T) {
 	}
 }
 
+// TestComplete_KnownModel_ComputesRealCostUSD is §2.1/§14's cost side of
+// the same gap TestComplete_Anthropic_CapturesRealTokenUsage closes for
+// tokens: a model this codebase's pricing table (pricing.go) knows about
+// must get a real, computed cost_usd on its Usage, not the schema
+// default of 0.
+func TestComplete_KnownModel_ComputesRealCostUSD(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"the real answer"}],"usage":{"input_tokens":1000000,"output_tokens":1000000}}`))
+	}))
+	defer fake.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "sk-ant-test", "base_url": fake.URL})
+
+	router := New(creds)
+	_, usage, err := router.Complete(context.Background(), Request{
+		Provider: "anthropic", Model: "claude-sonnet-5",
+		Messages: []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	// claude-sonnet-5 pricing (pricing.go): $3/M input, $15/M output — 1M
+	// of each is exactly $3 + $15.
+	if usage.CostUSD != 18 {
+		t.Fatalf("expected cost_usd 18 for 1M/1M tokens of claude-sonnet-5, got %v", usage.CostUSD)
+	}
+}
+
+// TestComplete_UnpricedModel_CostUSDStaysZero proves an unlisted model is
+// a real, expected gap (CostUSD's own doc comment) rather than a
+// fabricated or error-raising guess.
+func TestComplete_UnpricedModel_CostUSDStaysZero(t *testing.T) {
+	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"usage":{"input_tokens":1000000,"output_tokens":1000000}}`))
+	}))
+	defer fake.Close()
+
+	db := testDB(t)
+	creds := testCredentials(t, db)
+	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "sk-ant-test", "base_url": fake.URL})
+
+	router := New(creds)
+	_, usage, err := router.Complete(context.Background(), Request{
+		Provider: "anthropic", Model: "a-model-with-no-pricing-entry",
+		Messages: []Message{{Role: "user", Content: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if usage.CostUSD != 0 {
+		t.Fatalf("expected cost_usd 0 for an unpriced model, got %v", usage.CostUSD)
+	}
+}
+
 func TestComplete_AnthropicOAuth_UsesBearerNotAPIKeyHeader(t *testing.T) {
 	var sawAuthHeader, sawAPIKeyHeader string
 	fake := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

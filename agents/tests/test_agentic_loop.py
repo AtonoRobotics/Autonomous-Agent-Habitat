@@ -1,69 +1,61 @@
 """Tests for harness/agentic_loop.py — the real ReAct-style tool-calling
 loop that replaced do_subagent_work's single-turn completion. Stands in
-directly for the daemon's /v1/inference/complete route (same {"text": ...}
-shape as test_llm.py's _FakeDaemon — one layer closer than conftest.py's
-_FakeModelHandler, which stands in for the provider behind the daemon),
-scripted with a queue of canned responses so each test can drive a
-specific multi-turn scenario deterministically.
+directly for the daemon's InferenceService.Complete RPC (same real
+protobuf response shape as test_llm.py's _FakeInferenceService — one
+layer closer than conftest.py's _FakeModelHandler, which stands in for
+the provider behind the daemon), scripted with a queue of canned
+responses so each test can drive a specific multi-turn scenario
+deterministically.
 """
 
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from concurrent import futures
 
+import grpc
 import pytest
 
 from context.budget import BudgetManager, approximate_token_count
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 from context.llm import ModelClient
 from harness.agentic_loop import LoopBudgetExceededError, UnknownToolError, run_agentic_loop
 from harness.vfs import VFS
 
 
-class _ScriptedDaemon(BaseHTTPRequestHandler):
+class _ScriptedDaemon(inference_pb2_grpc.InferenceServiceServicer):
     responses: list[str] = []
     usages: list[tuple[int, int]] = []
+    costs: list[float] = []
     call_count = 0
 
-    def log_message(self, format, *args):
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        self.rfile.read(length)
+    def Complete(self, request, context):
         cls = type(self)
         text = cls.responses[cls.call_count]
-        payload = {"text": text}
-        if cls.usages:
-            input_tokens, output_tokens = cls.usages[cls.call_count]
-            payload["input_tokens"] = input_tokens
-            payload["output_tokens"] = output_tokens
+        input_tokens, output_tokens = cls.usages[cls.call_count] if cls.usages else (0, 0)
+        cost_usd = cls.costs[cls.call_count] if cls.costs else 0.0
         cls.call_count += 1
-        body = json.dumps(payload).encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(body)
+        return inference_pb2.CompleteResponse(text=text, input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=cost_usd)
 
 
 @pytest.fixture()
 def scripted_daemon():
     _ScriptedDaemon.responses = []
     _ScriptedDaemon.usages = []
+    _ScriptedDaemon.costs = []
     _ScriptedDaemon.call_count = 0
-    server = HTTPServer(("127.0.0.1", 0), _ScriptedDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(_ScriptedDaemon(), server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield f"127.0.0.1:{port}"
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 def _client(scripted_daemon) -> ModelClient:
-    return ModelClient(daemon_api_base_url=scripted_daemon, agent_token="tok", model="test-model")
+    return ModelClient(daemon_grpc_addr=scripted_daemon, agent_token="tok", model="test-model")
 
 
 def test_write_file_then_done_actually_writes_to_the_vfs(scripted_daemon, tmp_path):
@@ -73,7 +65,7 @@ def test_write_file_then_done_actually_writes_to_the_vfs(scripted_daemon, tmp_pa
     ]
     vfs = VFS(str(tmp_path / "run-1"))
 
-    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon))
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon), scripted_daemon)
 
     assert result.result == "wrote the notes"
     assert result.turns_used == 2
@@ -93,10 +85,26 @@ def test_accumulates_real_token_usage_across_turns(scripted_daemon, tmp_path):
     _ScriptedDaemon.usages = [(100, 20), (30, 5)]
     vfs = VFS(str(tmp_path / "run-usage"))
 
-    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon))
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon), scripted_daemon)
 
     assert result.tokens_in == 130
     assert result.tokens_out == 25
+
+
+def test_accumulates_real_cost_usd_across_turns(scripted_daemon, tmp_path):
+    """§2.1/§14 cost accounting: the loop must sum each turn's real
+    daemon-computed cost_usd the same way it sums tokens — this is the
+    seam do_subagent_work reads to record a run's real cost_usd."""
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "write_file", "args": {"path": "notes.txt", "content": "hello"}}),
+        json.dumps({"tool": "done", "result": "done"}),
+    ]
+    _ScriptedDaemon.costs = [0.0125, 0.003]
+    vfs = VFS(str(tmp_path / "run-cost"))
+
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon), scripted_daemon)
+
+    assert result.cost_usd == pytest.approx(0.0155)
 
 
 def test_a_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):
@@ -109,7 +117,7 @@ def test_a_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):
     ]
     vfs = VFS(str(tmp_path / "run-2"))
 
-    result = run_agentic_loop("read a missing file", vfs, _client(scripted_daemon))
+    result = run_agentic_loop("read a missing file", vfs, _client(scripted_daemon), scripted_daemon)
 
     assert result.result == "gave up, file was missing"
     assert result.turns_used == 2
@@ -120,7 +128,7 @@ def test_malformed_json_response_raises(scripted_daemon, tmp_path):
     vfs = VFS(str(tmp_path / "run-3"))
 
     with pytest.raises(ValueError, match="not valid JSON"):
-        run_agentic_loop("do something", vfs, _client(scripted_daemon))
+        run_agentic_loop("do something", vfs, _client(scripted_daemon), scripted_daemon)
 
 
 def test_unknown_tool_name_raises(scripted_daemon, tmp_path):
@@ -128,7 +136,7 @@ def test_unknown_tool_name_raises(scripted_daemon, tmp_path):
     vfs = VFS(str(tmp_path / "run-4"))
 
     with pytest.raises(UnknownToolError):
-        run_agentic_loop("do something", vfs, _client(scripted_daemon))
+        run_agentic_loop("do something", vfs, _client(scripted_daemon), scripted_daemon)
 
 
 def test_max_turns_exceeded_raises_rather_than_fabricating_success(scripted_daemon, tmp_path):
@@ -136,7 +144,7 @@ def test_max_turns_exceeded_raises_rather_than_fabricating_success(scripted_daem
     vfs = VFS(str(tmp_path / "run-5"))
 
     with pytest.raises(LoopBudgetExceededError):
-        run_agentic_loop("never finish", vfs, _client(scripted_daemon), max_turns=3)
+        run_agentic_loop("never finish", vfs, _client(scripted_daemon), scripted_daemon, max_turns=3)
 
     # Never called more than max_turns times — the loop stops asking once
     # it gives up, it doesn't keep going past its own stated budget.
@@ -150,7 +158,7 @@ def test_path_escaping_the_vfs_root_is_a_tool_error_not_a_crash(scripted_daemon,
     ]
     vfs = VFS(str(tmp_path / "run-6"))
 
-    result = run_agentic_loop("try to escape", vfs, _client(scripted_daemon))
+    result = run_agentic_loop("try to escape", vfs, _client(scripted_daemon), scripted_daemon)
 
     assert result.result == "refused to read outside my root"
 
@@ -173,7 +181,7 @@ def test_builtin_tool_args_failing_contract_validation_is_fed_back_not_raised(sc
     ]
     vfs = VFS(str(tmp_path / "run-contract-builtin"))
 
-    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon))
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon), scripted_daemon)
 
     assert result.result == "gave up, args were invalid"
     assert vfs.ls(".") == []
@@ -186,7 +194,7 @@ def test_write_todos_persists_to_the_vfs(scripted_daemon, tmp_path):
     ]
     vfs = VFS(str(tmp_path / "run-7"))
 
-    run_agentic_loop("make a plan", vfs, _client(scripted_daemon))
+    run_agentic_loop("make a plan", vfs, _client(scripted_daemon), scripted_daemon)
 
     todos = json.loads(vfs.read_file("todos.json"))
     assert [t["text"] for t in todos] == ["step one", "step two"]
@@ -203,7 +211,7 @@ def test_compaction_fires_under_a_small_window_budget(scripted_daemon, tmp_path)
     vfs = VFS(str(tmp_path / "run-8"))
     budget = BudgetManager(window_budget=30, compact_at=0.5, count_tokens=approximate_token_count)
 
-    result = run_agentic_loop("do enough work to compact", vfs, _client(scripted_daemon), max_turns=10, budget=budget)
+    result = run_agentic_loop("do enough work to compact", vfs, _client(scripted_daemon), scripted_daemon, max_turns=10, budget=budget)
 
     assert result.result == "finished after compaction"
     assert result.compacted is True

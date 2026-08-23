@@ -1,0 +1,142 @@
+// OperationsService — daemon/operations's generic external-effect
+// lifecycle (docs/AMH-SPECIFICATION.md §4), over gRPC instead of HTTP+JSON.
+//
+// Phase 2 of the gRPC migration (see contracts/proto/policy.proto's header
+// comment for the migration's overall scope/rationale; this is the same
+// posture applied to the next service). operations has no browser
+// (control-plane UI) caller and no external-protocol caller — its real
+// callers are Python agent code (agents/workflows/operations.py, the sole
+// production call site being harness/agentic_loop.py's MCP tool-call
+// tracking) and, in-process on the Go side, daemon/extensions and
+// daemon/inference, which already call daemon/operations.Engine directly
+// without going through any HTTP/gRPC hop at all.
+//
+// payload_json stays a JSON-encoded string, not google.protobuf.Struct,
+// for the same reason policy.proto's payload_json does: MarkDispatchPending
+// hashes the dispatch-time payload fresh and binds it to the digest
+// Propose already admitted (§15 acceptance invariant #6), and that digest
+// must be computed identically regardless of which transport carried the
+// call.
+//
+// Effect-ownership authorization (§15 acceptance invariant #5: "an
+// extension cannot mutate another extension's owned effects") is NOT
+// expressed as a per-method role allow-list the way policy.proto's
+// operator-only Approve/Deny are — daemon/authn only has two static,
+// global roles, and this check is per-effect, not per-route. It works the
+// same way over gRPC as it does over HTTP
+// (daemon/api/operations.go's authorizeEffectOwner/authorizeEffectMutation):
+// an operator token always passes; an owner_extension_id under the
+// "amh.core/" prefix passes with nothing more than the ordinary
+// agent-or-operator check every method already has; anything else
+// requires the caller to present that exact extension's own capability
+// token (minted at Activate — daemon/extensions/capability.go) as gRPC
+// metadata key "x-amh-extension-token", the metadata analog of the HTTP
+// client's X-AMH-Extension-Token header.
+syntax = "proto3";
+
+package amh.operations.v1;
+
+option go_package = "github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/operationspb";
+
+service OperationsService {
+  // Propose creates a new effect record and runs it through daemon/policy
+  // for admission — mirrors POST /v1/operations.
+  rpc Propose(ProposeRequest) returns (Effect);
+
+  // GetEffect is a cheap, idempotent read — mirrors
+  // GET /v1/operations/{effectID}.
+  rpc GetEffect(GetEffectRequest) returns (Effect);
+
+  // ListEffectsByOperation — mirrors GET /v1/operations?operation_id=....
+  rpc ListEffectsByOperation(ListEffectsByOperationRequest) returns (ListEffectsByOperationResponse);
+
+  // MarkDispatchPending atomically consumes the admitting PolicyDecision,
+  // binding dispatch to dispatch_payload_json's exact digest — mirrors
+  // POST /v1/operations/{effectID}/dispatch-pending.
+  rpc MarkDispatchPending(MarkDispatchPendingRequest) returns (Effect);
+
+  // MarkDispatched — mirrors POST /v1/operations/{effectID}/dispatched.
+  rpc MarkDispatched(MarkDispatchedRequest) returns (Effect);
+
+  // MarkObserved — mirrors POST /v1/operations/{effectID}/observed.
+  rpc MarkObserved(MarkObservedRequest) returns (Effect);
+
+  // MarkOutcomeUnknown — mirrors
+  // POST /v1/operations/{effectID}/outcome-unknown.
+  rpc MarkOutcomeUnknown(MarkOutcomeUnknownRequest) returns (Effect);
+
+  // Resolve records the caller's own terminal verdict — mirrors
+  // POST /v1/operations/{effectID}/resolve. See daemon/operations's doc
+  // comment for why this argument is trusted from the caller rather than
+  // computed server-side, the deliberate exception to this codebase's
+  // usual never-trust-the-caller posture.
+  rpc Resolve(ResolveRequest) returns (Effect);
+}
+
+message ProposeRequest {
+  string operation_id = 1;
+  string owner_extension_id = 2;
+  string effect_type = 3;
+  string payload_json = 4;
+  string reversibility = 5;
+  string retry_class = 6;
+}
+
+message GetEffectRequest {
+  string effect_id = 1;
+}
+
+message ListEffectsByOperationRequest {
+  string operation_id = 1;
+}
+
+message ListEffectsByOperationResponse {
+  repeated Effect effects = 1;
+}
+
+message MarkDispatchPendingRequest {
+  string effect_id = 1;
+  string payload_json = 2;
+}
+
+message MarkDispatchedRequest {
+  string effect_id = 1;
+  string external_command_id = 2;
+}
+
+message MarkObservedRequest {
+  string effect_id = 1;
+  string observation_ref = 2;
+  string observation_payload = 3;
+}
+
+message MarkOutcomeUnknownRequest {
+  string effect_id = 1;
+}
+
+message ResolveRequest {
+  string effect_id = 1;
+  string terminal = 2;
+  string error_code = 3;
+  bool retryable = 4;
+  string message = 5;
+}
+
+message Effect {
+  string effect_id = 1;
+  string operation_id = 2;
+  string owner_extension_id = 3;
+  string effect_type = 4;
+  string decision_id = 5;
+  string state = 6;
+  string forward_digest = 7;
+  string retry_class = 8;
+  string external_command_id = 9;
+  string observation_ref = 10;
+  string observation_payload = 11;
+  string error_code = 12;
+  bool error_retryable = 13;
+  string error_message = 14;
+  string created_at = 15;
+  string updated_at = 16;
+}

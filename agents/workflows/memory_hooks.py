@@ -72,7 +72,7 @@ async def _graphiti_add_episode(model_client, name: str, episode_body: str, sour
 
 
 @DBOS.step()
-def recall_context(query_text: str, daemon_api_base_url: str, agent_token: str) -> str:
+def recall_context(query_text: str, daemon_grpc_addr: str, agent_token: str) -> str:
     """Best-effort recall from episodic (Hindsight) and semantic/entity
     (Graphiti) memory, combined into one text block a caller can prepend to
     a model prompt. Returns "" if neither is configured, or neither finds
@@ -89,7 +89,7 @@ def recall_context(query_text: str, daemon_api_base_url: str, agent_token: str) 
         if facts:
             blocks.append(f"Relevant past episodes:\n{facts}")
 
-    model_client = from_env(daemon_api_base_url, agent_token)
+    model_client = from_env(daemon_grpc_addr, agent_token)
     try:
         graph_facts = asyncio.run(_graphiti_search(model_client, query_text))
     except GraphDriverNotConfiguredError:
@@ -102,7 +102,7 @@ def recall_context(query_text: str, daemon_api_base_url: str, agent_token: str) 
 
 
 @DBOS.step()
-def retain_outcome(goal_text: str, summary: str, daemon_api_base_url: str, agent_token: str) -> None:
+def retain_outcome(goal_text: str, summary: str, daemon_grpc_addr: str, agent_token: str) -> None:
     """Best-effort retention into episodic (Hindsight) and semantic/entity
     (Graphiti) memory. Same optional-if-unconfigured semantics as
     recall_context."""
@@ -115,7 +115,7 @@ def retain_outcome(goal_text: str, summary: str, daemon_api_base_url: str, agent
     else:
         hindsight.retain(bank_id=_bank_id(), content=content, timestamp=datetime.now(timezone.utc))
 
-    model_client = from_env(daemon_api_base_url, agent_token)
+    model_client = from_env(daemon_grpc_addr, agent_token)
     try:
         asyncio.run(
             _graphiti_add_episode(

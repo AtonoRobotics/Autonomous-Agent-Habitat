@@ -85,7 +85,7 @@ def test_pursue_goal_emits_nested_agent_run_spans(span_exporter, db_path, daemon
     DBOS.launch()
     try:
         goal_id = str(uuid.uuid4())
-        pursue_goal(goal_id, "poll temperature; open vent", db_path, daemon.base_url, daemon.agent_token)
+        pursue_goal(goal_id, "poll temperature; open vent", db_path, daemon.grpc_addr, daemon.agent_token)
     finally:
         DBOS.destroy()
 

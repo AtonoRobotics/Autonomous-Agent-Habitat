@@ -42,7 +42,7 @@ def test_claim_and_dispatch_once_runs_an_open_goal_to_completion(db_path, daemon
     try:
         goal_id = _insert_open_goal(db_path, "monitor greenhouse temperature; open vent on threshold")
 
-        dispatched = claim_and_dispatch_once(db_path, daemon.base_url, daemon.agent_token)
+        dispatched = claim_and_dispatch_once(db_path, daemon.grpc_addr, daemon.agent_token)
         assert dispatched == [goal_id]
 
         handle = DBOS.retrieve_workflow(f"goal-{goal_id}")
@@ -75,7 +75,7 @@ def test_claim_and_dispatch_once_ignores_non_open_goals(db_path, daemon, fake_mo
         conn.commit()
         conn.close()
 
-        dispatched = claim_and_dispatch_once(db_path, daemon.base_url, daemon.agent_token)
+        dispatched = claim_and_dispatch_once(db_path, daemon.grpc_addr, daemon.agent_token)
         assert dispatched == []
     finally:
         DBOS.destroy()
@@ -98,10 +98,10 @@ def test_claim_and_dispatch_once_is_idempotent_under_a_repeat_call(db_path, daem
     try:
         goal_id = _insert_open_goal(db_path, "keep the greenhouse healthy overnight")
 
-        first = claim_and_dispatch_once(db_path, daemon.base_url, daemon.agent_token)
+        first = claim_and_dispatch_once(db_path, daemon.grpc_addr, daemon.agent_token)
         # Nothing has marked the goal non-'open' yet (by design — see the
         # module doc comment), so the second call sees it again.
-        second = claim_and_dispatch_once(db_path, daemon.base_url, daemon.agent_token)
+        second = claim_and_dispatch_once(db_path, daemon.grpc_addr, daemon.agent_token)
         assert first == [goal_id]
         assert second == [goal_id]
 
@@ -205,7 +205,7 @@ def test_cancel_interrupted_goals_once_actually_stops_an_in_flight_run(db_path, 
     DBOS.launch()
     try:
         goal_id = _insert_open_goal(db_path, "water the greenhouse plants")
-        dispatched = claim_and_dispatch_once(db_path, daemon.base_url, daemon.agent_token)
+        dispatched = claim_and_dispatch_once(db_path, daemon.grpc_addr, daemon.agent_token)
         assert dispatched == [goal_id]
 
         # Give pursue_goal time to run decompose_goal (fast) and reach

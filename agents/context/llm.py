@@ -1,7 +1,13 @@
-"""Model client for AMH's cognition layer — an HTTP client to the daemon's
-inference seam (daemon/inference, daemon/api's /v1/inference/* routes),
-per docs/AMH-SPECIFICATION.md §2.1's "model-provider and tool-provider
-seams" core responsibility.
+"""Model client for AMH's cognition layer — a gRPC client to the daemon's
+inference seam (daemon/inference, daemon/grpcapi's InferenceService), per
+docs/AMH-SPECIFICATION.md §2.1's "model-provider and tool-provider seams"
+core responsibility.
+
+Phase 4 (final phase) of the gRPC migration — see workflows/policy.py's
+module docstring for Phase 1 and contracts/proto/inference.proto's header
+comment for why this was migrated last: the hottest, highest-volume call
+path in the daemon, with the largest blast radius, so every other
+internal service moved first.
 
 This does NOT hold a model-provider credential. That is the point: an
 agent computer (daemon/sandbox) is created and torn down constantly, and
@@ -12,22 +18,24 @@ ephemeral process. So the credential lives once, centrally, registered by
 an operator as an account in daemon/credentials (exactly like a GitHub or
 Gmail account — see the control-plane UI's Accounts tab) and this module
 calls the daemon with only the same agent bearer token it already holds
-for actuation, approval, and everything else — matching
-agents/workflows/actuate.py's shape exactly.
+for policy/operations — matching agents/workflows/policy.py's shape
+exactly.
 
-complete(), count_tokens(), and embed() each make a real HTTP call and
+complete(), count_tokens(), and embed() each make a real gRPC call and
 return the real result. No provider registered on the daemon side -> the
-daemon returns 404 and this raises ModelNotConfiguredError — never a
-canned response.
+daemon returns NOT_FOUND and this raises ModelNotConfiguredError — never
+a canned response.
 """
 
 from __future__ import annotations
 
-import json
 import os
-import urllib.error
-import urllib.request
+import threading
 from dataclasses import dataclass
+
+import grpc
+
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 
 
 class ModelNotConfiguredError(Exception):
@@ -43,25 +51,44 @@ class CompletionResult:
     provider's own reported token counts. input_tokens/output_tokens
     default to 0, never fabricated, for a response that carried no
     usage block (an older daemon build, or a provider this codebase
-    hasn't wired usage-parsing for yet)."""
+    hasn't wired usage-parsing for yet). cost_usd defaults to 0 the same
+    way for a model daemon/inference's pricing table (pricing.go) has no
+    entry for — not an error, just an unpriced model (§2.1/§14)."""
 
     text: str
     input_tokens: int = 0
     output_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+# See workflows/policy.py's identical _channels/_channel pattern: one
+# grpc.Channel per distinct address, reused across calls/threads.
+_channels: dict[str, grpc.Channel] = {}
+_channels_lock = threading.Lock()
+
+
+def _channel(daemon_grpc_addr: str) -> grpc.Channel:
+    with _channels_lock:
+        channel = _channels.get(daemon_grpc_addr)
+        if channel is None:
+            channel = grpc.insecure_channel(daemon_grpc_addr)
+            _channels[daemon_grpc_addr] = channel
+        return channel
 
 
 @dataclass
 class ModelClient:
-    """One agent's route to the daemon's inference seam. daemon_api_base_url
+    """One agent's route to the daemon's inference seam. daemon_grpc_addr
     and agent_token are the same values every other daemon-calling client
-    in this codebase already threads through (see actuate.py, approval.py)
-    — construct via from_env() for the model-name part only; the daemon
-    connection details come from the same place they come from everywhere
-    else in a workflow (the caller, ultimately the habitat that spawned
-    this agent), never from this agent's own environment.
+    in this codebase already threads through (see workflows/policy.py,
+    workflows/operations.py) — construct via from_env() for the model-name
+    part only; the daemon connection details come from the same place they
+    come from everywhere else in a workflow (the caller, ultimately the
+    habitat that spawned this agent), never from this agent's own
+    environment.
     """
 
-    daemon_api_base_url: str
+    daemon_grpc_addr: str
     agent_token: str
     model: str
     provider: str = ""
@@ -81,9 +108,15 @@ class ModelClient:
     provider is "anthropic" needs a distinct registered account — e.g.
     "voyage" or "openai" — for embed() to call."""
 
+    def _stub(self) -> inference_pb2_grpc.InferenceServiceStub:
+        return inference_pb2_grpc.InferenceServiceStub(_channel(self.daemon_grpc_addr))
+
+    def _metadata(self) -> tuple:
+        return (("authorization", f"Bearer {self.agent_token}"),)
+
     def complete(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> str:
         """Returns the model's real text response, via the daemon."""
-        return self._complete(system, messages, max_tokens)["text"]
+        return self._complete(system, messages, max_tokens).text
 
     def complete_with_usage(self, system: str, messages: list[dict[str, str]], max_tokens: int = 4096) -> CompletionResult:
         """Same real call as complete(), plus the provider's own reported
@@ -94,36 +127,32 @@ class ModelClient:
         need usage — this is for the one real caller that does (agentic_loop.py,
         to accumulate real per-run token counts for §2.1/§14's cost
         accounting)."""
-        result = self._complete(system, messages, max_tokens)
-        return CompletionResult(
-            text=result["text"],
-            input_tokens=result.get("input_tokens", 0),
-            output_tokens=result.get("output_tokens", 0),
-        )
+        return self._complete(system, messages, max_tokens)
 
-    def _complete(self, system: str, messages: list[dict[str, str]], max_tokens: int) -> dict:
-        payload = {
-            "provider": self.provider,
-            "providers": self.providers or [],
-            "model": self.model,
-            "system": system,
-            "messages": messages,
-            "max_tokens": max_tokens,
-        }
-        return self._post("/v1/inference/complete", payload)
+    def _complete(self, system: str, messages: list[dict[str, str]], max_tokens: int) -> CompletionResult:
+        req = inference_pb2.CompleteRequest(
+            provider=self.provider, providers=self.providers or [], model=self.model,
+            system=system, messages=[inference_pb2.Message(role=m["role"], content=m["content"]) for m in messages],
+            max_tokens=max_tokens,
+        )
+        try:
+            resp = self._stub().Complete(req, metadata=self._metadata(), timeout=120)
+        except grpc.RpcError as e:
+            raise ModelNotConfiguredError(f"inference Complete call failed: {e.details() or e.code().name}") from e
+        return CompletionResult(text=resp.text, input_tokens=resp.input_tokens, output_tokens=resp.output_tokens, cost_usd=resp.cost_usd)
 
     def count_tokens(self, system: str, messages: list[dict[str, str]]) -> int:
         """Returns the provider's real input token count, via the daemon.
         Only implemented (daemon-side) for the anthropic provider."""
-        payload = {
-            "provider": self.provider,
-            "providers": self.providers or [],
-            "model": self.model,
-            "system": system,
-            "messages": messages,
-        }
-        result = self._post("/v1/inference/count-tokens", payload)
-        return result["input_tokens"]
+        req = inference_pb2.CompleteRequest(
+            provider=self.provider, providers=self.providers or [], model=self.model,
+            system=system, messages=[inference_pb2.Message(role=m["role"], content=m["content"]) for m in messages],
+        )
+        try:
+            resp = self._stub().CountTokens(req, metadata=self._metadata(), timeout=120)
+        except grpc.RpcError as e:
+            raise ModelNotConfiguredError(f"inference CountTokens call failed: {e.details() or e.code().name}") from e
+        return resp.input_tokens
 
     def embed(self, texts: list[str]) -> list[list[float]]:
         """Returns one real embedding vector per entry in texts, in order,
@@ -133,34 +162,18 @@ class ModelClient:
         comment above)."""
         if not self.embedding_model:
             raise ModelNotConfiguredError("embedding_model is not set — no embedding model is configured for this agent run")
-        payload = {
-            "provider": self.embedding_provider,
-            "providers": self.embedding_providers or [],
-            "model": self.embedding_model,
-            "input": texts,
-        }
-        result = self._post("/v1/inference/embed", payload)
-        return result["embeddings"]
-
-    def _post(self, path: str, payload: dict) -> dict:
-        url = f"{self.daemon_api_base_url}{path}"
-        request = urllib.request.Request(
-            url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Authorization": f"Bearer {self.agent_token}"},
-            method="POST",
+        req = inference_pb2.EmbedRequest(
+            provider=self.embedding_provider, providers=self.embedding_providers or [],
+            model=self.embedding_model, input=texts,
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                return json.loads(response.read())
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", errors="replace")
-            raise ModelNotConfiguredError(f"inference call to {path} failed (HTTP {e.code}): {detail}") from e
-        except urllib.error.URLError as e:
-            raise ModelNotConfiguredError(f"could not reach the daemon at {url}: {e}") from e
+            resp = self._stub().Embed(req, metadata=self._metadata(), timeout=120)
+        except grpc.RpcError as e:
+            raise ModelNotConfiguredError(f"inference Embed call failed: {e.details() or e.code().name}") from e
+        return [list(v.values) for v in resp.embeddings]
 
 
-def from_env(daemon_api_base_url: str, agent_token: str) -> ModelClient:
+def from_env(daemon_grpc_addr: str, agent_token: str) -> ModelClient:
     """Builds a ModelClient for the model named by ADAPTER_MODEL (and
     optionally ADAPTER_PROVIDER — which registered daemon account to use;
     the daemon defaults to "anthropic" if omitted). ADAPTER_PROVIDERS, if
@@ -186,7 +199,7 @@ def from_env(daemon_api_base_url: str, agent_token: str) -> ModelClient:
     embedding_providers = [p.strip() for p in embedding_providers_raw.split(",") if p.strip()] or None
 
     return ModelClient(
-        daemon_api_base_url=daemon_api_base_url,
+        daemon_grpc_addr=daemon_grpc_addr,
         agent_token=agent_token,
         model=model,
         provider=provider,

@@ -1,9 +1,9 @@
 """Integration test for the semantic/entity memory projection (memory/graph.py,
 memory/graph_llm.py) — a real, embedded Kuzu graph driven by the real
 Graphiti library, with Graphiti's LLMClient/EmbedderClient/CrossEncoderClient
-interfaces bridged to a stand-in HTTP daemon (same "real protocol, fake
-remote counterpart" pattern as test_llm.py's _FakeDaemon and
-tests/conftest.py's fake_model_server — the daemon's actual HTTP routing
+interfaces bridged to a stand-in gRPC daemon (same "real protocol, fake
+remote counterpart" pattern as test_llm.py's _FakeInferenceService and
+tests/conftest.py's fake_model_server — the daemon's actual gRPC routing
 is already covered by the e2e tests; what's new and under test here is
 whether the Graphiti adapters correctly drive Graphiti's real extraction/
 retrieval pipeline against a real graph store).
@@ -40,11 +40,12 @@ requires Neo4j or FalkorDB, neither reachable here.
 from __future__ import annotations
 
 import json
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from threading import Thread
+from concurrent import futures
 
+import grpc
 import pytest
 
+from context.inferencepb import inference_pb2, inference_pb2_grpc
 from context.llm import ModelClient
 from memory.graph import build_graphiti
 
@@ -80,63 +81,59 @@ def deterministic_embedding(text: str, dimension: int) -> list[float]:
     return [(b / 127.5) - 1.0 for b in repeated]
 
 
-class _FakeInferenceDaemon(BaseHTTPRequestHandler):
-    """Stands in for the daemon's /v1/inference/complete and
-    /v1/inference/embed routes. For a structured request (Graphiti always
-    appends the target JSON schema to the last message when it wants
-    structured output — see graphiti_core.llm_client.client.LLMClient.
-    generate_response), returns a minimal, schema-shaped but semantically
-    empty response (no entities/edges extracted) — a real model could
-    validly return exactly this for content with nothing worth
-    extracting; what's under test is that the adapter and Graphiti's own
-    pipeline correctly round-trip and persist whatever the model says, not
-    that a fake model does real NLP.
+class _FakeInferenceDaemon(inference_pb2_grpc.InferenceServiceServicer):
+    """Stands in for the daemon's InferenceService.Complete/Embed RPCs.
+    For a structured request (Graphiti always appends the target JSON
+    schema to the last message when it wants structured output — see
+    graphiti_core.llm_client.client.LLMClient.generate_response), returns
+    a minimal, schema-shaped but semantically empty response (no
+    entities/edges extracted) — a real model could validly return exactly
+    this for content with nothing worth extracting; what's under test is
+    that the adapter and Graphiti's own pipeline correctly round-trip and
+    persist whatever the model says, not that a fake model does real NLP.
     """
 
     embedding_dimension = 8
 
-    def log_message(self, format, *args):  # noqa: A002
-        pass
-
-    def do_POST(self):
-        length = int(self.headers.get("Content-Length", 0))
-        body = json.loads(self.rfile.read(length))
-
-        if self.path == "/v1/inference/embed":
-            vectors = [deterministic_embedding(t, self.embedding_dimension) for t in body["input"]]
-            response = json.dumps({"embeddings": vectors, "dimension": self.embedding_dimension}).encode()
+    def Complete(self, request, context):
+        last_content = request.messages[-1].content if request.messages else ""
+        marker_at = last_content.find(SCHEMA_MARKER)
+        if marker_at >= 0:
+            schema = json.loads(last_content[marker_at + len(SCHEMA_MARKER) :])
+            text = json.dumps(_fill_schema_defaults(schema))
         else:
-            last_content = body["messages"][-1]["content"] if body["messages"] else ""
-            marker_at = last_content.find(SCHEMA_MARKER)
-            if marker_at >= 0:
-                schema = json.loads(last_content[marker_at + len(SCHEMA_MARKER) :])
-                text = json.dumps(_fill_schema_defaults(schema))
-            else:
-                text = "False"
-            response = json.dumps({"text": text}).encode()
+            text = "False"
+        return inference_pb2.CompleteResponse(text=text)
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.end_headers()
-        self.wfile.write(response)
+    def Embed(self, request, context):
+        vectors = [deterministic_embedding(t, self.embedding_dimension) for t in request.input]
+        return inference_pb2.EmbedResponse(
+            embeddings=[inference_pb2.EmbedFloatVector(values=v) for v in vectors],
+            dimension=self.embedding_dimension,
+        )
+
+
+def _start_fake_inference_server(servicer) -> tuple[grpc.Server, str]:
+    server = grpc.server(futures.ThreadPoolExecutor(max_workers=4))
+    inference_pb2_grpc.add_InferenceServiceServicer_to_server(servicer, server)
+    port = server.add_insecure_port("127.0.0.1:0")
+    server.start()
+    return server, f"127.0.0.1:{port}"
 
 
 @pytest.fixture()
 def fake_daemon():
-    server = HTTPServer(("127.0.0.1", 0), _FakeInferenceDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server, addr = _start_fake_inference_server(_FakeInferenceDaemon())
     try:
-        yield f"http://127.0.0.1:{server.server_port}"
+        yield addr
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 @pytest.fixture()
 def model_client(fake_daemon):
     return ModelClient(
-        daemon_api_base_url=fake_daemon,
+        daemon_grpc_addr=fake_daemon,
         agent_token="test-agent-token",
         model="test-fake-model",
         embedding_model="test-fake-embedding-model",
@@ -187,14 +184,23 @@ async def test_embedder_round_trips_real_vectors_through_the_daemon_route(model_
 
     embedder = DaemonGraphitiEmbedderClient(model_client, embedding_dim=_FakeInferenceDaemon.embedding_dimension)
 
+    # approx, not ==: the wire type is a 32-bit float (matching
+    # daemon/inference.EmbedResult's own [][]float32 — see
+    # contracts/proto/inference.proto), so a value computed here in
+    # Python float64 loses precision at the ~7th significant digit
+    # crossing the real protobuf boundary, same as it would crossing the
+    # real Go daemon's own float32 boundary.
     single = await embedder.create(["hello world"])
-    assert single == deterministic_embedding("hello world", _FakeInferenceDaemon.embedding_dimension)
+    assert single == pytest.approx(deterministic_embedding("hello world", _FakeInferenceDaemon.embedding_dimension), rel=1e-6)
 
     batch = await embedder.create_batch(["a", "b"])
-    assert batch == [
+    expected_batch = [
         deterministic_embedding("a", _FakeInferenceDaemon.embedding_dimension),
         deterministic_embedding("b", _FakeInferenceDaemon.embedding_dimension),
     ]
+    assert len(batch) == len(expected_batch)
+    for actual, expected in zip(batch, expected_batch):
+        assert actual == pytest.approx(expected, rel=1e-6)
 
 
 @pytest.mark.asyncio
@@ -202,23 +208,15 @@ async def test_cross_encoder_classifies_each_passage_through_the_daemon_route(mo
     from memory.graph_llm import DaemonGraphitiCrossEncoderClient
 
     class _FixedInferenceDaemon(_FakeInferenceDaemon):
-        def do_POST(self):
-            length = int(self.headers.get("Content-Length", 0))
-            body = json.loads(self.rfile.read(length))
-            last_content = body["messages"][-1]["content"]
+        def Complete(self, request, context):
+            last_content = request.messages[-1].content
             text = "True" if "RELEVANT_PASSAGE" in last_content else "False"
-            response = json.dumps({"text": text}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.end_headers()
-            self.wfile.write(response)
+            return inference_pb2.CompleteResponse(text=text)
 
-    server = HTTPServer(("127.0.0.1", 0), _FixedInferenceDaemon)
-    thread = Thread(target=server.serve_forever, daemon=True)
-    thread.start()
+    server, addr = _start_fake_inference_server(_FixedInferenceDaemon())
     try:
         client = ModelClient(
-            daemon_api_base_url=f"http://127.0.0.1:{server.server_port}",
+            daemon_grpc_addr=addr,
             agent_token="test-agent-token",
             model="test-fake-model",
         )
@@ -229,8 +227,7 @@ async def test_cross_encoder_classifies_each_passage_through_the_daemon_route(mo
         assert ranked[0] == ("RELEVANT_PASSAGE here", 1.0)
         assert ranked[1] == ("irrelevant text", 0.0)
     finally:
-        server.shutdown()
-        thread.join(timeout=5)
+        server.stop(grace=1)
 
 
 def test_graph_driver_from_env_raises_when_unconfigured(monkeypatch):

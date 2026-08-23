@@ -102,12 +102,27 @@ func TestFullHappyPath_OverHTTP(t *testing.T) {
 		t.Fatalf("expected external_command_id recorded, got %+v", dispatched)
 	}
 
-	obsBody, _ := json.Marshal(map[string]string{"observation_ref": "artifact://obs-1"})
+	obsBody, _ := json.Marshal(map[string]string{"observation_ref": "artifact://obs-1", "observation_payload": "the real observed content"})
 	o := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/observed", testAgentToken, obsBody)
 	if o.StatusCode != http.StatusOK {
 		t.Fatalf("observed: expected 200, got %d", o.StatusCode)
 	}
+	var observed effectResponse
+	json.NewDecoder(o.Body).Decode(&observed)
 	o.Body.Close()
+	if observed.ObservationPayload != "the real observed content" {
+		t.Fatalf("expected observation_payload to round-trip over HTTP, got %+v", observed)
+	}
+
+	// §9 acceptance invariant #9: reconstructible from durable records —
+	// a fresh GET, not just the mutation's own response, must show it.
+	reGet := getJSON(t, ts.URL+"/v1/operations/"+eff.EffectID, testAgentToken)
+	var refetched effectResponse
+	json.NewDecoder(reGet.Body).Decode(&refetched)
+	reGet.Body.Close()
+	if refetched.ObservationPayload != "the real observed content" {
+		t.Fatalf("expected observation_payload to be durably readable on refetch, got %+v", refetched)
+	}
 
 	resolveBody, _ := json.Marshal(map[string]string{"terminal": "confirmed"})
 	res := postJSON(t, ts.URL+"/v1/operations/"+eff.EffectID+"/resolve", testAgentToken, resolveBody)

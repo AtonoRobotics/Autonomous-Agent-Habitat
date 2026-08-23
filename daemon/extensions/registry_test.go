@@ -3,6 +3,7 @@ package extensions
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -63,6 +64,46 @@ func TestDiscover_ValidatesAndPersists(t *testing.T) {
 	}
 	if again.ManifestDigest != ext.ManifestDigest {
 		t.Fatalf("expected same digest on idempotent re-discover")
+	}
+}
+
+// TestDiscover_SecondExtensionsNamespacedSchema_NeverTouchesCoreSchemas is
+// the direct proof of §12's "extensions publish their own namespaced
+// schemas, never modify core schemas" — previously only true because
+// only one real extension (extensions/control-plane-ui) existed to
+// (not) test it against. There is no code path anywhere in this daemon
+// that writes to contracts/*.schema.json at runtime — they are static
+// repo files — so this holds by construction; this test proves it
+// directly rather than by inspection, by discovering a second, genuinely
+// distinct extension that declares its own namespaced schema reference
+// and confirming contracts/ontology.schema.json's real on-disk bytes are
+// byte-for-byte unchanged before and after.
+func TestDiscover_SecondExtensionsNamespacedSchema_NeverTouchesCoreSchemas(t *testing.T) {
+	ontologySchemaPath := filepath.Join("..", "..", "contracts", "ontology.schema.json")
+	before, err := os.ReadFile(ontologySchemaPath)
+	if err != nil {
+		t.Fatalf("read ontology schema before Discover: %v", err)
+	}
+
+	db := testDB(t)
+	reg := New(db)
+
+	second := baseManifest("amh.acme/second-extension", "1.0.0")
+	second.Spec.Schemas = []string{"https://amh.acme.example/schemas/v1/widget.schema.json"}
+	ext, err := reg.Discover(context.Background(), second)
+	if err != nil {
+		t.Fatalf("Discover second extension: %v", err)
+	}
+	if ext.Status != StatusDiscovered {
+		t.Fatalf("expected status discovered, got %s", ext.Status)
+	}
+
+	after, err := os.ReadFile(ontologySchemaPath)
+	if err != nil {
+		t.Fatalf("read ontology schema after Discover: %v", err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("contracts/ontology.schema.json changed after discovering a second extension's own namespaced schema — core schemas must never be modified by an extension")
 	}
 }
 
@@ -317,6 +358,74 @@ func TestActivate_SucceedsOnceDependencyIsActive(t *testing.T) {
 	}
 }
 
+// TestActivate_MutualRequirementCycle_FailsFastNeitherHangsNorActivates is
+// the direct proof of §5.2's "detect dependency cycles" — a requirement
+// this package's own doc comment never separately implemented, because
+// none was needed: requirementSatisfied only ever checks whether an
+// ALREADY-active extension provides a capability (see registry.go) —
+// there is no transitive/recursive resolution anywhere in Activate for a
+// cycle to send into a loop. A genuine mutual requirement (A needs B's
+// capability, B needs A's) therefore fails closed on both sides via the
+// exact same ErrMissingRequirement every other missing dependency does,
+// not a hang — proven here with a real wall-clock timeout, not just by
+// code inspection, so a future change that DOES introduce recursive
+// resolution would have to actually break this test to regress.
+func TestActivate_MutualRequirementCycle_FailsFastNeitherHangsNorActivates(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	a := baseManifest("amh.test/cycle-a", "1.0.0")
+	a.Spec.Provides = []CapabilityRef{{ID: "amh.test/cap-a", Version: "1.0.0"}}
+	a.Spec.Requires = []Requirement{{Capability: "amh.test/cap-b", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, a); err != nil {
+		t.Fatalf("Discover a: %v", err)
+	}
+
+	b := baseManifest("amh.test/cycle-b", "1.0.0")
+	b.Spec.Provides = []CapabilityRef{{ID: "amh.test/cap-b", Version: "1.0.0"}}
+	b.Spec.Requires = []Requirement{{Capability: "amh.test/cap-a", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, b); err != nil {
+		t.Fatalf("Discover b: %v", err)
+	}
+
+	done := make(chan struct{})
+	var errA, errB error
+	go func() {
+		defer close(done)
+		_, errA = reg.Activate(ctx, "amh.test/cycle-a", "1.0.0")
+		_, errB = reg.Activate(ctx, "amh.test/cycle-b", "1.0.0")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Activate on a mutual requirement cycle did not return within 5s — this is the hang §5.2 requires be refused, not left to happen")
+	}
+
+	if !errors.Is(errA, ErrMissingRequirement) {
+		t.Fatalf("expected a's activation to fail with ErrMissingRequirement (b never became active), got %v", errA)
+	}
+	if !errors.Is(errB, ErrMissingRequirement) {
+		t.Fatalf("expected b's activation to fail with ErrMissingRequirement (a never became active — a's own activation failed above), got %v", errB)
+	}
+
+	extA, err := reg.Get(ctx, "amh.test/cycle-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Get a: %v", err)
+	}
+	if extA.Status != StatusDiscovered {
+		t.Fatalf("a's failed activation must not mutate status; got %s", extA.Status)
+	}
+	extB, err := reg.Get(ctx, "amh.test/cycle-b", "1.0.0")
+	if err != nil {
+		t.Fatalf("Get b: %v", err)
+	}
+	if extB.Status != StatusDiscovered {
+		t.Fatalf("b's failed activation must not mutate status; got %s", extB.Status)
+	}
+}
+
 func TestQuiesce_RefusesWhileActiveDependentExists(t *testing.T) {
 	db := testDB(t)
 	reg := New(db)
@@ -343,6 +452,77 @@ func TestQuiesce_RefusesWhileActiveDependentExists(t *testing.T) {
 	reg.Dispose(ctx, "amh.test/consumer", "1.0.0")
 	if _, err := reg.Quiesce(ctx, "amh.test/producer", "1.0.0"); err != nil {
 		t.Fatalf("expected Quiesce to succeed once the dependent is disposed: %v", err)
+	}
+}
+
+// TestQuiesceDisposeOrdering_ProviderNeverDisposedBeforeItsConsumer is the
+// direct proof of §5.2 / §15 acceptance invariant #4 ("dependency removal
+// quiesces/disposes consumers before providers") — previously only
+// Quiesce's own refusal was tested directly (see the test above); this
+// walks the full ordering guarantee end to end, including the half that
+// test doesn't check: that Dispose is ALSO refused while quiesce would be,
+// not just Quiesce itself. Dispose requires status 'quiescing' (a
+// precondition only Quiesce can set, and only once it succeeds), so a
+// provider structurally cannot reach Dispose while an active consumer
+// still needs it — not because Dispose re-checks dependents itself, but
+// because Quiesce is the one and only gate into the state Dispose
+// requires. No separate ordering/cascade logic exists, or is needed.
+func TestQuiesceDisposeOrdering_ProviderNeverDisposedBeforeItsConsumer(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	producer := baseManifest("amh.test/order-producer", "1.0.0")
+	producer.Spec.Provides = []CapabilityRef{{ID: "amh.test/order-cap", Version: "1.0.0"}}
+	if _, err := reg.Discover(ctx, producer); err != nil {
+		t.Fatalf("Discover producer: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/order-producer", "1.0.0"); err != nil {
+		t.Fatalf("Activate producer: %v", err)
+	}
+
+	consumer := baseManifest("amh.test/order-consumer", "1.0.0")
+	consumer.Spec.Requires = []Requirement{{Capability: "amh.test/order-cap", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, consumer); err != nil {
+		t.Fatalf("Discover consumer: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/order-consumer", "1.0.0"); err != nil {
+		t.Fatalf("Activate consumer: %v", err)
+	}
+
+	// While the consumer is active, the provider can reach neither
+	// terminal step: Quiesce refuses outright, and Dispose refuses too —
+	// not because it independently checks dependents, but because the
+	// provider never made it past Quiesce into the 'quiescing' state
+	// Dispose requires.
+	if _, err := reg.Quiesce(ctx, "amh.test/order-producer", "1.0.0"); !errors.Is(err, ErrActiveDependents) {
+		t.Fatalf("expected Quiesce to be refused with ErrActiveDependents, got %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/order-producer", "1.0.0"); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected Dispose to also be refused (still active, not quiescing), got %v", err)
+	}
+	producerExt, err := reg.Get(ctx, "amh.test/order-producer", "1.0.0")
+	if err != nil {
+		t.Fatalf("Get producer: %v", err)
+	}
+	if producerExt.Status != StatusActive {
+		t.Fatalf("two refused teardown attempts must not mutate the provider's status; got %s", producerExt.Status)
+	}
+
+	// Quiesce+dispose the consumer first — only then does the ordering
+	// invariant permit the provider's own quiesce/dispose to proceed.
+	if _, err := reg.Quiesce(ctx, "amh.test/order-consumer", "1.0.0"); err != nil {
+		t.Fatalf("Quiesce consumer: %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/order-consumer", "1.0.0"); err != nil {
+		t.Fatalf("Dispose consumer: %v", err)
+	}
+
+	if _, err := reg.Quiesce(ctx, "amh.test/order-producer", "1.0.0"); err != nil {
+		t.Fatalf("expected Quiesce to succeed once its only consumer is disposed: %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/order-producer", "1.0.0"); err != nil {
+		t.Fatalf("expected Dispose to succeed once quiesced: %v", err)
 	}
 }
 

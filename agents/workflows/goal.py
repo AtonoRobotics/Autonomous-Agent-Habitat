@@ -12,11 +12,15 @@ no lost work, and a subagent still queued (not yet started) at crash time
 is still subject to the same concurrency bound on restart.
 
 decompose_goal and do_subagent_work make real model calls through the
-daemon's inference seam (context/llm.py, daemon/inference) — they are not
-canned responses, and this process never holds a model-provider credential
-itself: daemon_api_base_url + agent_token (the same two values every other
-daemon-calling step in this codebase already threads through — see
-actuate.py) are all either step needs. do_subagent_work runs a real
+daemon's inference seam (context/llm.py, daemon/grpcapi's InferenceService
+— Phase 4 of the gRPC migration, workflows/policy.py's module docstring)
+— they are not canned responses, and this process never holds a
+model-provider credential itself: daemon_grpc_addr + agent_token (the same
+two values every other daemon-calling step in this codebase now threads
+through, following policy/operations/selfimprove before it) are all either
+step needs — daemon_api_base_url has no remaining use anywhere in this
+call graph now that every route it fed has migrated off HTTP, so it's
+gone rather than left as a dead parameter. do_subagent_work runs a real
 agentic tool-calling loop (harness/agentic_loop.py) against an isolated
 VFS root, not a single-turn completion — see that module's docstring for
 the tool-call protocol and why it isn't native function-calling. Both
@@ -39,6 +43,7 @@ from context.observability import agent_run_span, inject_trace_context
 from harness.vfs import VFS
 from harness.agentic_loop import mcp_servers_from_env, run_agentic_loop
 from memory.working import project_working_memory
+from selfimprove.candidates import get_promoted_prompt
 from . import ontology
 from .memory_hooks import recall_context, retain_outcome
 
@@ -64,6 +69,11 @@ _SUBAGENT_QUEUE = Queue(
     polling_interval_sec=0.2,
 )
 
+# The hardcoded default — used whenever no "prompt"-class CandidateVersion
+# is currently promoted, which is the common case (see daemon/selfimprove's
+# own doc comment: nothing in this codebase generates real candidates yet).
+# See get_promoted_prompt for the real self-improvement seam this default
+# now backs off to.
 _DECOMPOSE_SYSTEM_PROMPT = """You decompose a goal into concrete, independently-workable tasks.
 
 Respond with ONLY a JSON array of objects, each with one field "objective" \
@@ -74,7 +84,7 @@ to a single-element array. Do not include any text outside the JSON array."""
 
 @DBOS.step()
 def decompose_goal(
-    goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, agent_token: str, memory_context: str = ""
+    goal_id: str, goal_text: str, db_path: str, daemon_grpc_addr: str, agent_token: str, memory_context: str = ""
 ) -> list[dict[str, str]]:
     """Decomposes goal_text into tasks via a real model call through the
     daemon's inference seam, parses the model's JSON response, and
@@ -85,13 +95,19 @@ def decompose_goal(
 
     memory_context, when non-empty, is recalled episodic/semantic memory
     (workflows/memory_hooks.recall_context) prepended to the user message
-    — past goals and known facts relevant to this one, if any were found."""
+    — past goals and known facts relevant to this one, if any were found.
+
+    The system prompt itself comes from get_promoted_prompt: a promoted
+    "prompt"-class CandidateVersion (§10 self-improvement), if one
+    exists, real content actually used here — not just durable
+    bookkeeping — otherwise the hardcoded default exactly as before."""
     ontology.ensure_goal(db_path, goal_id, goal_text)
 
+    system_prompt = get_promoted_prompt(daemon_grpc_addr, agent_token, _DECOMPOSE_SYSTEM_PROMPT)
     user_content = f"{memory_context}\n\n{goal_text}" if memory_context else goal_text
-    client = from_env(daemon_api_base_url, agent_token)
+    client = from_env(daemon_grpc_addr, agent_token)
     response_text = client.complete(
-        system=_DECOMPOSE_SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
     try:
@@ -123,7 +139,7 @@ def _workspace_root() -> str:
 
 
 @DBOS.step()
-def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, daemon_api_base_url: str, agent_token: str) -> dict[str, Any]:
+def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, daemon_grpc_addr: str, agent_token: str) -> dict[str, Any]:
     """Runs a real agentic tool-calling loop (harness/agentic_loop.py)
     against an isolated VFS root scoped to this run — not a single-turn
     completion. Returns a condensed result only (per Artifact D's
@@ -142,20 +158,21 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
     else:
         full_objective = objective
 
-    client = from_env(daemon_api_base_url, agent_token)
+    client = from_env(daemon_grpc_addr, agent_token)
     vfs = VFS(os.path.join(_workspace_root(), run_id))
-    loop_result = run_agentic_loop(full_objective, vfs, client, mcp_servers=mcp_servers_from_env())
+    loop_result = run_agentic_loop(full_objective, vfs, client, daemon_grpc_addr, mcp_servers=mcp_servers_from_env())
     return {
         "task_id": task_id,
         "status": "done",
         "summary": loop_result.result,
         "tokens_in": loop_result.tokens_in,
         "tokens_out": loop_result.tokens_out,
+        "cost_usd": loop_result.cost_usd,
     }
 
 
 @DBOS.workflow()
-def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, agent_token: str, trace_context: dict[str, str] | None = None) -> dict[str, Any]:
+def run_subagent(task_id: str, objective: str, db_path: str, daemon_grpc_addr: str, agent_token: str, trace_context: dict[str, str] | None = None) -> dict[str, Any]:
     """Runs as an isolated DBOS child workflow — crash-recoverable
     independently of the parent (§14.2's subagent isolation contract).
 
@@ -164,19 +181,18 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url
     DBOS.start_workflow runs this on its own worker thread with no
     ambient OTel context otherwise.
 
-    Known gap: real token usage (run.tokens_in/tokens_out, §2.1/§14) is
-    only recorded on the success path — do_subagent_work raising before
-    returning (LoopBudgetExceededError, an unknown-tool error, etc.)
-    means whatever partial usage that run accrued is not captured, since
-    harness.agentic_loop.LoopResult is never constructed for a run that
-    didn't reach "done". cost_usd is not recorded at all yet — no
-    $/token pricing table exists anywhere in this codebase."""
+    Known gap: real token usage and cost (run.tokens_in/tokens_out/
+    cost_usd, §2.1/§14) are only recorded on the success path —
+    do_subagent_work raising before returning (LoopBudgetExceededError,
+    an unknown-tool error, etc.) means whatever partial usage/cost that
+    run accrued is not captured, since harness.agentic_loop.LoopResult is
+    never constructed for a run that didn't reach "done"."""
     with agent_run_span(agent_id=task_id, trace_context=trace_context):
         run_id = ontology.create_run(db_path, task_id)
         ontology.set_task_status(db_path, task_id, "active")
         try:
-            result = do_subagent_work(task_id, objective, db_path, run_id, daemon_api_base_url, agent_token)
-            ontology.record_tokens(db_path, run_id, result.get("tokens_in", 0), result.get("tokens_out", 0))
+            result = do_subagent_work(task_id, objective, db_path, run_id, daemon_grpc_addr, agent_token)
+            ontology.record_tokens(db_path, run_id, result.get("tokens_in", 0), result.get("tokens_out", 0), result.get("cost_usd", 0.0))
             ontology.set_task_status(db_path, task_id, "done")
             ontology.end_run(db_path, run_id, "ok")
             return result
@@ -186,7 +202,7 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url
             raise
 
 
-def start_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, agent_token: str):
+def start_subagent(task_id: str, objective: str, db_path: str, daemon_grpc_addr: str, agent_token: str):
     """Enqueues run_subagent as a DBOS child workflow, capturing the
     caller's current OTel span context and passing it through explicitly
     so the child's span nests under the caller's trace. Must be called
@@ -206,7 +222,7 @@ def start_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_u
     need to be right in one place.
     """
     trace_context = inject_trace_context()
-    return _SUBAGENT_QUEUE.enqueue(run_subagent, task_id, objective, db_path, daemon_api_base_url, agent_token, trace_context)
+    return _SUBAGENT_QUEUE.enqueue(run_subagent, task_id, objective, db_path, daemon_grpc_addr, agent_token, trace_context)
 
 
 @DBOS.step()
@@ -220,7 +236,7 @@ def synthesize(goal_id: str, gathered: list[dict[str, Any]], db_path: str) -> st
 
 
 @DBOS.workflow()
-def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, agent_token: str) -> str:
+def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_grpc_addr: str, agent_token: str) -> str:
     """Top-level durable workflow. Decomposes, fans out to run_subagent
     child workflows, gathers, synthesizes. If the process dies mid-flight,
     restarting it (with the same DBOS system database) resumes exactly
@@ -232,12 +248,12 @@ def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url:
     synthesizing — best-effort, a no-op when Hindsight/Graphiti aren't
     configured (see memory_hooks's module docstring)."""
     with agent_run_span(agent_id=goal_id):
-        memory_context = recall_context(goal_text, daemon_api_base_url, agent_token)
-        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token, memory_context)
+        memory_context = recall_context(goal_text, daemon_grpc_addr, agent_token)
+        tasks = decompose_goal(goal_id, goal_text, db_path, daemon_grpc_addr, agent_token, memory_context)
 
-        handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, agent_token) for t in tasks]
+        handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_grpc_addr, agent_token) for t in tasks]
         gathered = [h.get_result() for h in handles]
 
         summary = synthesize(goal_id, gathered, db_path)
-        retain_outcome(goal_text, summary, daemon_api_base_url, agent_token)
+        retain_outcome(goal_text, summary, daemon_grpc_addr, agent_token)
         return summary

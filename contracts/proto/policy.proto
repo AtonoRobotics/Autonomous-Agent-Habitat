@@ -1,0 +1,114 @@
+// PolicyService — daemon/policy's generic fail-closed policy/approval seam
+// (docs/AMH-SPECIFICATION.md §6), over gRPC instead of HTTP+JSON.
+//
+// This is Phase 1 of the gRPC migration scoped for the internal, purely
+// synchronous Go-daemon <-> Python-cognition-worker call path (§3.1/§3.3:
+// "local gRPC transport" / "local gRPC for synchronous daemon/worker
+// calls"). policy has no browser (control-plane UI) caller and no
+// external-protocol caller — every real consumer is Python agent code —
+// which is exactly why it's the first service migrated: smallest surface,
+// cleanest boundary, nothing else to keep working in parallel.
+//
+// payload fields stay JSON-encoded strings, not google.protobuf.Struct,
+// deliberately: daemon/policy.Digest computes a canonical digest from the
+// arbitrary caller-supplied payload, and the existing HTTP path already
+// commits to json.Marshal's own byte representation for that digest. A
+// second, different canonicalization (protobuf Struct's own field
+// ordering/encoding rules) would make the same logical payload hash
+// differently depending on which transport carried it — silently
+// breaking §15 acceptance invariant #6 ("policy dispatch bound to the
+// admitted action digest") for any caller that decided over one
+// transport and consumed over the other. Carrying the exact same JSON
+// bytes over gRPC keeps digest computation transport-agnostic.
+syntax = "proto3";
+
+package amh.policy.v1;
+
+option go_package = "github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi/policypb";
+
+service PolicyService {
+  // Decide admits or defers req through the one built-in policy —
+  // mirrors POST /v1/policy/decide.
+  rpc Decide(DecideRequest) returns (Decision);
+
+  // GetDecision is a cheap, idempotent read — mirrors
+  // GET /v1/policy/decisions/{decisionID}.
+  rpc GetDecision(GetDecisionRequest) returns (Decision);
+
+  // Consume binds dispatch to the exact digest of payload_json, failing
+  // closed on any mismatch, expiry, or already-consumed decision —
+  // mirrors POST /v1/policy/decisions/{decisionID}/consume.
+  rpc Consume(ConsumeRequest) returns (ConsumeResponse);
+
+  // ListPendingApprovals — mirrors GET /v1/policy/approvals.
+  rpc ListPendingApprovals(ListPendingApprovalsRequest) returns (ListPendingApprovalsResponse);
+
+  // GetApprovalRequest — mirrors GET /v1/policy/approvals/{approvalID}.
+  rpc GetApprovalRequest(GetApprovalRequestRequest) returns (ApprovalRequest);
+
+  // Approve is operator-only (enforced by the auth interceptor, the same
+  // anti-self-approval property daemon/authn's RequireRole already
+  // enforces over HTTP) — mirrors
+  // POST /v1/policy/approvals/{approvalID}/approve.
+  rpc Approve(ResolveApprovalRequest) returns (Decision);
+
+  // Deny is operator-only — mirrors
+  // POST /v1/policy/approvals/{approvalID}/deny.
+  rpc Deny(ResolveApprovalRequest) returns (ApprovalRequest);
+}
+
+message DecideRequest {
+  string operation_id = 1;
+  string payload_json = 2;
+  string reversibility = 3;
+}
+
+message GetDecisionRequest {
+  string id = 1;
+}
+
+message ConsumeRequest {
+  string decision_id = 1;
+  string payload_json = 2;
+}
+
+message ConsumeResponse {}
+
+message ListPendingApprovalsRequest {}
+
+message ListPendingApprovalsResponse {
+  repeated ApprovalRequest approvals = 1;
+}
+
+message GetApprovalRequestRequest {
+  string id = 1;
+}
+
+message ResolveApprovalRequest {
+  string approval_id = 1;
+  string resolved_by = 2;
+  string reason = 3;
+}
+
+message Decision {
+  string id = 1;
+  string operation_id = 2;
+  string action_digest = 3;
+  string policy_id = 4;
+  string policy_version = 5;
+  string result = 6;
+  repeated string reason_codes = 7;
+  string approval_request_id = 8;
+  string decided_at = 9;
+  string expires_at = 10;
+  string consumed_at = 11;
+}
+
+message ApprovalRequest {
+  string id = 1;
+  string decision_id = 2;
+  string status = 3;
+  string resolved_by = 4;
+  string resolved_at = 5;
+  string reason = 6;
+}

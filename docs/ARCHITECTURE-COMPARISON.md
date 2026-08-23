@@ -2,7 +2,13 @@
 
 **Status:** Decision record for architecture selection
 
-This comparison evaluates the systems against the problem they are intended to solve. AMH is not treated as the authority, and DeepSeek Harness is not treated as the authority. The comparison separates agent-harness composition from 24/7 habitat durability because they are related but different problems.
+This comparison evaluates the systems against the problem they are intended to solve. AMH is not treated as the authority, and DeepSeek Harness is not treated as the authority. The comparison separates habitat capability from harness composition because a habitat contains a harness; it is not reducible to its workflow engine.
+
+## What qualifies as a habitat
+
+An autonomous agent habitat is a continuously operating runtime that hosts agents and gives them the means to persist, reason, use tools, communicate, spawn subordinate work, retain memory, recover from failure, manage resources, and improve under bounded authority. Autonomy does not require zero human intervention; it requires that routine operation, recovery, and lifecycle management proceed without recurring human control. Human approval is an exceptional authority boundary, not evidence that the runtime is non-autonomous.
+
+AMH qualifies as a habitat because its architecture and current repository provide the habitat functions: durable goal execution, cognition workers, memory projections, extension lifecycle, sandboxed computers, policy and trust boundaries, external-effect reconciliation, observability, backup/restore, and self-improvement workflows. The comparison below is therefore not “AMH versus a harness.” It is “AMH as a full habitat versus DeepSeek Harness as a highly composable agent-harness architecture,” with the question of which Cordis mechanisms AMH should adopt.
 
 ## Executive verdict
 
@@ -13,17 +19,17 @@ This comparison evaluates the systems against the problem they are intended to s
 | Agent session fidelity, model-visible history, turn replay, and prompt assembly | **DeepSeek Harness/Cordis** | The session event log is the source of model context; messages are derived from events and model-visible input is required to be logged. |
 | Domain-specific physical autonomy | **Neither core** | Physical meaning, inverse verification, actuation, reconciliation, and spatial state belong to a domain extension. |
 | Minimality and conceptual coherence for a local agent runtime | **DeepSeek Harness/Cordis** | One plugin context and one composition model. |
-| Production habitat for autonomous applications | **A composition of both ideas** | Cordis supplies capability composition; DBOS supplies durable orchestration. Neither product alone covers the complete target. |
+| Production habitat for autonomous applications | **AMH, strengthened by Cordis semantics** | AMH already supplies the habitat responsibilities. Cordis supplies a stronger composition model for the harness and extension runtime. DeepSeek Harness alone is not a complete habitat. |
 
-The principal architectural error would be to make AMH a second, weaker plugin runtime or to embed DeepSeek Harness as an unexamined second durability authority. The selected design should adopt Cordis's formal composition semantics, while retaining DBOS only for durable workflow ownership.
+The principal architectural error would be to reduce AMH to DBOS plus a thin worker, or to embed DeepSeek Harness as an unexamined second durability authority. AMH remains the habitat: it owns the autonomous operating loop and its lifecycle. The selected design should adopt Cordis's formal composition semantics inside that habitat, while retaining DBOS for durable workflow ownership.
 
 ## What is actually being compared
 
 DeepSeek Harness is an agent harness. Its documented architecture is a Cordis plugin tree assembled from profiles, bundles, and patches. The model adapter, tools, session log, agent loop, sandbox, storage, scheduling, and UI are plugins. Cordis supplies dependency injection, typed events, reversible effects, and dependency-reactive activation.
 
-AMH is intended to be a continuously operating platform core on which domain applications run. Its additional problem is not merely composing an agent loop. It must recover work after process and host failure, retain authoritative durable state, coordinate workers, manage external-effect uncertainty, and provide stable extension seams for domains.
+AMH is a continuously operating autonomous habitat. Its problem is not merely composing an agent loop. It hosts the loop and must recover work after process and host failure, retain authoritative durable state, coordinate workers, manage external-effect uncertainty, provide memory and knowledge, supervise extensions, and support self-improvement and self-healing across domains.
 
-Therefore “which is better?” has no single answer until the target is stated. DeepSeek Harness is the better harness. DBOS is the better durable workflow substrate. A habitat needs both roles, with one owner per concern.
+Therefore “which is better?” has no single answer until the target is stated. DeepSeek Harness is the stronger harness composition reference. AMH is the stronger full habitat architecture because it includes the autonomous operating environment around the harness. DBOS is one durable execution component inside that habitat, not the definition of AMH.
 
 ## First-principles comparison
 
@@ -112,7 +118,7 @@ The split must therefore be treated as a requirement-driven choice, not an assum
                    DBOS habitat workflows
        (goals, timers, signals, child work, retry, recovery, evidence)
                               |
-                 SQLite authoritative store
+                PostgreSQL authoritative store
 ```
 
 The important boundary is temporal:
@@ -126,10 +132,10 @@ The important boundary is temporal:
 
 1. AMH SHALL adopt Cordis-equivalent effect and dependency semantics, including LIFO disposal, reactive dependency loss, quiescence, and provider replacement.
 2. AMH SHALL treat the agent loop as a replaceable capability plugin, not as a privileged habitat subsystem.
-3. AMH SHALL retain DBOS only for durable workflow orchestration and durable evidence; it SHALL NOT duplicate the session-log or plugin-runtime state machines.
+3. AMH SHALL retain DBOS for durable workflow orchestration and durable evidence; it SHALL NOT duplicate the session-log or plugin-runtime state machines.
 4. DeepSeek Harness may be integrated as a harness profile/adapter if its persistence and process boundaries satisfy the DBOS turn contract. It must not be embedded wholesale until replay, ownership, and failure semantics are proven.
 5. The Physical AI system remains an extension. Its entities, spatial data, action inverses, actuation, and recovery are not AMH core semantics.
-6. Any comparison claiming AMH is “better” must state the target requirement and evidence. AMH is not intrinsically superior to DeepSeek Harness; it covers a larger operational problem at greater complexity.
+6. Any comparison claiming AMH is “better” must state the target requirement and evidence. AMH is better for the full habitat objective; DeepSeek Harness is better for the harness-composition objective. Neither claim should be generalized beyond its target.
 
 ## Evidence and limitations
 
@@ -141,4 +147,3 @@ Primary references:
 - [DeepSeek Harness architecture](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/architecture.md)
 - [DeepSeek Harness core/session documentation](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/core.md)
 - [DeepSeek Harness session model](https://github.com/deepseek-ai/deepseek-harness/blob/master/docs/subsystems/session.md)
-

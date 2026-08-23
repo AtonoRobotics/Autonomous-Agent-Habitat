@@ -1,0 +1,181 @@
+# AMH Build Ledger
+
+This is the spec (`AMH-SPECIFICATION.md`), reordered. Every distinct requirement in the spec — every SHALL/SHALL NOT/MUST/MAY clause, every named component, every §15 acceptance invariant, every §16 superseded decision — listed once, in **build order**: most-foundational-first, so nothing appears before something it actually depends on.
+
+This is not a program. It is not wired into any workflow, table, or tool. Nothing enforces it. It is a checklist and a map: what exists, what depends on what, and what evidence would prove each item done — handed to whoever (human or agent) is deciding what to work on next.
+
+## How to use this
+
+- Work top to bottom. Earlier items are prerequisites for later ones — building something out of this order usually means building it against a foundation that doesn't exist yet, or re-touching it later once the foundation lands (this session's own history has several examples: `daemon/operations` had to exist before any invariant that binds to it could be built; extension capability tokens had to exist before `Rollback` or the Cordis disposal-order work could reuse them).
+- **Order here is build-order/centrality only — never size, effort, or difficulty.** A one-line principle that everything else leans on outranks a large feature nothing depends on.
+- Before starting an item, check whether its linked spec section is actually clear enough to implement as written. If it's ambiguous or underspecified — whether that's discovered before starting, mid-implementation, or only after something's already built and shipped — that gets raised to a human for approval of how to resolve it. Don't silently invent the missing decision and call the spec satisfied.
+- Check an item off only once it's actually done *and* meets its "Test" line for real — not once code exists that plausibly does it.
+- Status reflects this session's actual, verified findings as of 2026-08-23 (built / **partial** / not started), not aspiration. A checked box still worth re-reading if you're about to build something downstream of it — "built" here means built, not "perfect."
+
+Tiers group items that sit at the same dependency depth — order within a tier is not significant, order *between* tiers is.
+
+---
+
+## Tier 1 — Runtime substrate & governing decisions
+
+Nothing here depends on anything else in this document. Everything else depends on this existing.
+
+- [x] **§1.2 Python/Go split** — Go daemon owns the habitat; Python cognition workers own reasoning. Depends on: nothing. Test: integration — a real goal flows through both processes (proven by the greenhouse scenario and every workflow test since).
+- [x] **§1.3 / §3.3 DBOS + PostgreSQL as the durability substrate** — DBOS Transact is the sole durable workflow engine; PostgreSQL is authoritative persisted state from day one; DBOS queues/signals carry durable workflow comms. (Circularly self-referential in the spec — DBOS needs Postgres, Postgres-as-truth needs a durable engine to act on it — built as one substrate, not sequentially.) Depends on: nothing. Test: §15 invariant #1 (resume after restart, no duplicate committed steps) — built, proven by `test_greenhouse_survives_restart`-style tests.
+- [x] **§1.4 PostgreSQL is authoritative persisted state** — no shadow source of truth. Depends on: nothing. Test: schema + migration tests (`daemon/store`).
+- [ ] **§1.5 Context is a managed runtime resource** — budget/offload/retrieval/compaction/cache/subordinate-context as first-class concerns, not ad hoc. **Partial** — the mechanisms exist (Tier 4); this is the governing principle they satisfy, not a separate deliverable. Depends on: nothing directly (informs Tier 4). Test: n/a — a principle, verified by Tier 4's own tests.
+- [x] **§1.7 Reversibility is a policy property** — the extension owns what its own reversibility attestation means; core only gates on the property. Depends on: nothing. Test: `daemon/policy`, `daemon/extensions/capability_test.go`.
+- [x] **§1.8 / §2.3 Physical devices are out of core, in a separate extension** — no Device/DeviceAction/physical Location/SafetyCase in core. Depends on: nothing. Test: §15 invariant #12 — built (confirmed clean by direct grep of `contracts/ontology.schema.json` and `store/migrations/*.sql`).
+- [x] **§3.1 OS service lifecycle** — the Go daemon runs as a real systemd/Windows service. Depends on: nothing. Test: `daemon/cmd/amh-daemon` + deployment scripts.
+- [x] **§3.1 Credential custody + inference routing** — model/tool-provider credentials held once, routed through, never distributed to cognition workers. Depends on: nothing. Test: `daemon/credentials`, `daemon/inference` — built.
+- [ ] **§3.1 Local gRPC transport** — **not started**; HTTP is used instead throughout (no grpc dependency in `go.mod`). Depends on: nothing. Test: n/a until built — would need a real client/server round-trip test.
+- [ ] **§3.1 Connector subprocess/socket I/O** — **partial**; `daemon/extensions/launcher.go` has generic process I/O, no connector-specific socket protocol. Depends on: nothing directly. Test: real subprocess round-trip test per connector type, once connectors beyond extensions exist.
+- [x] **§3.3 NATS is not a mandatory core dependency** — Depends on: nothing. Test: confirmed — `daemon/bus` is an empty reserved directory, nothing requires it.
+- [ ] **§3.3 In-process channels for disposable notification only** — **partial**, not fully audited. Depends on: nothing. Test: audit every in-process channel use for durability assumptions.
+- [ ] **§2.1 / §14 OTel cost accounting** — tracing itself is built (Tier 4); per-goal/run/model **cost accounting is not found** in the codebase. Depends on: nothing. Test: a real run's cost is queryable and matches actual provider billing.
+- [x] **§8 Procedural memory (`skill` table)** — versioned skills/playbooks, one table, `kind` discriminator. Depends on: nothing. Test: `store/migrations/0001_init.sql` schema test.
+- [x] **§8 Semantic memory (Graphiti/Neo4j)** — bi-temporal claim graph. Depends on: nothing. Test: `agents/tests/test_memory_graph.py` — built, real Kuzu-backed integration test.
+- [x] **§12 Normative contract schemas** — the 4 named schema files (plus `ontology.schema.json`/`envelope.schema.json`, built beyond spec minimum). Depends on: nothing. Test: schema validates a real payload, rejects a real invalid one.
+- [ ] **§11 Invalid model/tool output → contract validator** — **not started**, no validator found anywhere in the codebase. Depends on: nothing. Test: a deliberately malformed model/tool response is caught and handled, not silently trusted.
+
+---
+
+## Tier 2 — The three foundational hubs
+
+These three are mutually load-bearing (the spec itself cross-references them circularly — the effect lifecycle needs the policy hook to admit into, the policy hook needs something to admit, extension composability needs both to make activation/disposal a governed effect). Nothing downstream is real without these existing first — the spec-survey's own centrality analysis names these as the highest-fan-out items in the entire document, and they were, not coincidentally, the first things this codebase actually built.
+
+- [x] **§6 Generic fail-closed policy/approval hook** — admit / admit_with_constraints / needs_approval / defer / deny, bound to principal/action/digest/properties/deadline/budget/domain-context, decision bound to exact digest+version+time+expiry, check-then-act forbidden. Depends on: Tier 1. Test: §15 invariant #6 (digest-bound dispatch, fails closed on mutation) — built, `daemon/operations`+`daemon/policy` round-trip tests, both at the Go-internal seam and over real HTTP.
+- [ ] **§6 Domain extensions define their own policy over this seam** — **not started**; no domain extension exists yet to do this (by design — Physical AI, Tier 10, is the first candidate). Depends on: §6 hook. Test: n/a until a domain extension exists.
+- [x] **§4 Generic external-effect lifecycle** — PROPOSED→ADMITTED/REJECTED/NEEDS_APPROVAL→DISPATCH_PENDING→DISPATCHED→OBSERVED/OUTCOME_UNKNOWN→terminal. Depends on: §6. Test: §15 invariant #2 (interrupted effects reconcile, can remain OUTCOME_UNKNOWN) — built, `daemon/operations` `ReconcileInterrupted` tests.
+- [ ] **§4 Pre-dispatch requirement completeness** — op/command identity, digest, retry classification, idempotency, observation method, timeout, declared properties all supplied before dispatch. **Partial** — digest and identity are real and enforced; retry classification and timeout behavior are not independently verified. Depends on: §4 lifecycle. Test: a real dispatch attempt missing any one of these fields is refused.
+- [x] **§4 Core never infers/retries/constructs an inverse for an external effect** — the owning extension reconciles, core doesn't guess. Depends on: §4 lifecycle. Test: §15 invariant #2 + `daemon/operations.Resolve`'s caller-trusted terminal outcome — built.
+- [x] **§5.2 Extensions declare provided/required capabilities** — Depends on: §4 (activation is a governed effect). Test: `daemon/extensions/registry_test.go` — built.
+- [x] **§5.3 Extension lifecycle state machine** — DISCOVERED→VALIDATED→…→ACTIVE→QUIESCING→DISPOSING→DISPOSED, FAILED→RECOVERY_REQUIRED. Depends on: §5.2. Test: `TestActivateThenDispose_*` — built.
+
+---
+
+## Tier 3 — Extension composition detail rules
+
+- [x] **§5.2 Reject unsatisfied required dependencies** — Depends on: Tier 2. Test: `TestActivate_RefusesMissingRequirement` — built.
+- [ ] **§5.2 Detect dependency cycles** — **not started**, no cycle-detection code found. Depends on: Tier 2. Test: discovering two extensions that mutually require each other is refused, not left to hang or infinite-loop.
+- [ ] **§5.2 Activate providers before consumers** — **partial**; the resolver checks a provider is *already* active, doesn't itself sequence a batch activation. Depends on: Tier 2. Test: activating a provider+consumer pair with no prior order enforces provider-first.
+- [ ] **§5.2 Quiesce/dispose consumers before providers** — **partial** for quiesce (`TestQuiesce_RefusesWhileActiveDependentExists`, built); dispose-ordering follows from quiesce-refusal but isn't independently proven. Depends on: Tier 2. Test: §15 invariant #4 — direct inspection confirmed structurally satisfied via fail-closed refusal (not automatic cascade); worth one explicit invariant test.
+- [ ] **§5.2 Reactivate consumers only after a replacement provider passes health/compatibility checks** — **not started**, no health-check concept exists. Depends on: the above. Test: swap a provider for an incompatible replacement, confirm consumers are refused reactivation.
+- [x] **§5.3 Incremental journaling of activation/disposal progress** — no unpersisted list-of-completed-effects returned only at the end. Depends on: Tier 2. Test: `extension_context_effect` table — built.
+- [x] **§5.1 Disposer registration + reverse-order disposal for core-mediated effects** — an active extension self-reports each core-mediated effect it creates and disposes; `Dispose` fails closed on anything outstanding or out-of-order. **Note**: this is bookkeeping/order enforcement over self-attested claims — no dynamic tool catalog/event bus/route table exists for anything to register *into* yet, so it can't verify the underlying effect was real. Depends on: Tier 2, §5.3. Test: §15 invariant #3 — built, `daemon/extensions/context_effect_test.go` + real end-to-end HTTP test with an actual launched process.
+- [ ] **§5.1 Conformance-test rejection of an effect that bypasses the extension context** — **not started**, no conformance-test harness exists. Depends on: §5.1 above. Test: a deliberately-bypassing extension is caught by an automated conformance check, not just documentation.
+- [x] **§5.4 Reversibility attestation binds to extension version, action schema version, evidence, validity, invalidation rules** — Depends on: Tier 1 (§1.7), Tier 2. Test: `daemon/policy`/`daemon/operations` reversibility-typed tests — built for the `verified`/`none` cases actually exercised.
+- [x] **§5.4 Existence of an inverse doesn't instruct core to auto-invoke it** — the owning extension selects recovery. Depends on: §4. Test: built — no core code path invokes a declared inverse automatically.
+- [x] **§15 invariant #5 — an extension cannot mutate another extension's owned effects** — Depends on: Tier 2, capability tokens. Test: built, `daemon/api/operations_test.go` authorization matrix.
+- [ ] **§15 invariant #11 — rollback restores the prior capability binding and compatible persisted state** — **partial**: the capability-binding half is real (proven over an actual launched process); "compatible persisted state" is explicitly out of core's visibility to verify, and the 3-step composition isn't atomic. Depends on: Tier 2, Tier 3 above. Test: built (binding half), `daemon/extensions/registry_test.go` Rollback tests.
+
+---
+
+## Tier 4 — Agent harness & context management
+
+- [x] **§7 Tool-calling loop, native on DBOS, no LangGraph/`deepagents` dependency** — Depends on: Tier 1. Test: `agents/harness/agentic_loop.py` + its own test suite — built. §16 (no LangGraph checkpointer nested in DBOS) confirms this by absence.
+- [x] **§7 Isolated subordinate-agent workflow** — Depends on: Tier 2 (durable workflow primitives), tool-calling loop. Test: `run_subagent`/`do_subagent_work` — built.
+- [x] **§7 Configurable planning/recitation tool** — `write_todos`. Depends on: tool-calling loop. Test: `agents/harness/planning.py` tests — built.
+- [x] **§7 Context budget manager** — Depends on: Tier 1 (§1.5). Test: `agents/context/budget.py` — built, real tokenizer.
+- [ ] **§7 Compaction middleware** — **partial**. Depends on: budget manager. Test: `agents/context/compactor.py` tests — the mechanism is real; see the checkpoint-fields item below for what's still incomplete.
+- [x] **§7 rule 5 — single-result cap, default 25,000 tokens** — Depends on: budget manager. Test: `budget.py` cap test — built.
+- [x] **§7 rule 6 — compaction preserves the 8 governing checkpoint fields** — **partial**: the `Checkpoint` structure and extraction machinery are real; the default offline strategy only genuinely populates 3 of 8 fields (goal, failures, artifact_references) — the model-driven strategy that can populate all 8 is real and tested but nothing wires it in by default. Depends on: compaction middleware. Test: §15 invariant #8 — built, `agents/tests/test_context.py`.
+- [ ] **§7 rule 7 — most recent turns remain raw per provider policy** — **not started** as a distinct, provider-policy-aware rule (the fixed `keep_recent_turns_raw` count exists but doesn't vary by provider). Depends on: compaction middleware. Test: a provider with a different retention policy is honored differently.
+- [ ] **§7 rule 8 — subordinate agents receive explicit objective/boundary/artifact grants/budget/output schema** — **partial**: objective, boundary (VFS root), and budget are real; there is no artifact-*grants* concept (a subagent gets its whole isolated root or nothing — never a specific granted subset from elsewhere) and no enforced output schema. Depends on: isolated subordinate workflow. Test: §15 invariant #7 — the narrow "cannot enumerate outside its root" property is real and tested (`PathEscapesRootError`); the broader grants mechanism is not started.
+- [x] **§7 rule 9 — subordinate traces are durable artifacts, not auto-injected** — `condense`/`trace_ref`. Depends on: isolated subordinate workflow. Test: built.
+- [ ] **§7 rule 3 — opaque, non-enumerable, capability-scoped artifact handles, not ambient filesystem paths** — **partial**: `trace_ref` is handle-shaped; VFS itself (the main artifact surface) is plain ambient paths, `glob`/`grep`-enumerable within its root. Depends on: isolated subordinate workflow, VFS. Test: none yet for handle-based access specifically.
+- [ ] **§7 SKILL.md progressive disclosure** — **not started**, no code found. Depends on: tool-calling loop. Test: a skill file's content loads lazily on demand, not eagerly into every prompt.
+- [ ] **§7 Provider-neutral prompt-cache policy** (rules 1, 2) — **not started**, no `cache_control`/prefix-stability handling found. Depends on: Tier 1 credential/inference routing. Test: a real provider call demonstrates cache-hit behavior on a stable prefix.
+- [ ] **§7 DeepSeek `reasoning_content` preservation across a tool-call chain** — **not started**, no matches found. Depends on: prompt-cache policy / inference routing. Test: a real DeepSeek thinking-mode call chain retains `reasoning_content` end to end.
+- [x] **§7 / §2.1 OTel spans** — Depends on: Tier 1. Test: `agents/context/observability.py` — built (cost accounting, Tier 1, is the still-missing half).
+- [ ] **§2.1 / §7 Scoped artifact and context storage** — **partial**, same VFS-ambient-paths gap as rule 3 above. Depends on: this tier. Test: see rule 3.
+- [ ] **§9 invariant #9 — trajectory presented to a model is reconstructible from durable records/artifacts** — **partial**/real gap: no durable per-turn logging exists; `MarkObserved` in `daemon/inference` still discards the model's actual response. Depends on: this tier, Tier 2 (§4). Test: not built — reconstructing a real trajectory from durable records after the fact currently fails.
+
+---
+
+## Tier 5 — Memory & knowledge
+
+- [x] **§8 Working memory** — query-time projection from the core ontology, not a separate store. Depends on: Tier 1 (core ontology records — **partial**: several named spec types like Message/Memory/Claim/EntityRef/PromptVersion are absent or merged into existing tables, not literal 1:1 matches). Test: `agents/memory/working.py` tests — built.
+- [x] **§8 Episodic memory (Hindsight)** — schema-isolated in the same PostgreSQL cluster. Depends on: Tier 1. Test: `agents/tests/test_memory_hooks.py` — built.
+- [x] **§8 Entity memory + bi-temporal semantic claims (Graphiti)** — Depends on: Tier 1 (semantic memory). Test: built, native Graphiti fields.
+- [ ] **§8 Hybrid lexical+vector+graph retrieval fused behind one port** — **partial**: both backends are real; an explicit fused retrieval port wasn't directly verified as a single seam. Depends on: episodic + semantic memory. Test: one query hitting all three retrieval modes with fused ranking.
+- [ ] **§8 Vector metadata (embedding identity/dimension/model version/chunk version/digest/ACL) stored with every vector** — **not started**, not verified in code. Depends on: hybrid retrieval. Test: a stored vector round-trips with all required metadata fields intact.
+- [ ] **§8 Domain extensions register namespaced entity schemas/relations/indexes/enrichers** — **not started**, no domain extension does this yet. Depends on: Tier 2 (§2.2). Test: n/a until a domain extension exists.
+
+---
+
+## Tier 6 — Interoperability
+
+- [x] **§9 MCP client + server baseline** — Depends on: Tier 1. Test: `daemon/mcp`, `agents/harness/mcp_client.py` — built.
+- [ ] **§9 A2A 1.0 external baseline** — **partial**, documented scope cuts (no `SendStreamingMessage`, no push-notification config CRUD, no separate external-caller identity). Depends on: Tier 2 (§4 — adapters translate lifecycle without becoming workflow authorities). Test: `daemon/a2a` tests — built for what's implemented.
+- [x] **§9 Internal durable comms use AMH's own versioned contracts, never a private "A2A-derived" envelope** — Depends on: Tier 1 (§12 schemas). Test: `contracts/envelope.schema.json` — built; §16 confirms by absence of any such private envelope.
+- [x] **§9 MCP/A2A adapters translate without becoming workflow authorities** — Depends on: Tier 2 (§4). Test: built — neither adapter owns durable state itself, both translate onto real Goal/Task records.
+
+---
+
+## Tier 7 — Self-improvement & self-healing
+
+- [ ] **§3.2 Candidate generation (prompt/retrieval/skill/routing/core-code)** — **not started**: no generator calls `Generate` with a real produced candidate. This is the actual blocker for everything else in this tier being exercised for real. Depends on: Tier 2 (§6). Test: a real optimizer produces a real `CandidateVersion`.
+- [x] **§10 Promotion flow: GENERATED→EVALUATED→CANARY→PROMOTED/REJECTED; PROMOTED→DEMOTED→ROLLED_BACK** — Depends on: Tier 2 (§6), candidate generation (mechanics built, nothing real flows through it yet). Test: `daemon/selfimprove` — built, mechanically complete.
+- [x] **§10 / §15 invariant #10 — no optimizer may alter its own evaluator, held-out cases, instrumentation, policy, or threshold** — Depends on: promotion flow. Test: `RecordEval` computes its own verdict server-side, operator-only — built. **Categorically different from other partial items here**: there is no live capability-rebinding mechanism at all yet for a candidate to even attempt subverting, so this holds by construction, not by a tested adversarial check.
+- [ ] **§10 Promotion uses the real extension lifecycle (stage/canary/observe/quiesce/switch/retain-rollback/dispose)** — **partial**: `Promote`/`Rollback` are real bookkeeping; there is no live capability switch yet, and "canary" is a stricter evidence bar, not actual live traffic-splitting. Depends on: Tier 3 (§5.3), promotion flow. Test: a real promoted candidate actually changes what a live call site does.
+- [x] **§11 recovery table — every named failure mode maps to a named recovery owner** (Go process→OS supervisor, Python worker→Go supervisor+DBOS resume, workflow interruption→DBOS, extension failure→extension supervisor, effect uncertainty→owning extension reconciler) — Depends on: Tier 1, Tier 2. Test: built for the process/workflow/effect rows; **partial** for provider-outage (failover chain exists, no explicit circuit breaker) and dependency-loss (partial per Tier 3's cycle-detection gap) and goal-stuck (dispatcher-based, partial).
+- [x] **§11 Restart restores availability, not proof of success** — recovery restores invariants or retains OUTCOME_UNKNOWN, never fabricates a success. Depends on: Tier 2 (§4). Test: built.
+
+---
+
+## Tier 8 — Public contracts & deployment packaging
+
+- [ ] **§12 Extensions publish their own namespaced schemas, never modify core schemas** — **partial**, not independently audited (true so far because only one real extension exists). Depends on: Tier 2 (§2.2). Test: a second extension's schema addition is proven not to touch `contracts/ontology.schema.json`.
+- [ ] **§12 Contract versioning (semver, compatibility declarations, typed errors, concurrency tokens, deprecation periods)** — **partial**: compatibility semver ranges are real (`daemon/extensions.Discover`); typed errors/concurrency tokens/deprecation periods not independently verified across all contracts. Depends on: Tier 1 (§12 schemas). Test: a breaking schema change is caught by a real compatibility check.
+- [x] **§14 Signed extension packs + compatibility qualification** — **partial**: verification is real and tested (Ed25519, real key rotation); not mandatory by default (`AMH_EXTENSIONS_REQUIRE_SIGNATURES=false`), a deliberate, documented scope cut. Depends on: Tier 3 (§5.3). Test: `daemon/extensions` signature tests — built.
+- [ ] **§14 Backup/restore, upgrade/rollback, corruption recovery, resource exhaustion, soak acceptance** — **partial**, 2 of 5 built (backup/restore via `pg_dump`/`pg_restore`, migration rollback). Corruption recovery, resource-exhaustion handling, and soak acceptance testing remain undone. Depends on: Tier 1 (§3.3 Postgres qualification — mutually referential with this item in the spec itself; build together). Test: `daemon/backup` tests — built for the 2/5; the other 3 have none yet.
+- [ ] **§3.2 Coder-agent reasoning inside a sandbox** — **not started**, `agents/coder` is an empty stub. Depends on: Tier 1 (extension host isolation). Test: a real coding task runs inside the sandbox end to end.
+- [ ] **§14 Connector and domain-extension SDKs** — **not started**, no client SDK exists; an extension author calls raw HTTP routes directly today. Depends on: Tier 2, Tier 3. Test: a second real extension is built using only the SDK, no raw HTTP.
+
+---
+
+## Tier 9 — Acceptance invariants (§15) as a cross-cutting verification pass
+
+Each of these is a check *on* something in Tiers 2–8, not new construction — listed here as the final verification sweep, in the same build order as what they check.
+
+- [x] #1 durable workflow resumes after restart, no duplicate committed steps — Tier 1. Built.
+- [x] #2 interrupted external effects reconcile, can remain OUTCOME_UNKNOWN — Tier 2. Built.
+- [ ] #3 removing a conformant reversible extension leaves no registered context-mediated effects — Tier 3. **Partial** (bookkeeping/order enforcement real; no live effect registry to verify against).
+- [ ] #4 dependency removal quiesces/disposes consumers before providers — Tier 3. **Partial** (structurally satisfied via fail-closed refusal, not an explicit dedicated test).
+- [x] #5 an extension cannot mutate another extension's owned effects — Tier 3. Built.
+- [x] #6 policy dispatch bound to the admitted action digest, fails closed after mutation — Tier 2. Built.
+- [ ] #7 a subordinate agent cannot enumerate artifacts outside its grants — Tier 4. **Partial** (root-isolation real; no fine-grained grants mechanism).
+- [ ] #8 compaction preserves every required checkpoint field — Tier 4. **Partial** (structure real; default strategy only populates 3/8 fields).
+- [ ] #9 the trajectory presented to a model is reconstructible from durable records/artifacts — Tier 4. **Not started** for real (no durable per-turn content log).
+- [x] #10 a candidate cannot modify its evaluator/evidence/policy/promotion threshold — Tier 7. Built (holds by construction — no live mechanism yet for a candidate to attempt subverting).
+- [ ] #11 rollback restores the prior capability binding and compatible persisted state — Tier 3. **Partial** (binding half built; persisted-state half explicitly out of core's scope).
+- [x] #12 no core schema contains domain-owned physical entities or policy — Tier 1. Built.
+
+---
+
+## Tier 10 — Physical AI extension boundary (§13)
+
+Entirely unbuilt, by design — meant to ship as an independent extension once core is stable, not as part of core itself.
+
+- [ ] **Device/DeviceAction/Location/Pose/Frame/Map/Mission/SafetyCase owned by the extension** — Depends on: Tier 1 (§1.8), Tier 2, Tier 3. Test: none yet.
+- [ ] **SSH/WinRM/MQTT/OPC-UA/Modbus/ROS2 protocol modules** — Depends on: the item above. Test: none yet.
+- [ ] **Inverse verification for physical actions** — Depends on: Tier 3 (§5.4 attestation binding). Test: none yet.
+- [ ] **Actuation bounds/interlocks/safe states/recovery/earned-autonomy policy** — Depends on: Tier 2 (§6, domain extensions own their policy). Test: none yet.
+- [ ] **Physical geometry + spatial indexes** — Depends on: Tier 5 (domain extension schema registration). Test: none yet.
+- [ ] **Extension uses AMH's own durable-workflow/envelope/policy/effect/artifact/memory/lifecycle primitives, not bespoke ones** — Depends on: everything above it in this tier existing first. Test: none yet.
+
+---
+
+## Tier 11 — Superseded decisions (§16): verify absence, don't rebuild
+
+Not build items — a standing check that none of these were quietly reintroduced.
+
+- [x] No physicality/physical-safety as a core concern — confirmed.
+- [x] No core Device/DeviceAction/physical Location/SafetyCase/greenhouse types — confirmed absent from migrations.
+- [x] No generic core derivation/invocation of physical inverses — confirmed.
+- [x] No LangGraph/DeepAgents checkpointer nested inside DBOS — confirmed.
+- [x] DBOS-to-Temporal not described as a configuration swap — confirmed (documentation only, no Temporal code exists to conflate).
+- [x] NATS not a mandatory core dependency — confirmed.
+- [x] No private "A2A-derived" internal envelope presented as A2A compatibility — confirmed.
+- [x] No universal exactly-once claims for external effects — confirmed (`daemon/operations`' own doc comments are explicit about this).

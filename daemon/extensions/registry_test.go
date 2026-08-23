@@ -415,6 +415,77 @@ func TestQuiesce_RefusesWhileActiveDependentExists(t *testing.T) {
 	}
 }
 
+// TestQuiesceDisposeOrdering_ProviderNeverDisposedBeforeItsConsumer is the
+// direct proof of §5.2 / §15 acceptance invariant #4 ("dependency removal
+// quiesces/disposes consumers before providers") — previously only
+// Quiesce's own refusal was tested directly (see the test above); this
+// walks the full ordering guarantee end to end, including the half that
+// test doesn't check: that Dispose is ALSO refused while quiesce would be,
+// not just Quiesce itself. Dispose requires status 'quiescing' (a
+// precondition only Quiesce can set, and only once it succeeds), so a
+// provider structurally cannot reach Dispose while an active consumer
+// still needs it — not because Dispose re-checks dependents itself, but
+// because Quiesce is the one and only gate into the state Dispose
+// requires. No separate ordering/cascade logic exists, or is needed.
+func TestQuiesceDisposeOrdering_ProviderNeverDisposedBeforeItsConsumer(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	producer := baseManifest("amh.test/order-producer", "1.0.0")
+	producer.Spec.Provides = []CapabilityRef{{ID: "amh.test/order-cap", Version: "1.0.0"}}
+	if _, err := reg.Discover(ctx, producer); err != nil {
+		t.Fatalf("Discover producer: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/order-producer", "1.0.0"); err != nil {
+		t.Fatalf("Activate producer: %v", err)
+	}
+
+	consumer := baseManifest("amh.test/order-consumer", "1.0.0")
+	consumer.Spec.Requires = []Requirement{{Capability: "amh.test/order-cap", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, consumer); err != nil {
+		t.Fatalf("Discover consumer: %v", err)
+	}
+	if _, err := reg.Activate(ctx, "amh.test/order-consumer", "1.0.0"); err != nil {
+		t.Fatalf("Activate consumer: %v", err)
+	}
+
+	// While the consumer is active, the provider can reach neither
+	// terminal step: Quiesce refuses outright, and Dispose refuses too —
+	// not because it independently checks dependents, but because the
+	// provider never made it past Quiesce into the 'quiescing' state
+	// Dispose requires.
+	if _, err := reg.Quiesce(ctx, "amh.test/order-producer", "1.0.0"); !errors.Is(err, ErrActiveDependents) {
+		t.Fatalf("expected Quiesce to be refused with ErrActiveDependents, got %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/order-producer", "1.0.0"); !errors.Is(err, ErrInvalidState) {
+		t.Fatalf("expected Dispose to also be refused (still active, not quiescing), got %v", err)
+	}
+	producerExt, err := reg.Get(ctx, "amh.test/order-producer", "1.0.0")
+	if err != nil {
+		t.Fatalf("Get producer: %v", err)
+	}
+	if producerExt.Status != StatusActive {
+		t.Fatalf("two refused teardown attempts must not mutate the provider's status; got %s", producerExt.Status)
+	}
+
+	// Quiesce+dispose the consumer first — only then does the ordering
+	// invariant permit the provider's own quiesce/dispose to proceed.
+	if _, err := reg.Quiesce(ctx, "amh.test/order-consumer", "1.0.0"); err != nil {
+		t.Fatalf("Quiesce consumer: %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/order-consumer", "1.0.0"); err != nil {
+		t.Fatalf("Dispose consumer: %v", err)
+	}
+
+	if _, err := reg.Quiesce(ctx, "amh.test/order-producer", "1.0.0"); err != nil {
+		t.Fatalf("expected Quiesce to succeed once its only consumer is disposed: %v", err)
+	}
+	if _, err := reg.Dispose(ctx, "amh.test/order-producer", "1.0.0"); err != nil {
+		t.Fatalf("expected Dispose to succeed once quiesced: %v", err)
+	}
+}
+
 func TestActivate_ProcessIsolation_RealProcessReceivesAWorkingCapabilityToken(t *testing.T) {
 	db := testDB(t)
 	reg := New(db)

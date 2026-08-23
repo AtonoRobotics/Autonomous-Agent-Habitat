@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": [
     "schemaVersion", "effectId", "operationId", "ownerExtensionId", "effectType",
-    "state", "forwardDigest", "sequence", "createdAt", "updatedAt", "rowVersion"
+    "state", "forwardDigest", "retryClass", "sequence", "createdAt", "updatedAt", "rowVersion"
   ],
   "properties": {
     "schemaVersion": { "const": "1.0.0" },
@@ -22,6 +22,7 @@
       ]
     },
     "forwardDigest": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+    "retryClass": { "enum": ["never", "reconcile_before_retry", "idempotent"] },
     "inverseRef": { "type": "string", "format": "uri-reference" },
     "reconciliationRef": { "type": "string", "format": "uri-reference" },
     "externalCommandId": { "type": "string", "minLength": 1, "maxLength": 256 },

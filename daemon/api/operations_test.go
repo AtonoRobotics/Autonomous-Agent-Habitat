@@ -28,6 +28,7 @@ func proposeEffect(t *testing.T, ts *httptest.Server, operationID, reversibility
 		"effect_type":        "amh.test/do-thing",
 		"payload":            map[string]any{"op": operationID},
 		"reversibility":      reversibility,
+		"retry_class":        "never",
 	})
 	resp := postJSON(t, ts.URL+"/v1/operations", testAgentToken, body)
 	defer resp.Body.Close()
@@ -59,6 +60,23 @@ func TestPropose_NeedsApprovalOverHTTP(t *testing.T) {
 	eff := proposeEffect(t, ts, "op-1", "none")
 	if eff.State != "needs_approval" {
 		t.Fatalf("expected needs_approval, got %+v", eff)
+	}
+}
+
+func TestPropose_MissingRetryClassOverHTTP_Is400(t *testing.T) {
+	ts := newTestServer(t, false)
+	body, _ := json.Marshal(map[string]any{
+		"operation_id":       "op-1",
+		"owner_extension_id": "amh.core/test",
+		"effect_type":        "amh.test/do-thing",
+		"payload":            map[string]any{"op": "op-1"},
+		"reversibility":      "verified",
+		// retry_class deliberately omitted.
+	})
+	resp := postJSON(t, ts.URL+"/v1/operations", testAgentToken, body)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("expected 400 proposing with no retry_class, got %d", resp.StatusCode)
 	}
 }
 
@@ -265,6 +283,7 @@ func proposeNonCoreEffect(ts *httptest.Server, ownerExtensionID string) []byte {
 		"effect_type":        "amh.test/do-thing",
 		"payload":            map[string]any{"x": 1},
 		"reversibility":      "verified",
+		"retry_class":        "never",
 	})
 	return body
 }

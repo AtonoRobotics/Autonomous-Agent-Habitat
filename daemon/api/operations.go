@@ -82,6 +82,7 @@ type effectResponse struct {
 	DecisionID        string `json:"decision_id,omitempty"`
 	State             string `json:"state,omitempty"`
 	ForwardDigest     string `json:"forward_digest,omitempty"`
+	RetryClass        string `json:"retry_class,omitempty"`
 	ExternalCommandID string `json:"external_command_id,omitempty"`
 	ObservationRef    string `json:"observation_ref,omitempty"`
 	ErrorCode         string `json:"error_code,omitempty"`
@@ -96,7 +97,8 @@ func toEffectResponse(eff *operations.Effect) effectResponse {
 	return effectResponse{
 		EffectID: eff.EffectID, OperationID: eff.OperationID, OwnerExtensionID: eff.OwnerExtensionID,
 		EffectType: eff.EffectType, DecisionID: eff.DecisionID, State: string(eff.State),
-		ForwardDigest: eff.ForwardDigest, ExternalCommandID: eff.ExternalCommandID, ObservationRef: eff.ObservationRef,
+		ForwardDigest: eff.ForwardDigest, RetryClass: string(eff.RetryClass),
+		ExternalCommandID: eff.ExternalCommandID, ObservationRef: eff.ObservationRef,
 		ErrorCode: eff.ErrorCode, ErrorRetryable: eff.ErrorRetryable, ErrorMessage: eff.ErrorMessage,
 		CreatedAt: eff.CreatedAt, UpdatedAt: eff.UpdatedAt,
 	}
@@ -120,6 +122,7 @@ type proposeRequest struct {
 	EffectType       string `json:"effect_type"`
 	Payload          any    `json:"payload"`
 	Reversibility    string `json:"reversibility"`
+	RetryClass       string `json:"retry_class"`
 }
 
 func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
@@ -134,6 +137,7 @@ func (s *Server) handlePropose(w http.ResponseWriter, r *http.Request) {
 	eff, err := s.Operations.Propose(r.Context(), operations.ProposeRequest{
 		OperationID: req.OperationID, OwnerExtensionID: req.OwnerExtensionID, EffectType: req.EffectType,
 		Payload: req.Payload, Reversibility: policy.Reversibility(req.Reversibility),
+		RetryClass: operations.RetryClass(req.RetryClass),
 	})
 	if err != nil {
 		writeJSON(w, operationsErrorStatus(err), effectResponse{Error: err.Error()})

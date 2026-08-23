@@ -145,7 +145,13 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
     client = from_env(daemon_api_base_url, agent_token)
     vfs = VFS(os.path.join(_workspace_root(), run_id))
     loop_result = run_agentic_loop(full_objective, vfs, client, mcp_servers=mcp_servers_from_env())
-    return {"task_id": task_id, "status": "done", "summary": loop_result.result}
+    return {
+        "task_id": task_id,
+        "status": "done",
+        "summary": loop_result.result,
+        "tokens_in": loop_result.tokens_in,
+        "tokens_out": loop_result.tokens_out,
+    }
 
 
 @DBOS.workflow()
@@ -156,12 +162,21 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url
     trace_context (see start_subagent below) restores this span as a
     child of the caller's trace, rather than starting an unrelated one —
     DBOS.start_workflow runs this on its own worker thread with no
-    ambient OTel context otherwise."""
+    ambient OTel context otherwise.
+
+    Known gap: real token usage (run.tokens_in/tokens_out, §2.1/§14) is
+    only recorded on the success path — do_subagent_work raising before
+    returning (LoopBudgetExceededError, an unknown-tool error, etc.)
+    means whatever partial usage that run accrued is not captured, since
+    harness.agentic_loop.LoopResult is never constructed for a run that
+    didn't reach "done". cost_usd is not recorded at all yet — no
+    $/token pricing table exists anywhere in this codebase."""
     with agent_run_span(agent_id=task_id, trace_context=trace_context):
         run_id = ontology.create_run(db_path, task_id)
         ontology.set_task_status(db_path, task_id, "active")
         try:
             result = do_subagent_work(task_id, objective, db_path, run_id, daemon_api_base_url, agent_token)
+            ontology.record_tokens(db_path, run_id, result.get("tokens_in", 0), result.get("tokens_out", 0))
             ontology.set_task_status(db_path, task_id, "done")
             ontology.end_run(db_path, run_id, "ok")
             return result

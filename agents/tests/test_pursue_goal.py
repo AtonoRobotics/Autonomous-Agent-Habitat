@@ -61,6 +61,41 @@ def test_do_subagent_work_includes_the_parent_goal_via_working_memory(db_path, d
 
     assert "keep the greenhouse healthy overnight" in result["summary"]
     assert "open the vent" in result["summary"]
+    assert result["tokens_in"] > 0
+    assert result["tokens_out"] > 0
+
+
+def test_run_subagent_records_real_token_usage_onto_the_run(db_path, daemon, fake_model_server):
+    """§2.1/§14 cost accounting (AMH-LEDGER.md Tier 1): run_subagent must
+    persist the agentic loop's real, provider-reported token usage onto
+    run.tokens_in/tokens_out — not leave those columns permanently at
+    their schema default of 0."""
+    from dbos import DBOS
+
+    from workflows import ontology
+    from workflows.goal import run_subagent
+    from workflows.runtime import init_dbos
+
+    goal_id = str(uuid.uuid4())
+    ontology.ensure_goal(db_path, goal_id, "keep the greenhouse healthy overnight")
+    task_id = ontology.create_task(db_path, goal_id, "open the vent")
+
+    init_dbos("amh-agents-test-tokens", db_path)
+    DBOS.launch()
+    try:
+        run_subagent(task_id, "open the vent", db_path, daemon.base_url, daemon.agent_token)
+    finally:
+        DBOS.destroy()
+
+    import psycopg
+
+    conn = psycopg.connect(db_path)
+    row = conn.execute("SELECT tokens_in, tokens_out FROM run WHERE task_id = %s", (task_id,)).fetchone()
+    conn.close()
+    assert row is not None
+    tokens_in, tokens_out = row
+    assert tokens_in > 0
+    assert tokens_out > 0
 
 
 def test_pursue_goal_survives_process_restart(db_path, tmp_path, daemon, fake_model_server):

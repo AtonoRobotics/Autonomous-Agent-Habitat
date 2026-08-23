@@ -152,7 +152,10 @@ class _FakeModelHandler(BaseHTTPRequestHandler):
             else:
                 content = f"completed: {user_content}"
 
-            response = json.dumps({"choices": [{"message": {"role": "assistant", "content": content}}]}).encode("utf-8")
+            response = json.dumps({
+                "choices": [{"message": {"role": "assistant", "content": content}}],
+                "usage": {"prompt_tokens": 17, "completion_tokens": 3},
+            }).encode("utf-8")
 
         self.send_response(200)
         self.send_header("Content-Type", "application/json")

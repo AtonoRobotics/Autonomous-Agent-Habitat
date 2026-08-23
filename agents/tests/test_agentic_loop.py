@@ -23,6 +23,7 @@ from harness.vfs import VFS
 
 class _ScriptedDaemon(BaseHTTPRequestHandler):
     responses: list[str] = []
+    usages: list[tuple[int, int]] = []
     call_count = 0
 
     def log_message(self, format, *args):
@@ -33,8 +34,13 @@ class _ScriptedDaemon(BaseHTTPRequestHandler):
         self.rfile.read(length)
         cls = type(self)
         text = cls.responses[cls.call_count]
+        payload = {"text": text}
+        if cls.usages:
+            input_tokens, output_tokens = cls.usages[cls.call_count]
+            payload["input_tokens"] = input_tokens
+            payload["output_tokens"] = output_tokens
         cls.call_count += 1
-        body = json.dumps({"text": text}).encode()
+        body = json.dumps(payload).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
@@ -44,6 +50,7 @@ class _ScriptedDaemon(BaseHTTPRequestHandler):
 @pytest.fixture()
 def scripted_daemon():
     _ScriptedDaemon.responses = []
+    _ScriptedDaemon.usages = []
     _ScriptedDaemon.call_count = 0
     server = HTTPServer(("127.0.0.1", 0), _ScriptedDaemon)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -72,6 +79,24 @@ def test_write_file_then_done_actually_writes_to_the_vfs(scripted_daemon, tmp_pa
     assert result.turns_used == 2
     assert vfs.read_file("notes.txt") == "hello from the loop"
     assert _ScriptedDaemon.call_count == 2
+
+
+def test_accumulates_real_token_usage_across_turns(scripted_daemon, tmp_path):
+    """§2.1/§14 cost accounting (AMH-LEDGER.md Tier 1): the loop must sum
+    each turn's real provider-reported usage, not fabricate or drop it —
+    this is the seam do_subagent_work reads to record a run's real
+    tokens_in/tokens_out."""
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "write_file", "args": {"path": "notes.txt", "content": "hello"}}),
+        json.dumps({"tool": "done", "result": "done"}),
+    ]
+    _ScriptedDaemon.usages = [(100, 20), (30, 5)]
+    vfs = VFS(str(tmp_path / "run-usage"))
+
+    result = run_agentic_loop("write a note", vfs, _client(scripted_daemon))
+
+    assert result.tokens_in == 130
+    assert result.tokens_out == 25
 
 
 def test_a_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):

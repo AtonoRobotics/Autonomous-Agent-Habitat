@@ -25,7 +25,7 @@ func TestComplete_Success_CreatesConfirmedOperation(t *testing.T) {
 	router := New(creds)
 	router.Operations = ops
 
-	result, err := router.Complete(context.Background(), Request{
+	result, _, err := router.Complete(context.Background(), Request{
 		Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {
@@ -62,7 +62,7 @@ func TestComplete_ProviderFailure_CreatesFailedOperation(t *testing.T) {
 	router := New(creds)
 	router.Operations = ops
 
-	_, err := router.Complete(context.Background(), Request{
+	_, _, err := router.Complete(context.Background(), Request{
 		Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}},
 	})
 	if err == nil {
@@ -92,7 +92,7 @@ func TestComplete_NoOperationsConfigured_StillWorksUntracked(t *testing.T) {
 	registerProviderAccount(t, creds, "anthropic", map[string]string{"kind": "anthropic", "api_key": "sk-ant-test", "base_url": fake.URL})
 
 	router := New(creds) // router.Operations left nil
-	result, err := router.Complete(context.Background(), Request{
+	result, _, err := router.Complete(context.Background(), Request{
 		Provider: "anthropic", Model: "claude-sonnet-5", Messages: []Message{{Role: "user", Content: "hi"}},
 	})
 	if err != nil {

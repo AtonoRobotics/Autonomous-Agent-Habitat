@@ -75,22 +75,23 @@ func (s *Server) authorizeEffectMutation(w http.ResponseWriter, r *http.Request,
 }
 
 type effectResponse struct {
-	EffectID          string `json:"effect_id,omitempty"`
-	OperationID       string `json:"operation_id,omitempty"`
-	OwnerExtensionID  string `json:"owner_extension_id,omitempty"`
-	EffectType        string `json:"effect_type,omitempty"`
-	DecisionID        string `json:"decision_id,omitempty"`
-	State             string `json:"state,omitempty"`
-	ForwardDigest     string `json:"forward_digest,omitempty"`
-	RetryClass        string `json:"retry_class,omitempty"`
-	ExternalCommandID string `json:"external_command_id,omitempty"`
-	ObservationRef    string `json:"observation_ref,omitempty"`
-	ErrorCode         string `json:"error_code,omitempty"`
-	ErrorRetryable    bool   `json:"error_retryable,omitempty"`
-	ErrorMessage      string `json:"error_message,omitempty"`
-	CreatedAt         string `json:"created_at,omitempty"`
-	UpdatedAt         string `json:"updated_at,omitempty"`
-	Error             string `json:"error,omitempty"`
+	EffectID           string `json:"effect_id,omitempty"`
+	OperationID        string `json:"operation_id,omitempty"`
+	OwnerExtensionID   string `json:"owner_extension_id,omitempty"`
+	EffectType         string `json:"effect_type,omitempty"`
+	DecisionID         string `json:"decision_id,omitempty"`
+	State              string `json:"state,omitempty"`
+	ForwardDigest      string `json:"forward_digest,omitempty"`
+	RetryClass         string `json:"retry_class,omitempty"`
+	ExternalCommandID  string `json:"external_command_id,omitempty"`
+	ObservationRef     string `json:"observation_ref,omitempty"`
+	ObservationPayload string `json:"observation_payload,omitempty"`
+	ErrorCode          string `json:"error_code,omitempty"`
+	ErrorRetryable     bool   `json:"error_retryable,omitempty"`
+	ErrorMessage       string `json:"error_message,omitempty"`
+	CreatedAt          string `json:"created_at,omitempty"`
+	UpdatedAt          string `json:"updated_at,omitempty"`
+	Error              string `json:"error,omitempty"`
 }
 
 func toEffectResponse(eff *operations.Effect) effectResponse {
@@ -98,7 +99,7 @@ func toEffectResponse(eff *operations.Effect) effectResponse {
 		EffectID: eff.EffectID, OperationID: eff.OperationID, OwnerExtensionID: eff.OwnerExtensionID,
 		EffectType: eff.EffectType, DecisionID: eff.DecisionID, State: string(eff.State),
 		ForwardDigest: eff.ForwardDigest, RetryClass: string(eff.RetryClass),
-		ExternalCommandID: eff.ExternalCommandID, ObservationRef: eff.ObservationRef,
+		ExternalCommandID: eff.ExternalCommandID, ObservationRef: eff.ObservationRef, ObservationPayload: eff.ObservationPayload,
 		ErrorCode: eff.ErrorCode, ErrorRetryable: eff.ErrorRetryable, ErrorMessage: eff.ErrorMessage,
 		CreatedAt: eff.CreatedAt, UpdatedAt: eff.UpdatedAt,
 	}
@@ -215,7 +216,8 @@ func (s *Server) handleMarkDispatched(w http.ResponseWriter, r *http.Request) {
 }
 
 type markObservedRequest struct {
-	ObservationRef string `json:"observation_ref"`
+	ObservationRef     string `json:"observation_ref"`
+	ObservationPayload string `json:"observation_payload"`
 }
 
 func (s *Server) handleMarkObserved(w http.ResponseWriter, r *http.Request) {
@@ -225,7 +227,7 @@ func (s *Server) handleMarkObserved(w http.ResponseWriter, r *http.Request) {
 	}
 	var req markObservedRequest
 	json.NewDecoder(r.Body).Decode(&req)
-	eff, err := s.Operations.MarkObserved(r.Context(), effectID, req.ObservationRef)
+	eff, err := s.Operations.MarkObserved(r.Context(), effectID, req.ObservationRef, req.ObservationPayload)
 	if err != nil {
 		writeJSON(w, operationsErrorStatus(err), effectResponse{Error: err.Error()})
 		return

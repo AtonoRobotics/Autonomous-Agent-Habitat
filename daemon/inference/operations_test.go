@@ -45,6 +45,19 @@ func TestComplete_Success_CreatesConfirmedOperation(t *testing.T) {
 	if effects[0].OwnerExtensionID != "amh.core/inference" {
 		t.Fatalf("expected amh.core/inference as owner, got %q", effects[0].OwnerExtensionID)
 	}
+
+	// §9 acceptance invariant #9: the trajectory presented to a model is
+	// reconstructible from durable records — proven here by re-fetching
+	// the effect from the database fresh, not by trusting Complete's own
+	// in-memory return value, which existed before this durable capture
+	// did and proves nothing new about persistence.
+	reloaded, err := ops.Get(context.Background(), effects[0].EffectID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if reloaded.ObservationPayload != "tracked answer" {
+		t.Fatalf("expected the real response text durably reconstructible from effect_record, got %q", reloaded.ObservationPayload)
+	}
 }
 
 func TestComplete_ProviderFailure_CreatesFailedOperation(t *testing.T) {

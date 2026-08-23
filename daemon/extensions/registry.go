@@ -625,7 +625,7 @@ func (r *Registry) trackedLaunch(ctx context.Context, effectType string, payload
 
 	result, fnErr := fn(ctx)
 
-	_, _ = r.Operations.MarkObserved(ctx, eff.EffectID, result)
+	_, _ = r.Operations.MarkObserved(ctx, eff.EffectID, result, "")
 	terminal := operations.StateConfirmed
 	var effErr *operations.EffectError
 	if fnErr != nil {

@@ -235,7 +235,13 @@ func (r *Router) completeOne(ctx context.Context, provider string, req Request) 
 			default:
 				return completionResult{}, fmt.Errorf("inference: account credential has unknown kind %q", env.Kind)
 			}
-		})
+		},
+		// §9 acceptance invariant #9: the model's real response text is
+		// the trajectory content worth persisting durably, so a completion
+		// is genuinely reconstructible after the fact — unlike Embed/
+		// CountTokens below, whose results aren't conversational content.
+		func(r completionResult) string { return r.Text },
+	)
 }
 
 // CountTokens returns the provider's real input token count, trying each
@@ -267,7 +273,11 @@ func (r *Router) countTokensOne(ctx context.Context, provider string, req Reques
 		map[string]any{"provider": provider, "model": req.Model},
 		func(ctx context.Context) (int, error) {
 			return r.anthropicCountTokens(ctx, env, req)
-		})
+		},
+		// A token count isn't conversational trajectory content — nothing
+		// for §9 invariant #9 to reconstruct here.
+		nil,
+	)
 }
 
 // Embed returns real embedding vectors for req.Input, trying each provider
@@ -297,7 +307,11 @@ func (r *Router) embedOne(ctx context.Context, provider string, req EmbedRequest
 		map[string]any{"provider": provider, "model": req.Model, "input_count": len(req.Input)},
 		func(ctx context.Context) (EmbedResult, error) {
 			return r.openAICompatibleEmbed(ctx, env, req)
-		})
+		},
+		// Raw embedding vectors aren't conversational trajectory content
+		// either, and could be large — nothing meaningful to persist here.
+		nil,
+	)
 }
 
 func (r *Router) openAICompatibleEmbed(ctx context.Context, env credentialEnvelope, req EmbedRequest) (EmbedResult, error) {
@@ -618,7 +632,7 @@ func (r *Router) openAICompatibleComplete(ctx context.Context, env credentialEnv
 // construction" category daemon/sandbox's Create/Destroy pair already
 // uses in daemon/api's route-table doc comment — there is nothing
 // external for an inverse to undo.
-func trackEffect[T any](ctx context.Context, ops *operations.Engine, effectType, provider string, payload any, fn func(context.Context) (T, error)) (T, error) {
+func trackEffect[T any](ctx context.Context, ops *operations.Engine, effectType, provider string, payload any, fn func(context.Context) (T, error), observationPayload func(T) string) (T, error) {
 	var zero T
 	if ops == nil {
 		return fn(ctx)
@@ -649,7 +663,13 @@ func trackEffect[T any](ctx context.Context, ops *operations.Engine, effectType,
 
 	result, callErr := fn(ctx)
 
-	if _, err := ops.MarkObserved(ctx, eff.EffectID, ""); err != nil {
+	// Only a successful call has real content worth persisting — a failed
+	// attempt's zero-value result isn't genuine observed evidence.
+	var payloadText string
+	if callErr == nil && observationPayload != nil {
+		payloadText = observationPayload(result)
+	}
+	if _, err := ops.MarkObserved(ctx, eff.EffectID, "", payloadText); err != nil {
 		return zero, joinNonNil(callErr, fmt.Errorf("inference: mark observed: %w", err))
 	}
 

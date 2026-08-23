@@ -110,24 +110,25 @@ func isTerminal(s State) bool {
 
 // Effect is one row of effect_record, as returned to callers.
 type Effect struct {
-	EffectID          string
-	OperationID       string
-	OwnerExtensionID  string
-	EffectType        string
-	DecisionID        string
-	State             State
-	ForwardDigest     string
-	RetryClass        RetryClass
-	ExternalCommandID string
-	ObservationRef    string
-	ErrorCode         string
-	ErrorRetryable    bool
-	ErrorMessage      string
-	Attempt           int
-	Sequence          int
-	RowVersion        int
-	CreatedAt         string
-	UpdatedAt         string
+	EffectID           string
+	OperationID        string
+	OwnerExtensionID   string
+	EffectType         string
+	DecisionID         string
+	State              State
+	ForwardDigest      string
+	RetryClass         RetryClass
+	ExternalCommandID  string
+	ObservationRef     string
+	ObservationPayload string
+	ErrorCode          string
+	ErrorRetryable     bool
+	ErrorMessage       string
+	Attempt            int
+	Sequence           int
+	RowVersion         int
+	CreatedAt          string
+	UpdatedAt          string
 }
 
 // EffectError is the optional error detail Resolve records alongside a
@@ -273,7 +274,15 @@ func (e *Engine) MarkDispatched(ctx context.Context, effectID, externalCommandID
 // dispatch's outcome (as opposed to MarkOutcomeUnknown, where nobody
 // did). observationRef is a URI reference to where that evidence lives,
 // mirroring contracts/effect-record.schema.json's observationRef.
-func (e *Engine) MarkObserved(ctx context.Context, effectID, observationRef string) (*Effect, error) {
+// observationPayload is optional, additive evidence content itself —
+// e.g. daemon/inference passes the model's real response text here, so
+// §9 acceptance invariant #9 ("the trajectory presented to a model is
+// reconstructible from durable records") has something durable to
+// reconstruct from; daemon/extensions leaves it empty since its own
+// observationRef (a runtime handle) is already a sufficient reference,
+// not raw content to persist. Never required — most callers have
+// nothing more specific than observationRef to offer.
+func (e *Engine) MarkObserved(ctx context.Context, effectID, observationRef, observationPayload string) (*Effect, error) {
 	eff, err := e.Get(ctx, effectID)
 	if err != nil {
 		return nil, err
@@ -281,7 +290,10 @@ func (e *Engine) MarkObserved(ctx context.Context, effectID, observationRef stri
 	if eff.State != StateDispatched {
 		return nil, fmt.Errorf("%w: %s is %s, not dispatched", ErrInvalidTransition, effectID, eff.State)
 	}
-	if err := e.updateState(ctx, effectID, eff.RowVersion, `state = 'observed', observation_ref = $3`, nullable(observationRef)); err != nil {
+	if err := e.updateState(ctx, effectID, eff.RowVersion,
+		`state = 'observed', observation_ref = $3, observation_payload = $4`,
+		nullable(observationRef), nullable(observationPayload),
+	); err != nil {
 		return nil, err
 	}
 	return e.Get(ctx, effectID)
@@ -373,15 +385,15 @@ func (e *Engine) ReconcileInterrupted(ctx context.Context) ([]*Effect, error) {
 func (e *Engine) Get(ctx context.Context, effectID string) (*Effect, error) {
 	var eff Effect
 	var state, retryClass string
-	var externalCommandID, observationRef, errorCode, errorMessage sql.NullString
+	var externalCommandID, observationRef, observationPayload, errorCode, errorMessage sql.NullString
 	var errorRetryable sql.NullBool
 	err := e.DB.QueryRowContext(ctx, `
 		SELECT effect_id, operation_id, owner_extension_id, effect_type, decision_id, state, forward_digest, retry_class,
-		       external_command_id, observation_ref, error_code, error_retryable, error_message,
+		       external_command_id, observation_ref, observation_payload, error_code, error_retryable, error_message,
 		       attempt, sequence, row_version, created_at, updated_at
 		FROM effect_record WHERE effect_id = $1`, effectID,
 	).Scan(&eff.EffectID, &eff.OperationID, &eff.OwnerExtensionID, &eff.EffectType, &eff.DecisionID, &state, &eff.ForwardDigest, &retryClass,
-		&externalCommandID, &observationRef, &errorCode, &errorRetryable, &errorMessage,
+		&externalCommandID, &observationRef, &observationPayload, &errorCode, &errorRetryable, &errorMessage,
 		&eff.Attempt, &eff.Sequence, &eff.RowVersion, &eff.CreatedAt, &eff.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
@@ -393,6 +405,7 @@ func (e *Engine) Get(ctx context.Context, effectID string) (*Effect, error) {
 	eff.RetryClass = RetryClass(retryClass)
 	eff.ExternalCommandID = externalCommandID.String
 	eff.ObservationRef = observationRef.String
+	eff.ObservationPayload = observationPayload.String
 	eff.ErrorCode = errorCode.String
 	eff.ErrorRetryable = errorRetryable.Bool
 	eff.ErrorMessage = errorMessage.String

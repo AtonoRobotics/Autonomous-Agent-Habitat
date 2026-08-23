@@ -39,6 +39,7 @@ from context.observability import agent_run_span, inject_trace_context
 from harness.vfs import VFS
 from harness.agentic_loop import mcp_servers_from_env, run_agentic_loop
 from memory.working import project_working_memory
+from selfimprove.candidates import get_promoted_prompt
 from . import ontology
 from .memory_hooks import recall_context, retain_outcome
 
@@ -64,6 +65,11 @@ _SUBAGENT_QUEUE = Queue(
     polling_interval_sec=0.2,
 )
 
+# The hardcoded default — used whenever no "prompt"-class CandidateVersion
+# is currently promoted, which is the common case (see daemon/selfimprove's
+# own doc comment: nothing in this codebase generates real candidates yet).
+# See get_promoted_prompt for the real self-improvement seam this default
+# now backs off to.
 _DECOMPOSE_SYSTEM_PROMPT = """You decompose a goal into concrete, independently-workable tasks.
 
 Respond with ONLY a JSON array of objects, each with one field "objective" \
@@ -85,13 +91,19 @@ def decompose_goal(
 
     memory_context, when non-empty, is recalled episodic/semantic memory
     (workflows/memory_hooks.recall_context) prepended to the user message
-    — past goals and known facts relevant to this one, if any were found."""
+    — past goals and known facts relevant to this one, if any were found.
+
+    The system prompt itself comes from get_promoted_prompt: a promoted
+    "prompt"-class CandidateVersion (§10 self-improvement), if one
+    exists, real content actually used here — not just durable
+    bookkeeping — otherwise the hardcoded default exactly as before."""
     ontology.ensure_goal(db_path, goal_id, goal_text)
 
+    system_prompt = get_promoted_prompt(daemon_api_base_url, agent_token, _DECOMPOSE_SYSTEM_PROMPT)
     user_content = f"{memory_context}\n\n{goal_text}" if memory_context else goal_text
     client = from_env(daemon_api_base_url, agent_token)
     response_text = client.complete(
-        system=_DECOMPOSE_SYSTEM_PROMPT,
+        system=system_prompt,
         messages=[{"role": "user", "content": user_content}],
     )
     try:

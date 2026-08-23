@@ -33,6 +33,20 @@ def test_propose_verified_reversibility_admits(daemon):
     assert eff["effect_id"]
 
 
+def test_propose_defaults_retry_class_to_never(daemon):
+    """§4's pre-dispatch 'retry classification' requirement — propose()'s
+    default matches its one real caller's honest posture (harness/
+    agentic_loop.py's MCP call site has no idempotency story for an
+    arbitrary third-party tool call)."""
+    eff = propose(daemon.base_url, daemon.agent_token, "op-1", "amh.core/test", "test_effect", {"x": 1}, "verified")
+    assert eff["retry_class"] == "never"
+
+
+def test_propose_rejects_an_invalid_retry_class(daemon):
+    with pytest.raises(OperationsError):
+        propose(daemon.base_url, daemon.agent_token, "op-1", "amh.core/test", "test_effect", {"x": 1}, "verified", "whenever-i-feel-like-it")
+
+
 def test_propose_reversibility_none_needs_approval_and_stays_there(daemon):
     """The track-only posture agentic_loop.py's MCP call site relies on:
     an unattested effect legitimately parks at needs_approval forever,

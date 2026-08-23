@@ -76,6 +76,29 @@ const (
 	StateFailed          State = "failed"
 )
 
+// RetryClass mirrors contracts/action-envelope.schema.json's `retryClass`
+// enum — one of §4's "before dispatch, the owning extension SHALL
+// supply" requirements. Required on every Propose call: Propose fails
+// closed if it's empty or not one of these three values, the same
+// "declared, not inferred" posture every other pre-dispatch requirement
+// here already has.
+type RetryClass string
+
+const (
+	RetryClassNever                RetryClass = "never"
+	RetryClassReconcileBeforeRetry RetryClass = "reconcile_before_retry"
+	RetryClassIdempotent           RetryClass = "idempotent"
+)
+
+func (rc RetryClass) valid() bool {
+	switch rc {
+	case RetryClassNever, RetryClassReconcileBeforeRetry, RetryClassIdempotent:
+		return true
+	default:
+		return false
+	}
+}
+
 func isTerminal(s State) bool {
 	switch s {
 	case StateConfirmed, StateReconciled, StateCompensated, StateFailed:
@@ -94,6 +117,7 @@ type Effect struct {
 	DecisionID        string
 	State             State
 	ForwardDigest     string
+	RetryClass        RetryClass
 	ExternalCommandID string
 	ObservationRef    string
 	ErrorCode         string
@@ -133,6 +157,7 @@ type ProposeRequest struct {
 	EffectType       string
 	Payload          any
 	Reversibility    policy.Reversibility
+	RetryClass       RetryClass
 }
 
 // Propose admits req through daemon/policy and durably records the
@@ -150,6 +175,10 @@ func (e *Engine) Propose(ctx context.Context, req ProposeRequest) (*Effect, erro
 	}
 	if req.EffectType == "" {
 		return nil, fmt.Errorf("operations: effect_type is required")
+	}
+	if !req.RetryClass.valid() {
+		return nil, fmt.Errorf("operations: retry_class must be one of %q, %q, %q (got %q)",
+			RetryClassNever, RetryClassReconcileBeforeRetry, RetryClassIdempotent, req.RetryClass)
 	}
 
 	decision, err := e.Policy.Decide(ctx, policy.DecideRequest{
@@ -177,9 +206,9 @@ func (e *Engine) Propose(ctx context.Context, req ProposeRequest) (*Effect, erro
 
 	effectID := uuid.NewString()
 	if _, err := e.DB.ExecContext(ctx, `
-		INSERT INTO effect_record (effect_id, operation_id, owner_extension_id, effect_type, decision_id, state, forward_digest)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-		effectID, req.OperationID, req.OwnerExtensionID, req.EffectType, decision.ID, string(state), decision.ActionDigest,
+		INSERT INTO effect_record (effect_id, operation_id, owner_extension_id, effect_type, decision_id, state, forward_digest, retry_class)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		effectID, req.OperationID, req.OwnerExtensionID, req.EffectType, decision.ID, string(state), decision.ActionDigest, string(req.RetryClass),
 	); err != nil {
 		return nil, fmt.Errorf("operations: insert effect_record: %w", err)
 	}
@@ -343,15 +372,15 @@ func (e *Engine) ReconcileInterrupted(ctx context.Context) ([]*Effect, error) {
 // Get loads one effect by id.
 func (e *Engine) Get(ctx context.Context, effectID string) (*Effect, error) {
 	var eff Effect
-	var state string
+	var state, retryClass string
 	var externalCommandID, observationRef, errorCode, errorMessage sql.NullString
 	var errorRetryable sql.NullBool
 	err := e.DB.QueryRowContext(ctx, `
-		SELECT effect_id, operation_id, owner_extension_id, effect_type, decision_id, state, forward_digest,
+		SELECT effect_id, operation_id, owner_extension_id, effect_type, decision_id, state, forward_digest, retry_class,
 		       external_command_id, observation_ref, error_code, error_retryable, error_message,
 		       attempt, sequence, row_version, created_at, updated_at
 		FROM effect_record WHERE effect_id = $1`, effectID,
-	).Scan(&eff.EffectID, &eff.OperationID, &eff.OwnerExtensionID, &eff.EffectType, &eff.DecisionID, &state, &eff.ForwardDigest,
+	).Scan(&eff.EffectID, &eff.OperationID, &eff.OwnerExtensionID, &eff.EffectType, &eff.DecisionID, &state, &eff.ForwardDigest, &retryClass,
 		&externalCommandID, &observationRef, &errorCode, &errorRetryable, &errorMessage,
 		&eff.Attempt, &eff.Sequence, &eff.RowVersion, &eff.CreatedAt, &eff.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -361,6 +390,7 @@ func (e *Engine) Get(ctx context.Context, effectID string) (*Effect, error) {
 		return nil, fmt.Errorf("operations: get effect %s: %w", effectID, err)
 	}
 	eff.State = State(state)
+	eff.RetryClass = RetryClass(retryClass)
 	eff.ExternalCommandID = externalCommandID.String
 	eff.ObservationRef = observationRef.String
 	eff.ErrorCode = errorCode.String

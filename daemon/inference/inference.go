@@ -630,6 +630,12 @@ func trackEffect[T any](ctx context.Context, ops *operations.Engine, effectType,
 		EffectType:       effectType,
 		Payload:          payload,
 		Reversibility:    policy.ReversibilityVerified,
+		// No idempotency key exists for a provider completion/embedding
+		// call, and a retry is not guaranteed to reproduce the same
+		// response — matches this function's own doc comment on why a
+		// failover retry gets its own fresh operation_id rather than
+		// being modeled as a retry of this one.
+		RetryClass: operations.RetryClassNever,
 	})
 	if err != nil {
 		return zero, fmt.Errorf("inference: propose operation: %w", err)

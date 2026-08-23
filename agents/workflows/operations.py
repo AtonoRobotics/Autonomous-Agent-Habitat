@@ -84,11 +84,20 @@ def propose(
     effect_type: str,
     payload: dict,
     reversibility: str = "none",
+    retry_class: str = "never",
 ) -> dict:
     """Proposes a new effect record for operation_id. Returns the Effect
     (see contracts/effect-record.schema.json): state "admitted" or
     "needs_approval" per daemon/policy's built-in decision, never "denied"
-    for this generic policy (see daemon/policy.Decide's doc comment)."""
+    for this generic policy (see daemon/policy.Decide's doc comment).
+
+    retry_class is one of "never"/"reconcile_before_retry"/"idempotent"
+    (§4's pre-dispatch "retry classification" requirement — daemon/
+    operations.Propose now refuses a request that omits or misspells it).
+    Defaults to "never": this module's one real call site (harness/
+    agentic_loop.py's MCP tool tracking) has no idempotency story for an
+    arbitrary third-party tool call, matching its already-honest
+    reversibility="none" default above."""
     url = f"{daemon_api_base_url}/v1/operations"
     body = {
         "operation_id": operation_id,
@@ -96,6 +105,7 @@ def propose(
         "effect_type": effect_type,
         "payload": payload,
         "reversibility": reversibility,
+        "retry_class": retry_class,
     }
     with tool_call_span("operations:propose", **{"amh.api.url": url}):
         return _post(url, agent_token, body)

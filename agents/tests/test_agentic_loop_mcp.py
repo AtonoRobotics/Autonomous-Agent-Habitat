@@ -148,6 +148,32 @@ def test_mcp_tool_error_is_fed_back_not_raised(scripted_daemon, tmp_path):
     assert result.turns_used == 2
 
 
+def test_mcp_tool_args_failing_contract_validation_is_fed_back_not_sent_to_the_server(scripted_daemon, tmp_path):
+    """§11 recovery ownership ('Invalid model/tool output | contract
+    validator'): calling the real filesystem server's write_file with a
+    numeric 'path' (its own real input_schema requires a string) must be
+    caught by harness/contract_validator.py before the call ever reaches
+    the server — proven by the file never actually being created, not
+    just by the loop surviving. Before this validator existed, args were
+    passed straight through to call_tool with no local check at all."""
+    mcp_root = tmp_path / "mcp-root"
+    mcp_root.mkdir()
+    mcp_server = MCPServerSpec(name="fs", command="node", args=[SERVER_ENTRYPOINT, str(mcp_root)])
+
+    _ScriptedDaemon.responses = [
+        json.dumps({"tool": "mcp__fs__write_file", "args": {"path": 123, "content": "should never land"}}),
+        json.dumps({"tool": "done", "result": "gave up, args were invalid"}),
+    ]
+    vfs = VFS(str(tmp_path / "vfs-root"))
+
+    result = run_agentic_loop("write a file via the real MCP server", vfs, _client(scripted_daemon), mcp_servers=[mcp_server])
+
+    assert result.result == "gave up, args were invalid"
+    assert list(mcp_root.iterdir()) == []
+    # A rejected-before-dispatch call is never proposed as an effect either.
+    assert _ScriptedDaemon.operations_calls == []
+
+
 def test_mcp_servers_from_env_is_empty_when_unset(monkeypatch):
     monkeypatch.delenv("AMH_MCP_SERVERS", raising=False)
     assert mcp_servers_from_env() == []

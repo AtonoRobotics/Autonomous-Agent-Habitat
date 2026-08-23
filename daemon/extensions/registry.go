@@ -608,6 +608,10 @@ func (r *Registry) trackedLaunch(ctx context.Context, effectType string, payload
 		EffectType:       effectType,
 		Payload:          payload,
 		Reversibility:    policy.ReversibilityVerified,
+		// Launching/tearing down a real process is not safely repeatable —
+		// retrying a launch that actually started risks a second process,
+		// and this package has no idempotency key to de-duplicate against.
+		RetryClass: operations.RetryClassNever,
 	})
 	if err != nil {
 		return "", fmt.Errorf("extensions: propose operation: %w", err)

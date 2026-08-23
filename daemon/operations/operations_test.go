@@ -31,6 +31,7 @@ func proposeVerified(t *testing.T, e *Engine, operationID string) *Effect {
 		EffectType:       "amh.test/do-thing",
 		Payload:          dispatchPayloadFor(operationID),
 		Reversibility:    policy.ReversibilityVerified,
+		RetryClass:       RetryClassNever,
 	})
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
@@ -57,12 +58,71 @@ func TestPropose_UnverifiedReversibility_NeedsApproval(t *testing.T) {
 		EffectType:       "amh.test/do-thing",
 		Payload:          map[string]any{"op": "op-1"},
 		Reversibility:    policy.ReversibilityNone,
+		RetryClass:       RetryClassNever,
 	})
 	if err != nil {
 		t.Fatalf("Propose: %v", err)
 	}
 	if eff.State != StateNeedsApproval {
 		t.Fatalf("expected needs_approval, got %s", eff.State)
+	}
+}
+
+// TestPropose_RequiresRetryClass proves §4's "before dispatch, the
+// owning extension SHALL supply ... retry classification" is a real,
+// enforced precondition — not merely documented — mirroring how
+// operation_id/owner_extension_id/effect_type are already required just
+// above in Propose itself.
+func TestPropose_RequiresRetryClass(t *testing.T) {
+	e := testEngine(t)
+	if _, err := e.Propose(context.Background(), ProposeRequest{
+		OperationID:      "op-1",
+		OwnerExtensionID: "amh.test/widget",
+		EffectType:       "amh.test/do-thing",
+		Payload:          map[string]any{},
+		Reversibility:    policy.ReversibilityVerified,
+		// RetryClass deliberately omitted.
+	}); err == nil {
+		t.Fatalf("expected Propose to refuse a request with no retry_class")
+	}
+}
+
+func TestPropose_RejectsAnUnknownRetryClass(t *testing.T) {
+	e := testEngine(t)
+	if _, err := e.Propose(context.Background(), ProposeRequest{
+		OperationID:      "op-1",
+		OwnerExtensionID: "amh.test/widget",
+		EffectType:       "amh.test/do-thing",
+		Payload:          map[string]any{},
+		Reversibility:    policy.ReversibilityVerified,
+		RetryClass:       RetryClass("retry_if_it_feels_like_it"),
+	}); err == nil {
+		t.Fatalf("expected Propose to refuse an unrecognized retry_class")
+	}
+}
+
+func TestPropose_PersistsAndReturnsTheRealRetryClass(t *testing.T) {
+	e := testEngine(t)
+	eff, err := e.Propose(context.Background(), ProposeRequest{
+		OperationID:      "op-1",
+		OwnerExtensionID: "amh.test/widget",
+		EffectType:       "amh.test/do-thing",
+		Payload:          map[string]any{},
+		Reversibility:    policy.ReversibilityVerified,
+		RetryClass:       RetryClassIdempotent,
+	})
+	if err != nil {
+		t.Fatalf("Propose: %v", err)
+	}
+	if eff.RetryClass != RetryClassIdempotent {
+		t.Fatalf("expected retry_class %q to round-trip, got %q", RetryClassIdempotent, eff.RetryClass)
+	}
+	reloaded, err := e.Get(context.Background(), eff.EffectID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if reloaded.RetryClass != RetryClassIdempotent {
+		t.Fatalf("expected retry_class to persist across Get, got %q", reloaded.RetryClass)
 	}
 }
 
@@ -117,6 +177,7 @@ func TestMarkDispatchPending_RequiresAdmitted(t *testing.T) {
 		EffectType:       "amh.test/do-thing",
 		Payload:          map[string]any{},
 		Reversibility:    policy.ReversibilityNone,
+		RetryClass:       RetryClassNever,
 	})
 	if err != nil {
 		t.Fatalf("Propose: %v", err)

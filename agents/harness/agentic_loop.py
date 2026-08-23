@@ -53,6 +53,7 @@ from context.compactor import Compactor
 from context.llm import ModelClient
 from workflows import operations
 
+from .contract_validator import BUILTIN_ARG_SCHEMAS, ContractViolationError, validate_action, validate_tool_args
 from .mcp_client import connect_stdio
 from .planning import TodoList
 from .vfs import VFS, PathEscapesRootError
@@ -204,7 +205,7 @@ async def _run_agentic_loop_async(
 
     async with AsyncExitStack() as stack:
         mcp_clients = {}
-        mcp_tool_lookup: dict[str, tuple[str, str]] = {}  # namespaced name -> (server_name, raw_tool_name)
+        mcp_tool_lookup: dict[str, tuple[str, str, dict]] = {}  # namespaced name -> (server_name, raw_tool_name, input_schema)
         catalog_lines = [_BUILTIN_TOOL_CATALOG]
 
         for spec in mcp_servers:
@@ -212,7 +213,7 @@ async def _run_agentic_loop_async(
             mcp_clients[spec.name] = client
             for tool_info in await client.list_tools():
                 namespaced = _mcp_tool_name(spec.name, tool_info.name)
-                mcp_tool_lookup[namespaced] = (spec.name, tool_info.name)
+                mcp_tool_lookup[namespaced] = (spec.name, tool_info.name, tool_info.input_schema or {})
                 properties = tool_info.input_schema.get("properties", {}) if tool_info.input_schema else {}
                 suffix = f" — {tool_info.description}" if tool_info.description else ""
                 catalog_lines.append(f'{{"tool": "{namespaced}", "args": {json.dumps(properties)}}}{suffix}')
@@ -235,8 +236,10 @@ async def _run_agentic_loop_async(
                 action = json.loads(response_text)
             except json.JSONDecodeError as e:
                 raise ValueError(f"agentic loop: model response was not valid JSON: {response_text!r}") from e
-            if not isinstance(action, dict) or "tool" not in action:
-                raise ValueError(f"agentic loop: model response missing 'tool': {action!r}")
+            try:
+                validate_action(action)
+            except ContractViolationError as e:
+                raise ValueError(f"agentic loop: model response failed contract validation: {e} ({action!r})") from e
             tool = action["tool"]
             if tool not in all_tool_names:
                 raise UnknownToolError(f"unknown tool {tool!r} — must be one of {sorted(all_tool_names)}")
@@ -252,20 +255,27 @@ async def _run_agentic_loop_async(
 
             args = action.get("args", {})
             if tool in mcp_tool_lookup:
-                server_name, raw_tool_name = mcp_tool_lookup[tool]
-                await _propose_mcp_effect(model_client.daemon_api_base_url, model_client.agent_token, server_name, raw_tool_name, args)
+                server_name, raw_tool_name, input_schema = mcp_tool_lookup[tool]
                 try:
-                    call_result = await mcp_clients[server_name].call_tool(raw_tool_name, args)
-                    texts = [c["text"] for c in call_result.content if c.get("type") == "text"]
-                    tool_result = "\n".join(texts) or "(no text content)"
-                    if call_result.is_error:
-                        tool_result = f"error: {tool_result}"
-                except Exception as e:  # noqa: BLE001 — an MCP server's own failure is a recoverable tool error, not a loop crash
+                    validate_tool_args(tool, args, input_schema)
+                except ContractViolationError as e:
                     tool_result = f"error: {e}"
+                else:
+                    await _propose_mcp_effect(model_client.daemon_api_base_url, model_client.agent_token, server_name, raw_tool_name, args)
+                    try:
+                        call_result = await mcp_clients[server_name].call_tool(raw_tool_name, args)
+                        texts = [c["text"] for c in call_result.content if c.get("type") == "text"]
+                        tool_result = "\n".join(texts) or "(no text content)"
+                        if call_result.is_error:
+                            tool_result = f"error: {tool_result}"
+                    except Exception as e:  # noqa: BLE001 — an MCP server's own failure is a recoverable tool error, not a loop crash
+                        tool_result = f"error: {e}"
             else:
                 try:
+                    if tool in BUILTIN_ARG_SCHEMAS:
+                        validate_tool_args(tool, args, BUILTIN_ARG_SCHEMAS[tool])
                     tool_result = _dispatch_builtin_tool(vfs, todos, tool, args)
-                except (PathEscapesRootError, FileNotFoundError, ValueError, KeyError) as e:
+                except (PathEscapesRootError, FileNotFoundError, ValueError, KeyError, ContractViolationError) as e:
                     tool_result = f"error: {e}"
 
             budget.add_turn("user", tool_result, is_tool_result=True)

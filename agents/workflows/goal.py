@@ -15,9 +15,11 @@ decompose_goal and do_subagent_work make real model calls through the
 daemon's inference seam (context/llm.py, daemon/inference) — they are not
 canned responses, and this process never holds a model-provider credential
 itself: daemon_api_base_url + agent_token (the same two values every other
-daemon-calling step in this codebase already threads through — see
-actuate.py) are all either step needs. do_subagent_work runs a real
-agentic tool-calling loop (harness/agentic_loop.py) against an isolated
+HTTP daemon-calling step in this codebase already threads through) cover
+decompose_goal's needs; do_subagent_work also threads daemon_grpc_addr,
+since its agentic loop's MCP effect-tracking calls now go over gRPC
+(Phase 2 of the gRPC migration — workflows/operations.py). do_subagent_work
+runs a real agentic tool-calling loop (harness/agentic_loop.py) against an isolated
 VFS root, not a single-turn completion — see that module's docstring for
 the tool-call protocol and why it isn't native function-calling. Both
 steps propagate ModelNotConfiguredError (context/llm.py) if no provider
@@ -135,7 +137,7 @@ def _workspace_root() -> str:
 
 
 @DBOS.step()
-def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, daemon_api_base_url: str, agent_token: str) -> dict[str, Any]:
+def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str) -> dict[str, Any]:
     """Runs a real agentic tool-calling loop (harness/agentic_loop.py)
     against an isolated VFS root scoped to this run — not a single-turn
     completion. Returns a condensed result only (per Artifact D's
@@ -156,7 +158,7 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
 
     client = from_env(daemon_api_base_url, agent_token)
     vfs = VFS(os.path.join(_workspace_root(), run_id))
-    loop_result = run_agentic_loop(full_objective, vfs, client, mcp_servers=mcp_servers_from_env())
+    loop_result = run_agentic_loop(full_objective, vfs, client, daemon_grpc_addr, mcp_servers=mcp_servers_from_env())
     return {
         "task_id": task_id,
         "status": "done",
@@ -167,7 +169,7 @@ def do_subagent_work(task_id: str, objective: str, db_path: str, run_id: str, da
 
 
 @DBOS.workflow()
-def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, agent_token: str, trace_context: dict[str, str] | None = None) -> dict[str, Any]:
+def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str, trace_context: dict[str, str] | None = None) -> dict[str, Any]:
     """Runs as an isolated DBOS child workflow — crash-recoverable
     independently of the parent (§14.2's subagent isolation contract).
 
@@ -187,7 +189,7 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url
         run_id = ontology.create_run(db_path, task_id)
         ontology.set_task_status(db_path, task_id, "active")
         try:
-            result = do_subagent_work(task_id, objective, db_path, run_id, daemon_api_base_url, agent_token)
+            result = do_subagent_work(task_id, objective, db_path, run_id, daemon_api_base_url, daemon_grpc_addr, agent_token)
             ontology.record_tokens(db_path, run_id, result.get("tokens_in", 0), result.get("tokens_out", 0))
             ontology.set_task_status(db_path, task_id, "done")
             ontology.end_run(db_path, run_id, "ok")
@@ -198,7 +200,7 @@ def run_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url
             raise
 
 
-def start_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, agent_token: str):
+def start_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str):
     """Enqueues run_subagent as a DBOS child workflow, capturing the
     caller's current OTel span context and passing it through explicitly
     so the child's span nests under the caller's trace. Must be called
@@ -218,7 +220,7 @@ def start_subagent(task_id: str, objective: str, db_path: str, daemon_api_base_u
     need to be right in one place.
     """
     trace_context = inject_trace_context()
-    return _SUBAGENT_QUEUE.enqueue(run_subagent, task_id, objective, db_path, daemon_api_base_url, agent_token, trace_context)
+    return _SUBAGENT_QUEUE.enqueue(run_subagent, task_id, objective, db_path, daemon_api_base_url, daemon_grpc_addr, agent_token, trace_context)
 
 
 @DBOS.step()
@@ -232,7 +234,7 @@ def synthesize(goal_id: str, gathered: list[dict[str, Any]], db_path: str) -> st
 
 
 @DBOS.workflow()
-def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, agent_token: str) -> str:
+def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str) -> str:
     """Top-level durable workflow. Decomposes, fans out to run_subagent
     child workflows, gathers, synthesizes. If the process dies mid-flight,
     restarting it (with the same DBOS system database) resumes exactly
@@ -247,7 +249,7 @@ def pursue_goal(goal_id: str, goal_text: str, db_path: str, daemon_api_base_url:
         memory_context = recall_context(goal_text, daemon_api_base_url, agent_token)
         tasks = decompose_goal(goal_id, goal_text, db_path, daemon_api_base_url, agent_token, memory_context)
 
-        handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, agent_token) for t in tasks]
+        handles = [start_subagent(t["task_id"], t["objective"], db_path, daemon_api_base_url, daemon_grpc_addr, agent_token) for t in tasks]
         gathered = [h.get_result() for h in handles]
 
         summary = synthesize(goal_id, gathered, db_path)

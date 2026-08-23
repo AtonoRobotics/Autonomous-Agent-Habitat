@@ -23,12 +23,14 @@ no MCP tools, the same optional-if-unconfigured pattern
 workflows/memory_hooks.py already uses for Hindsight/Graphiti.
 
 Every MCP tool call is proposed as an external effect through
-workflows/operations.py (daemon/operations — §4) before it runs, using
-model_client's own daemon_api_base_url/agent_token (no new plumbing
-through run_agentic_loop's signature). This is deliberately track-only,
-not enforcing: see _propose_mcp_effect's doc comment for why the loop
-never waits for or acts on the resulting decision, and workflows/
-operations.py's module doc comment for why these calls aren't
+workflows/operations.py (daemon/operations — §4) before it runs, over
+gRPC (Phase 2 of the gRPC migration — workflows/operations.py's module
+doc comment) via a daemon_grpc_addr threaded through run_agentic_loop's
+own signature, alongside model_client's daemon_api_base_url/agent_token
+for the (still HTTP, Phase 4) inference calls. This is deliberately
+track-only, not enforcing: see _propose_mcp_effect's doc comment for why
+the loop never waits for or acts on the resulting decision, and
+workflows/operations.py's module doc comment for why these calls aren't
 @DBOS.step()-wrapped here.
 
 Physical actuation (workflows/actuate.py) is deliberately still not a
@@ -133,7 +135,7 @@ class UnknownToolError(Exception):
     set — a real protocol violation, not swallowed as a no-op."""
 
 
-async def _propose_mcp_effect(daemon_api_base_url: str, agent_token: str, server_name: str, raw_tool_name: str, args: dict) -> None:
+async def _propose_mcp_effect(daemon_grpc_addr: str, agent_token: str, server_name: str, raw_tool_name: str, args: dict) -> None:
     """Best-effort external-effect tracking (§4) for one MCP tool call, via
     workflows/operations.py. Always reversibility="none": an arbitrary
     third-party MCP tool has no verified inverse this harness can attest
@@ -152,7 +154,7 @@ async def _propose_mcp_effect(daemon_api_base_url: str, agent_token: str, server
     try:
         await asyncio.to_thread(
             operations.propose,
-            daemon_api_base_url,
+            daemon_grpc_addr,
             agent_token,
             str(uuid.uuid4()),
             "amh.core/mcp-client",
@@ -194,6 +196,7 @@ async def _run_agentic_loop_async(
     objective: str,
     vfs: VFS,
     model_client: ModelClient,
+    daemon_grpc_addr: str,
     max_turns: int,
     budget: BudgetManager | None,
     compactor: Compactor | None,
@@ -261,7 +264,7 @@ async def _run_agentic_loop_async(
                 except ContractViolationError as e:
                     tool_result = f"error: {e}"
                 else:
-                    await _propose_mcp_effect(model_client.daemon_api_base_url, model_client.agent_token, server_name, raw_tool_name, args)
+                    await _propose_mcp_effect(daemon_grpc_addr, model_client.agent_token, server_name, raw_tool_name, args)
                     try:
                         call_result = await mcp_clients[server_name].call_tool(raw_tool_name, args)
                         texts = [c["text"] for c in call_result.content if c.get("type") == "text"]
@@ -290,6 +293,7 @@ def run_agentic_loop(
     objective: str,
     vfs: VFS,
     model_client: ModelClient,
+    daemon_grpc_addr: str,
     max_turns: int = 20,
     budget: BudgetManager | None = None,
     compactor: Compactor | None = None,
@@ -312,5 +316,5 @@ def run_agentic_loop(
     mistake to recover from.
     """
     return asyncio.run(
-        _run_agentic_loop_async(objective, vfs, model_client, max_turns, budget, compactor, mcp_servers or [])
+        _run_agentic_loop_async(objective, vfs, model_client, daemon_grpc_addr, max_turns, budget, compactor, mcp_servers or [])
     )

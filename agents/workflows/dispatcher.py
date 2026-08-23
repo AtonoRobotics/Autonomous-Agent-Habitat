@@ -70,7 +70,7 @@ from .runtime import init_dbos
 logger = logging.getLogger(__name__)
 
 
-def claim_and_dispatch_once(db_path: str, daemon_api_base_url: str, agent_token: str) -> list[str]:
+def claim_and_dispatch_once(db_path: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str) -> list[str]:
     """Ensures pursue_goal has been started for every still-'open' goal.
     Returns those goals' ids. Requires DBOS to already be launched (see
     run_forever) — this function only starts workflows, it doesn't manage
@@ -81,7 +81,7 @@ def claim_and_dispatch_once(db_path: str, daemon_api_base_url: str, agent_token:
     for goal_id, goal_text in open_goals:
         workflow_id = f"goal-{goal_id}"
         with SetWorkflowID(workflow_id):
-            DBOS.start_workflow(pursue_goal, goal_id, goal_text, db_path, daemon_api_base_url, agent_token)
+            DBOS.start_workflow(pursue_goal, goal_id, goal_text, db_path, daemon_api_base_url, daemon_grpc_addr, agent_token)
         goal_ids.append(goal_id)
     return goal_ids
 
@@ -99,7 +99,7 @@ def cancel_interrupted_goals_once(db_path: str) -> list[str]:
     return canceled_ids
 
 
-def run_forever(db_path: str, daemon_api_base_url: str, agent_token: str, poll_interval_sec: float = 2.0) -> None:
+def run_forever(db_path: str, daemon_api_base_url: str, daemon_grpc_addr: str, agent_token: str, poll_interval_sec: float = 2.0) -> None:
     """Standing dispatcher process: launches DBOS once, then claims and
     dispatches newly-open goals and cancels interrupted ones on an
     interval until interrupted (KeyboardInterrupt/SIGTERM propagates as a
@@ -110,7 +110,7 @@ def run_forever(db_path: str, daemon_api_base_url: str, agent_token: str, poll_i
     logger.info("goal dispatcher started, polling every %ss", poll_interval_sec)
     try:
         while True:
-            dispatched = claim_and_dispatch_once(db_path, daemon_api_base_url, agent_token)
+            dispatched = claim_and_dispatch_once(db_path, daemon_api_base_url, daemon_grpc_addr, agent_token)
             if dispatched:
                 logger.info("dispatched %d goal(s): %s", len(dispatched), dispatched)
             canceled = cancel_interrupted_goals_once(db_path)
@@ -126,6 +126,7 @@ if __name__ == "__main__":
     run_forever(
         db_path=os.environ["DATABASE_URL"],
         daemon_api_base_url=os.environ["AMH_API_BASE_URL"],
+        daemon_grpc_addr=os.environ["AMH_GRPC_ADDR"],
         agent_token=os.environ["AMH_API_AGENT_TOKEN"],
         poll_interval_sec=float(os.environ.get("AMH_DISPATCHER_POLL_INTERVAL_SEC", "2.0")),
     )

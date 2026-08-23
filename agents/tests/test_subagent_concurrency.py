@@ -106,7 +106,7 @@ def test_pursue_goal_bounds_subagent_concurrency(daemon, db_path):
             init_dbos("amh-subagent-concurrency-test", {db_path!r})
             DBOS.launch()
             try:
-                result = pursue_goal({goal_id!r}, {goal_text!r}, {db_path!r}, {daemon.base_url!r}, {daemon.agent_token!r})
+                result = pursue_goal({goal_id!r}, {goal_text!r}, {db_path!r}, {daemon.base_url!r}, {daemon.grpc_addr!r}, {daemon.agent_token!r})
                 print("RESULT:" + result)
             finally:
                 DBOS.destroy()

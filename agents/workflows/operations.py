@@ -1,20 +1,29 @@
-"""Generic external-effect-lifecycle HTTP client over daemon/api's
-/v1/operations/* routes (daemon/operations — docs/AMH-SPECIFICATION.md §4).
+"""Generic external-effect-lifecycle gRPC client over daemon/grpcapi's
+OperationsService (daemon/operations — docs/AMH-SPECIFICATION.md §4).
+
+Phase 2 of the gRPC migration (see workflows/policy.py's module docstring
+for Phase 1 and contracts/proto/operations.proto's header comment for this
+phase's scope/rationale): this module used to be an HTTP+JSON client of
+daemon/api's /v1/operations/* routes. Its one real production call site
+(harness/agentic_loop.py's MCP tool-call tracking, called from
+workflows/goal.py's do_subagent_work) now needs a daemon_grpc_addr
+alongside the daemon_api_base_url it still needs for daemon/inference
+(Phase 4, not yet migrated) — both values thread down the same durable
+workflow call graph they already did (agents/workflows/dispatcher.py ->
+pursue_goal -> ... -> _propose_mcp_effect), one new parameter, not a new
+plumbing mechanism.
 
 Deliberately plain functions, not @DBOS.step()-decorated like
 workflows/policy.py's decide()/consume(). policy.py's step decoration was
 speculative — written before it had a real call site. This module's real
-call site (harness/agentic_loop.py's MCP call site, called from
-workflows/goal.py's do_subagent_work) already runs entirely inside one
-@DBOS.step(): do_subagent_work calls run_agentic_loop synchronously, which
-runs the whole loop body to completion before returning. Nesting a
-DBOS.step() call inside an already-executing step isn't a meaningful unit
-of durability there — it would just be a plain HTTP call with extra
-bookkeeping DBOS doesn't apply mid-step. That matches how
-context/llm.py's ModelClient already calls the daemon's inference routes
-from the very same call graph: plain HTTP, no step decoration. A future
-call site invoking this module directly from workflow-level code (outside
-any step) is free to wrap these calls in DBOS.step() at that call site.
+call site already runs entirely inside one @DBOS.step(): do_subagent_work
+calls run_agentic_loop synchronously, which runs the whole loop body to
+completion before returning. Nesting a DBOS.step() call inside an
+already-executing step isn't a meaningful unit of durability there — it
+would just be a plain gRPC call with extra bookkeeping DBOS doesn't apply
+mid-step. A future call site invoking this module directly from
+workflow-level code (outside any step) is free to wrap these calls in
+DBOS.step() at that call site.
 
 Track-only, not enforcing: the built-in policy (daemon/policy's
 DefaultPolicyID) admits only Reversibility "verified" — an attested
@@ -32,52 +41,74 @@ see harness/agentic_loop.py's doc comment.
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
+import threading
+
+import grpc
 
 from context.observability import tool_call_span
+from workflows.operationspb import operations_pb2, operations_pb2_grpc
 
 
 class OperationsError(Exception):
     pass
 
 
-def _error_message(e: urllib.error.HTTPError) -> str:
-    """See workflows/policy.py's _error_message: daemon/authn's
-    RequireRole middleware can reject a request before any /v1/operations
-    handler runs, via plain http.Error (plain text, not JSON)."""
-    body = e.read()
+# See workflows/policy.py's identical _channels/_channel pattern: one
+# grpc.Channel per distinct address, reused across calls/threads rather
+# than dialed fresh each time.
+_channels: dict[str, grpc.Channel] = {}
+_channels_lock = threading.Lock()
+
+
+def _channel(daemon_grpc_addr: str) -> grpc.Channel:
+    with _channels_lock:
+        channel = _channels.get(daemon_grpc_addr)
+        if channel is None:
+            channel = grpc.insecure_channel(daemon_grpc_addr)
+            _channels[daemon_grpc_addr] = channel
+        return channel
+
+
+def _client(daemon_grpc_addr: str) -> operations_pb2_grpc.OperationsServiceStub:
+    return operations_pb2_grpc.OperationsServiceStub(_channel(daemon_grpc_addr))
+
+
+def _call(daemon_grpc_addr: str, token: str, method_name: str, request, timeout: float = 30.0):
+    """See workflows/policy.py's identical _call: wraps any RpcError as an
+    OperationsError so callers written against the old HTTP client's
+    exception type don't need to change."""
+    stub = _client(daemon_grpc_addr)
+    method = getattr(stub, method_name)
+    metadata = (("authorization", f"Bearer {token}"),)
     try:
-        return json.loads(body).get("error", f"HTTP {e.code}")
-    except json.JSONDecodeError:
-        return body.decode("utf-8", errors="replace").strip() or f"HTTP {e.code}"
+        return method(request, metadata=metadata, timeout=timeout)
+    except grpc.RpcError as e:
+        raise OperationsError(e.details() or e.code().name) from e
 
 
-def _post(url: str, token: str, body: dict) -> dict:
-    request = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Authorization": f"Bearer {token}"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        raise OperationsError(_error_message(e)) from e
-
-
-def _get(url: str, token: str) -> dict:
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-    try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            return json.loads(response.read())
-    except urllib.error.HTTPError as e:
-        raise OperationsError(_error_message(e)) from e
+def _effect_to_dict(eff: operations_pb2.Effect) -> dict:
+    return {
+        "effect_id": eff.effect_id,
+        "operation_id": eff.operation_id,
+        "owner_extension_id": eff.owner_extension_id,
+        "effect_type": eff.effect_type,
+        "decision_id": eff.decision_id,
+        "state": eff.state,
+        "forward_digest": eff.forward_digest,
+        "retry_class": eff.retry_class,
+        "external_command_id": eff.external_command_id,
+        "observation_ref": eff.observation_ref,
+        "observation_payload": eff.observation_payload,
+        "error_code": eff.error_code,
+        "error_retryable": eff.error_retryable,
+        "error_message": eff.error_message,
+        "created_at": eff.created_at,
+        "updated_at": eff.updated_at,
+    }
 
 
 def propose(
-    daemon_api_base_url: str,
+    daemon_grpc_addr: str,
     agent_token: str,
     operation_id: str,
     owner_extension_id: str,
@@ -93,52 +124,45 @@ def propose(
 
     retry_class is one of "never"/"reconcile_before_retry"/"idempotent"
     (§4's pre-dispatch "retry classification" requirement — daemon/
-    operations.Propose now refuses a request that omits or misspells it).
+    operations.Propose refuses a request that omits or misspells it).
     Defaults to "never": this module's one real call site (harness/
     agentic_loop.py's MCP tool tracking) has no idempotency story for an
     arbitrary third-party tool call, matching its already-honest
     reversibility="none" default above."""
-    url = f"{daemon_api_base_url}/v1/operations"
-    body = {
-        "operation_id": operation_id,
-        "owner_extension_id": owner_extension_id,
-        "effect_type": effect_type,
-        "payload": payload,
-        "reversibility": reversibility,
-        "retry_class": retry_class,
-    }
-    with tool_call_span("operations:propose", **{"amh.api.url": url}):
-        return _post(url, agent_token, body)
+    req = operations_pb2.ProposeRequest(
+        operation_id=operation_id, owner_extension_id=owner_extension_id, effect_type=effect_type,
+        payload_json=json.dumps(payload), reversibility=reversibility, retry_class=retry_class,
+    )
+    with tool_call_span("operations:propose", **{"amh.grpc.addr": daemon_grpc_addr}):
+        return _effect_to_dict(_call(daemon_grpc_addr, agent_token, "Propose", req))
 
 
-def mark_dispatch_pending(daemon_api_base_url: str, agent_token: str, effect_id: str, payload: dict) -> dict:
+def mark_dispatch_pending(daemon_grpc_addr: str, agent_token: str, effect_id: str, payload: dict) -> dict:
     """payload must be the exact payload about to be dispatched — the
     daemon hashes it fresh and binds dispatch to that digest (§15
     acceptance invariant #6: "policy dispatch is bound to the admitted
     action digest and fails closed after expiry or mutation"). Passing
     anything other than the payload propose() actually admitted raises
-    OperationsError (the daemon returns 409)."""
-    url = f"{daemon_api_base_url}/v1/operations/{effect_id}/dispatch-pending"
-    with tool_call_span("operations:dispatch_pending", **{"amh.api.url": url}):
-        return _post(url, agent_token, {"payload": payload})
+    OperationsError (FAILED_PRECONDITION)."""
+    req = operations_pb2.MarkDispatchPendingRequest(effect_id=effect_id, payload_json=json.dumps(payload))
+    with tool_call_span("operations:dispatch_pending", **{"amh.grpc.addr": daemon_grpc_addr}):
+        return _effect_to_dict(_call(daemon_grpc_addr, agent_token, "MarkDispatchPending", req))
 
 
-def mark_dispatched(daemon_api_base_url: str, agent_token: str, effect_id: str, external_command_id: str = "") -> dict:
-    url = f"{daemon_api_base_url}/v1/operations/{effect_id}/dispatched"
-    body = {"external_command_id": external_command_id} if external_command_id else {}
-    with tool_call_span("operations:dispatched", **{"amh.api.url": url}):
-        return _post(url, agent_token, body)
+def mark_dispatched(daemon_grpc_addr: str, agent_token: str, effect_id: str, external_command_id: str = "") -> dict:
+    req = operations_pb2.MarkDispatchedRequest(effect_id=effect_id, external_command_id=external_command_id)
+    with tool_call_span("operations:dispatched", **{"amh.grpc.addr": daemon_grpc_addr}):
+        return _effect_to_dict(_call(daemon_grpc_addr, agent_token, "MarkDispatched", req))
 
 
-def mark_observed(daemon_api_base_url: str, agent_token: str, effect_id: str, observation_ref: str = "") -> dict:
-    url = f"{daemon_api_base_url}/v1/operations/{effect_id}/observed"
-    body = {"observation_ref": observation_ref} if observation_ref else {}
-    with tool_call_span("operations:observed", **{"amh.api.url": url}):
-        return _post(url, agent_token, body)
+def mark_observed(daemon_grpc_addr: str, agent_token: str, effect_id: str, observation_ref: str = "") -> dict:
+    req = operations_pb2.MarkObservedRequest(effect_id=effect_id, observation_ref=observation_ref)
+    with tool_call_span("operations:observed", **{"amh.grpc.addr": daemon_grpc_addr}):
+        return _effect_to_dict(_call(daemon_grpc_addr, agent_token, "MarkObserved", req))
 
 
 def resolve(
-    daemon_api_base_url: str,
+    daemon_grpc_addr: str,
     agent_token: str,
     effect_id: str,
     terminal: str,
@@ -152,21 +176,22 @@ def resolve(
     §4: the core "SHALL NOT infer that [an external] effect failed"), the
     deliberate exception to this codebase's usual never-trust-the-caller
     pattern (contrast daemon/selfimprove's server-computed eval verdict)."""
-    url = f"{daemon_api_base_url}/v1/operations/{effect_id}/resolve"
-    body: dict = {"terminal": terminal}
-    if error_code or error_message:
-        body["error_code"] = error_code
-        body["retryable"] = error_retryable
-        body["message"] = error_message
-    with tool_call_span("operations:resolve", **{"amh.api.url": url}):
-        return _post(url, agent_token, body)
+    req = operations_pb2.ResolveRequest(
+        effect_id=effect_id, terminal=terminal,
+        error_code=error_code, retryable=error_retryable, message=error_message,
+    )
+    with tool_call_span("operations:resolve", **{"amh.grpc.addr": daemon_grpc_addr}):
+        return _effect_to_dict(_call(daemon_grpc_addr, agent_token, "Resolve", req))
 
 
-def get_effect(daemon_api_base_url: str, agent_token: str, effect_id: str) -> dict:
+def get_effect(daemon_grpc_addr: str, agent_token: str, effect_id: str) -> dict:
     """A cheap, idempotent read."""
-    return _get(f"{daemon_api_base_url}/v1/operations/{effect_id}", agent_token)
+    req = operations_pb2.GetEffectRequest(effect_id=effect_id)
+    return _effect_to_dict(_call(daemon_grpc_addr, agent_token, "GetEffect", req))
 
 
-def list_effects_by_operation(daemon_api_base_url: str, agent_token: str, operation_id: str) -> list[dict]:
+def list_effects_by_operation(daemon_grpc_addr: str, agent_token: str, operation_id: str) -> list[dict]:
     """A cheap, idempotent read of every effect proposed under operation_id."""
-    return _get(f"{daemon_api_base_url}/v1/operations?operation_id={operation_id}", agent_token)
+    req = operations_pb2.ListEffectsByOperationRequest(operation_id=operation_id)
+    resp = _call(daemon_grpc_addr, agent_token, "ListEffectsByOperation", req)
+    return [_effect_to_dict(eff) for eff in resp.effects]

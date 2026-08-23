@@ -20,6 +20,7 @@ import (
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/authn"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/cognition"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/credentials"
+	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/extensions"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/grpcapi"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/health"
 	"github.com/AtonoRobotics/Autonomous-Agent-Habitat/daemon/mcp"
@@ -39,6 +40,7 @@ func main() {
 	host := getenv("AMH_DAEMON_HOST", "127.0.0.1")
 	port := getenv("AMH_DAEMON_PORT", "8080")
 	apiPort := getenv("AMH_API_PORT", "8090")
+	grpcPort := getenv("AMH_GRPC_PORT", "8095")
 
 	// -rollback-migration is a maintenance operation, not a runtime one:
 	// it rolls back the N most recently applied migrations (store.Rollback,
@@ -69,6 +71,13 @@ func main() {
 	// separate, extension-specific way to discover the daemon's address.
 	if os.Getenv("AMH_API_BASE_URL") == "" {
 		os.Setenv("AMH_API_BASE_URL", "http://"+host+":"+apiPort)
+	}
+	// AMH_GRPC_ADDR is the same idea for the gRPC surface (daemon/grpcapi)
+	// — a launched extension or the Python cognition worker (agents/
+	// workflows/dispatcher.py) reads it the same way it reads
+	// AMH_API_BASE_URL, no separate discovery mechanism needed.
+	if os.Getenv("AMH_GRPC_ADDR") == "" {
+		os.Setenv("AMH_GRPC_ADDR", host+":"+grpcPort)
 	}
 
 	tickMs, err := strconv.Atoi(getenv("HABITAT_ROUTINE_TICK_MS", "60000"))
@@ -153,16 +162,16 @@ func main() {
 	requireSignatures := getenv("AMH_EXTENSIONS_REQUIRE_SIGNATURES", "false") == "true"
 	apiSrv := api.New(host+":"+apiPort, db, dbURL, tp, auth, log, sandboxBaseDir, creds, requireSignatures)
 
-	// grpcapi is Phase 1 of the gRPC migration (docs/AMH-SPECIFICATION.md
-	// §3.1/§3.3): the internal, purely synchronous Go-daemon <->
-	// Python-cognition-worker call path moves off HTTP+JSON onto local
-	// gRPC, service by service, alongside — not instead of — apiSrv's HTTP
-	// surface. See daemon/grpcapi's package doc comment for the full
-	// migration scope. It gets its own *policy.Engine (a thin, stateless
-	// wrapper over db, same as ReconcileInterrupted's above) rather than
-	// sharing apiSrv's internal one, since api.Server doesn't expose it.
-	grpcPort := getenv("AMH_GRPC_PORT", "8095")
-	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), auth, log)
+	// grpcapi is the gRPC migration (docs/AMH-SPECIFICATION.md §3.1/§3.3):
+	// the internal, purely synchronous Go-daemon <-> Python-cognition-
+	// worker call path moves off HTTP+JSON onto local gRPC, service by
+	// service, alongside — not instead of — apiSrv's HTTP surface. See
+	// daemon/grpcapi's package doc comment for the full migration scope.
+	// It gets its own *policy.Engine/*extensions.Registry (thin, stateless
+	// wrappers over db, same as ReconcileInterrupted's *policy.Engine
+	// above) rather than sharing apiSrv's internal ones, since api.Server
+	// only exposes Extensions, not Policy.
+	grpcSrv := grpcapi.New(host+":"+grpcPort, policy.New(db), operations.New(db, policy.New(db)), extensions.New(db), auth, log)
 
 	mcpPort := getenv("AMH_MCP_PORT", "8093")
 	mcpSrv := mcp.New(host+":"+mcpPort, db, tp, auth, log)

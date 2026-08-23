@@ -3,6 +3,7 @@ package extensions
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -314,6 +315,74 @@ func TestActivate_SucceedsOnceDependencyIsActive(t *testing.T) {
 
 	if _, err := reg.Activate(ctx, "amh.test/consumer", "1.0.0"); err != nil {
 		t.Fatalf("Activate consumer once producer is active: %v", err)
+	}
+}
+
+// TestActivate_MutualRequirementCycle_FailsFastNeitherHangsNorActivates is
+// the direct proof of §5.2's "detect dependency cycles" — a requirement
+// this package's own doc comment never separately implemented, because
+// none was needed: requirementSatisfied only ever checks whether an
+// ALREADY-active extension provides a capability (see registry.go) —
+// there is no transitive/recursive resolution anywhere in Activate for a
+// cycle to send into a loop. A genuine mutual requirement (A needs B's
+// capability, B needs A's) therefore fails closed on both sides via the
+// exact same ErrMissingRequirement every other missing dependency does,
+// not a hang — proven here with a real wall-clock timeout, not just by
+// code inspection, so a future change that DOES introduce recursive
+// resolution would have to actually break this test to regress.
+func TestActivate_MutualRequirementCycle_FailsFastNeitherHangsNorActivates(t *testing.T) {
+	db := testDB(t)
+	reg := New(db)
+	ctx := context.Background()
+
+	a := baseManifest("amh.test/cycle-a", "1.0.0")
+	a.Spec.Provides = []CapabilityRef{{ID: "amh.test/cap-a", Version: "1.0.0"}}
+	a.Spec.Requires = []Requirement{{Capability: "amh.test/cap-b", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, a); err != nil {
+		t.Fatalf("Discover a: %v", err)
+	}
+
+	b := baseManifest("amh.test/cycle-b", "1.0.0")
+	b.Spec.Provides = []CapabilityRef{{ID: "amh.test/cap-b", Version: "1.0.0"}}
+	b.Spec.Requires = []Requirement{{Capability: "amh.test/cap-a", VersionRange: ">=1.0.0", Optional: false}}
+	if _, err := reg.Discover(ctx, b); err != nil {
+		t.Fatalf("Discover b: %v", err)
+	}
+
+	done := make(chan struct{})
+	var errA, errB error
+	go func() {
+		defer close(done)
+		_, errA = reg.Activate(ctx, "amh.test/cycle-a", "1.0.0")
+		_, errB = reg.Activate(ctx, "amh.test/cycle-b", "1.0.0")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("Activate on a mutual requirement cycle did not return within 5s — this is the hang §5.2 requires be refused, not left to happen")
+	}
+
+	if !errors.Is(errA, ErrMissingRequirement) {
+		t.Fatalf("expected a's activation to fail with ErrMissingRequirement (b never became active), got %v", errA)
+	}
+	if !errors.Is(errB, ErrMissingRequirement) {
+		t.Fatalf("expected b's activation to fail with ErrMissingRequirement (a never became active — a's own activation failed above), got %v", errB)
+	}
+
+	extA, err := reg.Get(ctx, "amh.test/cycle-a", "1.0.0")
+	if err != nil {
+		t.Fatalf("Get a: %v", err)
+	}
+	if extA.Status != StatusDiscovered {
+		t.Fatalf("a's failed activation must not mutate status; got %s", extA.Status)
+	}
+	extB, err := reg.Get(ctx, "amh.test/cycle-b", "1.0.0")
+	if err != nil {
+		t.Fatalf("Get b: %v", err)
+	}
+	if extB.Status != StatusDiscovered {
+		t.Fatalf("b's failed activation must not mutate status; got %s", extB.Status)
 	}
 }
 

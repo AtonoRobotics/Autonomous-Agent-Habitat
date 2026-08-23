@@ -45,7 +45,7 @@ Nothing here depends on anything else in this document. Everything else depends 
 These three are mutually load-bearing (the spec itself cross-references them circularly — the effect lifecycle needs the policy hook to admit into, the policy hook needs something to admit, extension composability needs both to make activation/disposal a governed effect). Nothing downstream is real without these existing first — the spec-survey's own centrality analysis names these as the highest-fan-out items in the entire document, and they were, not coincidentally, the first things this codebase actually built.
 
 - [x] **§6 Generic fail-closed policy/approval hook** — admit / admit_with_constraints / needs_approval / defer / deny, bound to principal/action/digest/properties/deadline/budget/domain-context, decision bound to exact digest+version+time+expiry, check-then-act forbidden. Depends on: Tier 1. Test: §15 invariant #6 (digest-bound dispatch, fails closed on mutation) — built, `daemon/operations`+`daemon/policy` round-trip tests, both at the Go-internal seam and over real HTTP.
-- [ ] **§6 Domain extensions define their own policy over this seam** — **not started**; no domain extension exists yet to do this (by design — Physical AI, Tier 10, is the first candidate). Depends on: §6 hook. Test: n/a until a domain extension exists.
+- [ ] **§6 Domain extensions define their own policy over this seam** — **not started**; no domain extension exists yet to do this. Depends on: §6 hook. Test: n/a until a domain extension exists. (A Physical AI extension is one plausible future example per §13, but per the "Out of scope for this ledger" note near the end of this document, that extension's own build-out — including its own domain policy — belongs to its own repository, not this one.)
 - [x] **§4 Generic external-effect lifecycle** — PROPOSED→ADMITTED/REJECTED/NEEDS_APPROVAL→DISPATCH_PENDING→DISPATCHED→OBSERVED/OUTCOME_UNKNOWN→terminal. Depends on: §6. Test: §15 invariant #2 (interrupted effects reconcile, can remain OUTCOME_UNKNOWN) — built, `daemon/operations` `ReconcileInterrupted` tests.
 - [ ] **§4 Pre-dispatch requirement completeness** — op/command identity, digest, retry classification, idempotency, observation method, timeout, declared properties all supplied before dispatch. **Partial**: digest, identity, and now **retry classification** are real and enforced — `daemon/operations.Propose` fails closed (Go-internal and over HTTP) if `retry_class` is missing or not one of `contracts/action-envelope.schema.json`'s three declared values, persisted on `effect_record` (migration `0010`), all three real call sites supply a real, honest value (`never` for all three today — none has an idempotency story). Idempotency mechanism remains genuinely optional (§4 says "if available"); observation/reconciliation method and timeout/uncertainty behavior remain unbuilt — neither has a concrete schema-backed shape in this codebase yet, so building either without one would mean inventing an underspecified part of the contract. Depends on: §4 lifecycle. Test: `daemon/operations/operations_test.go::TestPropose_RequiresRetryClass`/`TestPropose_RejectsAnUnknownRetryClass`/`TestPropose_PersistsAndReturnsTheRealRetryClass`, `daemon/api/operations_test.go::TestPropose_MissingRetryClassOverHTTP_Is400`, `agents/tests/test_operations_e2e.py::test_propose_defaults_retry_class_to_never`/`test_propose_rejects_an_invalid_retry_class` — all built for retry classification; a real dispatch attempt missing observation method or timeout behavior is still not refused (unbuilt).
 - [x] **§4 Core never infers/retries/constructs an inverse for an external effect** — the owning extension reconciles, core doesn't guess. Depends on: §4 lifecycle. Test: §15 invariant #2 + `daemon/operations.Resolve`'s caller-trusted terminal outcome — built.
@@ -154,20 +154,7 @@ Each of these is a check *on* something in Tiers 2–8, not new construction —
 
 ---
 
-## Tier 10 — Physical AI extension boundary (§13)
-
-Entirely unbuilt, by design — meant to ship as an independent extension once core is stable, not as part of core itself.
-
-- [ ] **Device/DeviceAction/Location/Pose/Frame/Map/Mission/SafetyCase owned by the extension** — Depends on: Tier 1 (§1.8), Tier 2, Tier 3. Test: none yet.
-- [ ] **SSH/WinRM/MQTT/OPC-UA/Modbus/ROS2 protocol modules** — Depends on: the item above. Test: none yet.
-- [ ] **Inverse verification for physical actions** — Depends on: Tier 3 (§5.4 attestation binding). Test: none yet.
-- [ ] **Actuation bounds/interlocks/safe states/recovery/earned-autonomy policy** — Depends on: Tier 2 (§6, domain extensions own their policy). Test: none yet.
-- [ ] **Physical geometry + spatial indexes** — Depends on: Tier 5 (domain extension schema registration). Test: none yet.
-- [ ] **Extension uses AMH's own durable-workflow/envelope/policy/effect/artifact/memory/lifecycle primitives, not bespoke ones** — Depends on: everything above it in this tier existing first. Test: none yet.
-
----
-
-## Tier 11 — Superseded decisions (§16): verify absence, don't rebuild
+## Tier 10 — Superseded decisions (§16): verify absence, don't rebuild
 
 Not build items — a standing check that none of these were quietly reintroduced.
 
@@ -179,3 +166,7 @@ Not build items — a standing check that none of these were quietly reintroduce
 - [x] NATS not a mandatory core dependency — confirmed.
 - [x] No private "A2A-derived" internal envelope presented as A2A compatibility — confirmed.
 - [x] No universal exactly-once claims for external effects — confirmed (`daemon/operations`' own doc comments are explicit about this).
+
+## Out of scope for this ledger: the Physical AI extension (§13)
+
+§13 describes what a separate Physical AI extension would own (Device/DeviceAction/Location/Pose/Frame/Map/Mission/SafetyCase, protocol modules, actuation bounds/interlocks, physical geometry) — but per §1.8/§2.3 (Tier 1, above) that extension is explicitly not part of this core repository, the same boundary that led this codebase to delete every physical-device package it once had (`daemon/connectors`, `daemon/interlocks`, `daemon/safetycase`, the greenhouse scenario) rather than keep them as a "someday" tier. Listing §13's items here as build-order work for *this* repository would be scope drift: they belong to a genuinely separate extension's own repository and its own ledger, if it ever gets one — not to a checklist of what AMH core still needs. Tier 10, above, is what this repository actually owns with respect to physical AI: staying out of it.

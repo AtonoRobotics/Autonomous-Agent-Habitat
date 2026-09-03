@@ -1,6 +1,6 @@
 # Review: "The Habitat" spec bundle (NixAI_2) against Anthropic's current agent guidelines
 
-Reviewed: `docs/nixai/` (DESIGN.md, ontd-spec.md, wfd-spec.md, cortexd-spec.md, registryd-spec.md, habitat-shell-spec.md, os-build-spec.md, habitat.config), all "draft 1" except os-build (draft 2). Copied verbatim from the uploaded `NixAI_2.zip` so the line references below resolve.
+Reviewed: `docs/nixai/draft-1/` (DESIGN.md, ontd-spec.md, wfd-spec.md, cortexd-spec.md, registryd-spec.md, habitat-shell-spec.md, os-build-spec.md, habitat.config), all "draft 1" except os-build (draft 2). Copied verbatim from the uploaded `NixAI_2.zip` so the line references below resolve.
 
 Also consulted: the `AtonoRobotics/Nix-AI` repository (v2.1.0 contract, `crates/habitat-models`, `crates/habitat-harnesses`) to see how the bundle relates to what is already built.
 
@@ -36,14 +36,14 @@ Severity legend: **Blocking** means an implementation following the spec as writ
 
 ### F1. Blocking: the backend interface cannot express the current API
 
-`docs/nixai/cortexd-spec.md:161-165` defines `Backend { name, window_tokens, supports_tools, supports_cache; complete(system, messages, tools, max_tokens) -> {content, tool_calls, usage} }`.
+`docs/nixai/draft-1/cortexd-spec.md:161-165` defines `Backend { name, window_tokens, supports_tools, supports_cache; complete(system, messages, tools, max_tokens) -> {content, tool_calls, usage} }`.
 
 What is missing, each of which the wake loop depends on:
 
 - **`stop_reason`.** The loop in §4 has no branch for `refusal`, `max_tokens`, or `pause_turn`. On Claude Fable 5.1 a refused request returns HTTP 200 with `stop_reason: "refusal"` and empty or partial content; the guidance is to branch on `stop_reason` before reading content. §10 tracks "refusal rate" as a backend reliability score but nothing in the loop produces that signal. The `os` context (editing units, network config, kernel updates) is exactly the kind of content that can trip the cyber classifier, so this is not theoretical.
 - **Thinking blocks.** Current models return `thinking` blocks that must be replayed verbatim on the next call of the same session, and on Claude Fable 5.1 a thinking block's signature is bound to the exact prefix (system, tools, all prior messages). `{content, tool_calls}` loses them. The session record (§13) must store the full assistant content array, not a projection of it.
 - **Effort.** `output_config.effort` is the primary cost and depth lever on every current model and is invisible to the model. The spec has no place for it. See F6.
-- **Streaming.** Single turns on Claude Fable 5.1 at high effort can run many minutes; the SDKs require streaming for large `max_tokens`. A blocking `complete()` with `wake_idle_timeout = 10m` (`habitat.config:29`) will time out healthy wakes.
+- **Streaming.** Single turns on Claude Fable 5.1 at high effort can run many minutes; the SDKs require streaming for large `max_tokens`. A blocking `complete()` with `wake_idle_timeout = 10m` (`draft-1/habitat.config:29`) will time out healthy wakes.
 - **Tool result semantics.** No `is_error`, no requirement that all results for one assistant turn go back in a single user message. See F5.
 - **Caching markers.** `supports_cache` is a boolean; the spec needs to say where breakpoints go (last charter-frame block; last content block of the newest turn) and that the charter frame must be byte-identical across wakes of the same charter version.
 
@@ -68,27 +68,27 @@ Claude Fable 5.1 binds each thinking block to the conversation prefix that produ
 
 Places the spec allows or implies an edit inside one session:
 
-- `cortexd-spec.md:93-101`: pre-wake and post-result hooks return "context additions". If these are merged into the charter frame or into section 2 through 7 of the already-sent context, that is an edit. They must arrive as appended content: inside the `tool_result` of the call that produced them, or as an appended `role: "system"` message.
-- `cortexd-spec.md:153`: on budget threshold the hook "may narrow scope: reduce neighborhood annotations". If that rewrites context already in the transcript, it is an edit. Narrowing may only affect what is appended from then on, or the next child session. Lowering `effort` is the sanctioned lever and does not touch the prefix (F6).
-- `cortexd-spec.md:197`: on parse failure the model is "re-prompted with the parse error". This is fine only if the parse error is appended as a new turn (a `tool_result` with `is_error: true`, or a user turn) and the failed assistant turn is kept verbatim. Say so.
-- `cortexd-spec.md:35`: `context()` is "re-readable". Returning the assembled context as a tool result is fine; regenerating the system frame is not.
-- `cortexd-spec.md:122`: the hard compression threshold "forces compression regardless of turn boundaries". Compaction must not split an assistant `tool_use` from its `tool_result`. Change to: at the hard threshold, the pending tool round completes and no further tool calls are accepted until the child session starts.
+- `draft-1/cortexd-spec.md:93-101`: pre-wake and post-result hooks return "context additions". If these are merged into the charter frame or into section 2 through 7 of the already-sent context, that is an edit. They must arrive as appended content: inside the `tool_result` of the call that produced them, or as an appended `role: "system"` message.
+- `draft-1/cortexd-spec.md:153`: on budget threshold the hook "may narrow scope: reduce neighborhood annotations". If that rewrites context already in the transcript, it is an edit. Narrowing may only affect what is appended from then on, or the next child session. Lowering `effort` is the sanctioned lever and does not touch the prefix (F6).
+- `draft-1/cortexd-spec.md:197`: on parse failure the model is "re-prompted with the parse error". This is fine only if the parse error is appended as a new turn (a `tool_result` with `is_error: true`, or a user turn) and the failed assistant turn is kept verbatim. Say so.
+- `draft-1/cortexd-spec.md:35`: `context()` is "re-readable". Returning the assembled context as a tool result is fine; regenerating the system frame is not.
+- `draft-1/cortexd-spec.md:122`: the hard compression threshold "forces compression regardless of turn boundaries". Compaction must not split an assistant `tool_use` from its `tool_result`. Change to: at the hard threshold, the pending tool round completes and no further tool calls are accepted until the child session starts.
 
 Add a guarantee: *Within a session, `system`, `tools`, and every previously sent message are byte-frozen; new information is only ever appended.* Add a test obligation: *For every consecutive pair of requests in a session, the earlier request body is a byte-prefix of the later one up to the newly appended turns* (this is step 1 of Anthropic's three-step check). In CI run against `claude-fable-5-1` with `thinking.block_binding.prefix_mismatch_behavior: "error"` under the `thinking-binding-controls-2026-08-01` beta so any edit fails the run.
 
 ### F3. Blocking: Guarantee 7 and the "Backend swap" test are stronger than the API allows
 
-`cortexd-spec.md:26` says the backend is replaceable "with zero change to any ... session record", and `cortexd-spec.md:209` tests "a session begun on backend A and continued on backend B". Thinking blocks are bound to the producing model. Switching models mid-session silently drops them (unbilled) on most models and Claude Fable 5.1 reads only its own. It also resets the prompt cache, which is model-scoped.
+`draft-1/cortexd-spec.md:26` says the backend is replaceable "with zero change to any ... session record", and `draft-1/cortexd-spec.md:209` tests "a session begun on backend A and continued on backend B". Thinking blocks are bound to the producing model. Switching models mid-session silently drops them (unbilled) on most models and Claude Fable 5.1 reads only its own. It also resets the prompt cache, which is model-scoped.
 
-`cortexd-spec.md:170` already has the right idea: "a session compressed under one backend continues under another." Make that the guarantee. Backend selection is fixed for the lifetime of a session and may change only at a session boundary (compression child, re-wake). Reword the test to "a wake begun on backend A whose compression child runs on backend B completes the fixture task."
+`draft-1/cortexd-spec.md:170` already has the right idea: "a session compressed under one backend continues under another." Make that the guarantee. Backend selection is fixed for the lifetime of a session and may change only at a session boundary (compression child, re-wake). Reword the test to "a wake begun on backend A whose compression child runs on backend B completes the fixture task."
 
 One consequence for headcount and budget: a sub-agent may run on a cheaper backend at lower effort (this is the sanctioned way to use a cheaper model without breaking the parent's cache), so `spawn()` or the charter should be able to name the sub-agent backend and effort.
 
 ### F4. Blocking: forced tool use is not available, so `done()` and `resolve()` need strict schemas
 
-Claude Fable 5.1 rejects `tool_choice: any` and `tool_choice: tool` with a 400. The spec relies on the model ending a sub-agent with a `done()` whose argument validates against `result_schema` (`cortexd-spec.md:181`) and on `resolve()` answers validating against `question_type`. The harness cannot force those calls. What it can do:
+Claude Fable 5.1 rejects `tool_choice: any` and `tool_choice: tool` with a 400. The spec relies on the model ending a sub-agent with a `done()` whose argument validates against `result_schema` (`draft-1/cortexd-spec.md:181`) and on `resolve()` answers validating against `question_type`. The harness cannot force those calls. What it can do:
 
-- Mark every tool `strict: true` with `additionalProperties: false` and a full `required` list, so any call that is made has schema-valid arguments. This removes most of the `ParseFailure` path (`parse_retry = 1` in `habitat.config:33` becomes a rare fallback).
+- Mark every tool `strict: true` with `additionalProperties: false` and a full `required` list, so any call that is made has schema-valid arguments. This removes most of the `ParseFailure` path (`parse_retry = 1` in `draft-1/habitat.config:33` becomes a rare fallback).
 - Generate the `done` tool's `input_schema` per session from `result_schema` and the `resolve` tool's from the yield's `question_type`, then keep it fixed for the session.
 - State the expectation in the charter frame ("end the wake with `done`"; "answer the yield with `resolve`") rather than in `tool_choice`.
 
@@ -96,11 +96,11 @@ The Nix-AI W09 adapter (`crates/habitat-models/src/lib.rs:254-273`) already pars
 
 ### F5. Should fix: parallel tool calls and result batching are unspecified
 
-`cortexd-spec.md:56-60` processes calls one at a time and "appends turn". Current models emit several `tool_use` blocks per assistant turn by default. The guidance: execute them (concurrently where safe, and `read`, `context`, `recall` are safe), then return **all** `tool_result` blocks in **one** user message; splitting them across messages trains the model to stop parallelizing. A failed call returns `tool_result` with `is_error: true`, never a dropped result. Spec the loop as: one assistant turn, a set of results, one user message. Pre-act hooks run per call; their rejections are `is_error` results in the same batch.
+`draft-1/cortexd-spec.md:56-60` processes calls one at a time and "appends turn". Current models emit several `tool_use` blocks per assistant turn by default. The guidance: execute them (concurrently where safe, and `read`, `context`, `recall` are safe), then return **all** `tool_result` blocks in **one** user message; splitting them across messages trains the model to stop parallelizing. A failed call returns `tool_result` with `is_error: true`, never a dropped result. Spec the loop as: one assistant turn, a set of results, one user message. Pre-act hooks run per call; their rejections are `is_error` results in the same batch.
 
 ### F6. Should fix: effort is the missing budget lever
 
-The on-budget-threshold hook narrows what the model sees (`cortexd-spec.md:153`), which risks F2 and degrades decisions. Anthropic's guidance ranks the levers as: caching first, then `output_config.effort` (invisible to the model, no prefix change, no cache reset on Claude Fable 5.1 and Claude Opus 5 when sent as a per-message effort system message under `mid-conversation-output-config-2026-07-01`), then model choice via sub-agents. Recommended:
+The on-budget-threshold hook narrows what the model sees (`draft-1/cortexd-spec.md:153`), which risks F2 and degrades decisions. Anthropic's guidance ranks the levers as: caching first, then `output_config.effort` (invisible to the model, no prefix change, no cache reset on Claude Fable 5.1 and Claude Opus 5 when sent as a per-message effort system message under `mid-conversation-output-config-2026-07-01`), then model choice via sub-agents. Recommended:
 
 - `habitat.config [cortexd]`: `effort_default = high`, `effort_subagent = low`, `effort_on_threshold_scope = medium`, `effort_authoring = xhigh` (module authoring and crystallization are the hardest wakes and the guidance says to spend effort there).
 - Charters may pin effort per wake class. Backends declare supported levels.
@@ -110,9 +110,9 @@ This is consistent with Guarantee 3: effort is a request parameter, not a string
 
 ### F7. Should fix: Guarantee 3 bans a statement the guidance recommends
 
-Guarantee 3 (`cortexd-spec.md:22`) says nothing about compression is "ever visible to the model". The guidance agrees on the dynamic part (no countdowns, no pressure warnings), and separately recommends telling the model once, statically, that context will be compacted automatically so it never stops early or suggests a new session on its own, and that it should never stop tasks early on account of context. Claude Fable 5.1 shows occasional "context anxiety" in very long sessions without this.
+Guarantee 3 (`draft-1/cortexd-spec.md:22`) says nothing about compression is "ever visible to the model". The guidance agrees on the dynamic part (no countdowns, no pressure warnings), and separately recommends telling the model once, statically, that context will be compacted automatically so it never stops early or suggests a new session on its own, and that it should never stop tasks early on account of context. Claude Fable 5.1 shows occasional "context anxiety" in very long sessions without this.
 
-Suggested wording: *No per-wake or per-turn signal derived from budget, context size, or compression state ever appears in model input. The static charter frame may state, once, that compression is automatic and invisible and that the agent must never stop early because of it.* The Silence test (`cortexd-spec.md:208`) still holds because the sentence is constant.
+Suggested wording: *No per-wake or per-turn signal derived from budget, context size, or compression state ever appears in model input. The static charter frame may state, once, that compression is automatic and invisible and that the agent must never stop early because of it.* The Silence test (`draft-1/cortexd-spec.md:208`) still holds because the sentence is constant.
 
 ### F8. Should fix: refusal handling and server-side fallbacks
 
@@ -125,7 +125,7 @@ Also note: Claude Fable 5.1 is not served under zero data retention; an organiza
 
 ### F9. Should fix: the operator channel and untrusted content are not distinguished
 
-Three kinds of text reach the model: the charter frame (operator authority), hook additions and human attach turns (`cortexd-spec.md:187`), and world-derived strings (observation `properties_at` snapshots, `read()` results, interface-action output). The guidance:
+Three kinds of text reach the model: the charter frame (operator authority), hook additions and human attach turns (`draft-1/cortexd-spec.md:187`), and world-derived strings (observation `properties_at` snapshots, `read()` results, interface-action output). The guidance:
 
 - Operator instructions added mid-session go in an appended `{"role": "system"}` message, never as text inside a user turn (that is the spoofable channel).
 - World-derived content is data. It should enter only as tool results, be labeled as such, and never be placed in the system frame.
@@ -134,7 +134,7 @@ Nix-AI W07 already has this (`UntrustedExternalData`, directive-shaped payloads 
 
 ### F10. Should fix: tool descriptions and per-verb argument schemas are unspecified
 
-Anthropic: detailed descriptions are "by far the most important factor" in tool performance (what, when, when not, caveats; three or more sentences), use `enum` for fixed sets, `strict: true`, `input_examples` for complex inputs. The spec never says where a verb's model-facing description comes from. `Manifest` (`ontd-spec.md:82-98`) has no `description` field; `Action.args: [{name, type}]` has no per-argument descriptions; `Yield.question_type` is a `TypeId` with no explanation of what the question is.
+Anthropic: detailed descriptions are "by far the most important factor" in tool performance (what, when, when not, caveats; three or more sentences), use `enum` for fixed sets, `strict: true`, `input_examples` for complex inputs. The spec never says where a verb's model-facing description comes from. `Manifest` (`draft-1/ontd-spec.md:82-98`) has no `description` field; `Action.args: [{name, type}]` has no per-argument descriptions; `Yield.question_type` is a `TypeId` with no explanation of what the question is.
 
 Recommend: `Manifest.description` (required, model-facing, checked by a build rule for minimum length and for naming the when/when-not conditions), per-argument `description`, and `Yield.reason` (why the workflow could not decide). Then decide how verbs are presented:
 
@@ -145,7 +145,7 @@ Either is acceptable; the spec should pick one and make the build check its desc
 
 ### F11. Should fix: time budgets do not fit current turn lengths
 
-`wake_idle_timeout = 10m`, `subagent_default_ttl = 30m`, `machine_default_ttl = 30m`, `step_timeout_default = 5m` (`habitat.config:29,18,40,37`). A single Claude Fable 5.1 request at `high` or `xhigh` can take 15 minutes. Define idle as "no streamed event for N minutes" rather than "no completed turn", and size sub-agent TTLs from expected turns times effort, not a flat default. Also `compression_soft = 0.50` of the window means a 500K-token session on a 1M model; that is allowed, but each turn resends the whole prefix, so cost per wake grows quadratically. Consider an absolute `compression_soft_tokens` alongside the ratio.
+`wake_idle_timeout = 10m`, `subagent_default_ttl = 30m`, `machine_default_ttl = 30m`, `step_timeout_default = 5m` (`draft-1/habitat.config:29,18,40,37`). A single Claude Fable 5.1 request at `high` or `xhigh` can take 15 minutes. Define idle as "no streamed event for N minutes" rather than "no completed turn", and size sub-agent TTLs from expected turns times effort, not a flat default. Also `compression_soft = 0.50` of the window means a 500K-token session on a 1M model; that is allowed, but each turn resends the whole prefix, so cost per wake grows quadratically. Consider an absolute `compression_soft_tokens` alongside the ratio.
 
 ### F12. Consider: server-side compaction and context editing as backend capabilities
 
@@ -164,15 +164,15 @@ The guidance for Claude Fable 5.1: prompts written for older models are often to
 These are internal consistency problems found while reading the bundle as a contract.
 
 1. **Decision numbering gaps.** cortexd §16 lists 1, 2, 5; registryd §11 lists 1, 4. Either decisions were removed without renumbering or they were never written.
-2. **`habitat.config` says a key is not configuration.** `neighborhood_depth = 2  # fixed; not tunable` (`habitat.config:31`) contradicts DESIGN.md's rule that config values are configuration. Either it is a spec constant (move it to ontd Decision 2 and delete the key) or it is tunable.
-3. **Budget totals are half-specified.** `Headcount.budget_total: CognitionBudget` (`registryd-spec.md:67`) has tokens and GPU-seconds, but config has only `budget_total_tokens` (`habitat.config:8`). Also unspecified: which usage fields count against `tokens_per_day` (input, output, cache read, cache write are priced differently, and cache reads on Claude Fable 5.1 cost a fraction of input).
-4. **Machine image naming.** os-build calls it `os/Image` (`os-build-spec.md:92,121`); registryd and wfd call it `os/Configuration` of kind `machine` (`registryd-spec.md:49`). One name.
-5. **`ApprovalRequest` contradicts the design.** habitat-shell §4.3 (`habitat-shell-spec.md:80`) mentions "`ApprovalRequest`-class questions". DESIGN.md and ontd §3.8 say there is no approval concept, only `Cosign` objects created by policy rules. Delete the term or define it as a `Cosign` yield.
+2. **`habitat.config` says a key is not configuration.** `neighborhood_depth = 2  # fixed; not tunable` (`draft-1/habitat.config:31`) contradicts DESIGN.md's rule that config values are configuration. Either it is a spec constant (move it to ontd Decision 2 and delete the key) or it is tunable.
+3. **Budget totals are half-specified.** `Headcount.budget_total: CognitionBudget` (`draft-1/registryd-spec.md:67`) has tokens and GPU-seconds, but config has only `budget_total_tokens` (`draft-1/habitat.config:8`). Also unspecified: which usage fields count against `tokens_per_day` (input, output, cache read, cache write are priced differently, and cache reads on Claude Fable 5.1 cost a fraction of input).
+4. **Machine image naming.** os-build calls it `os/Image` (`draft-1/os-build-spec.md:92,121`); registryd and wfd call it `os/Configuration` of kind `machine` (`draft-1/registryd-spec.md:49`). One name.
+5. **`ApprovalRequest` contradicts the design.** habitat-shell §4.3 (`draft-1/habitat-shell-spec.md:80`) mentions "`ApprovalRequest`-class questions". DESIGN.md and ontd §3.8 say there is no approval concept, only `Cosign` objects created by policy rules. Delete the term or define it as a `Cosign` yield.
 6. **`InterfaceGap` is referenced but never defined.** DESIGN.md, os-build §11, and habitat-shell §7 use it; no spec lists it as a type, sensor, or observation, and ontd Guarantee 1 would reject an unreferenced type.
-7. **Sub-agent identity versus policy.** Actions run as the invoker's uid (wfd §6), sub-agents run as a subuid from the root's range (registryd §7.2), and policy is evaluated on the caller's group membership (ontd §3.8). Nothing says that a subuid inherits the root ancestor's groups for policy evaluation, or that it does not. The sub-agent containment test (`registryd-spec.md:260`) needs this decided.
-8. **Charter versus policy wording.** registryd §4.1 and §4.2 preconditions say "Caller's charter includes `CreateAgent`" (`registryd-spec.md:131,154`), while registryd Decision 4 and ontd §3.8 say authorization is policy, not charter. Reword to "policy permits the caller to invoke `CreateAgent`"; charter `invokes` is declared use, and a mismatch is already a build failure.
+7. **Sub-agent identity versus policy.** Actions run as the invoker's uid (wfd §6), sub-agents run as a subuid from the root's range (registryd §7.2), and policy is evaluated on the caller's group membership (ontd §3.8). Nothing says that a subuid inherits the root ancestor's groups for policy evaluation, or that it does not. The sub-agent containment test (`draft-1/registryd-spec.md:260`) needs this decided.
+8. **Charter versus policy wording.** registryd §4.1 and §4.2 preconditions say "Caller's charter includes `CreateAgent`" (`draft-1/registryd-spec.md:131,154`), while registryd Decision 4 and ontd §3.8 say authorization is policy, not charter. Reword to "policy permits the caller to invoke `CreateAgent`"; charter `invokes` is declared use, and a mismatch is already a build failure.
 9. **Sub-agent context sections.** cortexd §11 says sub-agent context is "resolved through `AssembleContext` at depth 2" while §8 says sub-agents have no private memory. State that sections 5 (private memory) and 7 (open items) are empty for sub-agents so the determinism test has a defined expected output.
-10. **Model-authored rules are code.** `resolve(YieldId, answer, rule?)` accepts a CEL predicate authored by the model (`ontd-spec.md:200`). `CaptureRule` stores it; nothing parses or sandboxes it before storage. Add: the rule is parsed against the CEL environment of ontd Decision 1 at resolve time, and an unparseable rule is a `ResolveInvalid` on the yield, not a stored string.
+10. **Model-authored rules are code.** `resolve(YieldId, answer, rule?)` accepts a CEL predicate authored by the model (`draft-1/ontd-spec.md:200`). `CaptureRule` stores it; nothing parses or sandboxes it before storage. Add: the rule is parsed against the CEL environment of ontd Decision 1 at resolve time, and an unparseable rule is a `ResolveInvalid` on the yield, not a stored string.
 11. **Shell parity has an unstated exception.** habitat-shell Guarantee 4 and the parity test say anything a human can do, an agent can do through cortexd. Attach (§4.2) has no agent equivalent. State the exception.
 12. **"Three calls" versus eight tools.** DESIGN.md says the agent's interface is three calls; cortexd §3 lists eight tools in four groups (read, observe/yield, act, and spawn/memory/done). Harmless, but a contract should not disagree with its rationale document about the size of its surface.
 13. **Machine boot timing.** os-build §7 and §12 require boot under one second; `wfd.machine_boot_timeout = 5s`. Fine as a timeout, but say which one the image test asserts.
@@ -202,3 +202,53 @@ If the intent is for the bundle to supersede v2.1.0, the decision register (`con
 10. Section 4 items 1 through 13.
 
 Items 1 through 4 should land before any implementation of cortexd starts; the rest can follow the first fixture wake.
+
+## 7. Draft 2 re-validation (2026-09-03, second upload)
+
+A second upload of the bundle arrived the same day, with `cortexd-spec.md` at draft 2 and edits to every other file. It now lives at `docs/nixai/` (draft 1 was moved to `docs/nixai/draft-1/`). Line references in this section are to the draft 2 files.
+
+### 7.1 Disposition of the draft 1 findings
+
+| Finding | Status in draft 2 | Where |
+|---|---|---|
+| F1 backend interface | Resolved. Capabilities, prices, streaming, full content, `stop_reason`, `stop_details`, `fallback_events`. | `cortexd-spec.md` §10 |
+| F2 append-only transcript | Resolved. New Guarantee 7, hook channels table, hard threshold completes the tool round, append-only test obligation. | §2, §4, §6, §7, §15 |
+| F3 backend swap | Resolved. Backend fixed per session; changes only at session boundaries. | Guarantee 7, Decision 6 |
+| F4 forced tool choice | Resolved. Strict tools, per-session `done` and `resolve` schemas, `tool_choice` always auto. | §3, Decision 5 |
+| F5 parallel results | Resolved. One assistant turn, one result message, error results in the batch, batching test. | §3, §15 |
+| F6 effort as budget lever | Resolved, with one contradiction (7.2 item 2). | §9, `habitat.config` |
+| F7 Guarantee 3 wording | Resolved. | Guarantee 3 |
+| F8 refusal handling | Resolved by decision: fallbacks off, `BackendRefusal`, `RefusedTrigger`. | §10, §14 |
+| F9 operator vs world channels | Resolved. Guarantee 9, section channel table, `SuspiciousContent`. | §5, `ontd-spec.md` §11 |
+| F10 descriptions | Resolved in the spec; the seed file does not comply (7.3 item 1). | `ontd-spec.md` §3.4, §3.7, §3.9, §6.12 |
+| F11 time budgets | Resolved. Idle measured on the stream; TTLs raised; `compression_soft_tokens`. | §14, `habitat.config` |
+| F12 server compaction | Resolved as an optional backend capability. | §7 |
+| F13 offline eval | Resolved. `eval_min_pass`. | §15 |
+| F14 intent in the frame | Resolved. | §5 row 1, `Yield.reason` |
+| Section 4 items 1 to 13 | 1, 2, 3, 5, 7, 8, 9, 10, 11, 12, 13 resolved. 4 (`os/Image` naming) and 6 (`InterfaceGap` definition) are moot or resolved only because the seed file now defines the sensor; see 7.2 item 5 on the missing OS build spec. | |
+| Nix-AI reuse (§5) | The effect-reconciliation gap is closed by `ActionAttempt` in `wfd-spec.md` §6, which is the W08 model restated in the bundle's vocabulary. | `wfd-spec.md:151` |
+
+### 7.2 New issues in the draft 2 specs
+
+1. **A `role: system` message cannot follow an assistant turn.** `cortexd-spec.md:72-73` and `:194` append a system message after `end_turn` and after `max_tokens`. The API places a mid-conversation system message only after a user message (or an assistant message that ended in server-tool use), and it must be the last entry or be followed by an assistant turn. After an assistant `end_turn` the last message is the assistant's, so the append is rejected. Fix: append a user turn carrying the harness notice as labeled data (the same channel Guarantee 9 assigns to the world), optionally followed by the system message. Also state the fallback for backends whose `mid_session_system` capability is false: the notice goes in the user turn alone.
+2. **Effort is "fixed for the session" and also changed mid-session.** `cortexd-spec.md:66` fixes backend and effort at session creation; `cortexd-spec.md:151` lowers effort on `budget.threshold_warn` inside the wake. The API allows a top-level `effort` change mid-session (it is outside the bound prefix), but it invalidates the messages cache from that point unless sent as a per-message effort system message, which is a beta available on Claude Fable 5.1 and Claude Opus 5 only. Pick one: effort changes only at session boundaries (simplest, consistent with line 66), or mid-session changes are allowed with the cache cost named and the per-message form used where the backend supports it.
+3. **Deferred verbs need the provider's tool-search tool, not a custom one.** `cortexd-spec.md:51` registers verbs with deferred loading and adds a `find_verb` tool. Deferred tools are surfaced only by the provider's server-side tool search (`tool_search_tool_regex_20251119` or the BM25 variant) or by a `tool_addition` block under the mid-conversation tool-changes beta. A custom `find_verb` cannot load them. Add `tool_search` to the backend capability list, use the provider tool where present, load all verbs where absent, and never defer every tool (the API rejects a request where all tools are deferred).
+4. **`RefusedTrigger` routes back to the agent that was refused.** `cortexd-spec.md:193` re-routes a repeatedly refused trigger to the owner as a yield. If the owner is the refused agent on the same backend, the yield wakes the same model on adjacent content. Route it to the human inbox (the shell already renders yields to humans) or to a wake pinned to a different backend.
+5. **`os-build-spec.md` is missing from the second upload**, but `wfd-spec.md:46` and `registryd-spec.md:49,141,186` still reference `os/Configuration` of kind `machine`, `os/Boot`, and the OS build spec's machine section. Either the file was dropped by accident (the draft 1 copy is retained under `docs/nixai/draft-1/`) or the references need a new home.
+6. **Thinking visibility.** Guarantee 10 journals every request and response byte-for-byte, and the shell promises "why did it do that". On current models the raw chain of thought is never returned; `thinking.display` defaults to omitted. Say in §10 that requests set `display: summarized` where the backend supports it and that the journal's thinking content is a summary, so the shell's Context and Sessions panels do not promise more than the API delivers.
+7. **`max_tokens` handling.** With `max_output_tokens` discovered from the backend and streaming in place, set the request's `max_tokens` to the backend maximum and treat `max_tokens` as `PartialTurn` directly; a truncated assistant turn can end mid-`tool_use`, and a "continue" request after a half-emitted tool call does not resume it.
+
+### 7.3 The new seed file `habitat-context.yaml` disagrees with the specs it accompanies
+
+The file is the first executable artifact in the bundle and the build rules in `ontd-spec.md` §6 apply to it. As written it fails them.
+
+1. **No seed action has a description** (`habitat-context.yaml:462-484`), and no sensor has one. Build check 12 (`ontd-spec.md` §6) rejects a manifest without one; the seed would fail its own build. Per-argument descriptions are absent as well; `args` are bare names.
+2. **Three types have no sensor or action** (`Observation`, `Summary`, `WakeSummary`), contradicting the file's own header comment and `ontd` Guarantee 1. `Observation` is written by the mediated sensor path and `Summary` and `WakeSummary` are produced by `done`; either exempt harness-written types explicitly in `ontd` §6.4 or give them a referencing action.
+3. **`Backend` is the draft 1 shape** (`habitat-context.yaml:268-282`: `window_tokens`, `supports_tools`, `supports_cache`) while `cortexd-spec.md` §10 now specifies `model_id`, `max_input_tokens`, `max_output_tokens`, and a capabilities map. `Session.tokens_used` (`habitat-context.yaml:219`) should be units now that budgets are priced units (registryd Decision 2).
+4. **Predicates reference `config.*`** in twenty places (contracts and sensor predicates). `ontd` Decision 1 says the CEL environment exposes only the object, its links, and injected timestamps. Either extend Decision 1 to expose `habitat/Config` read-only (the config file says it is loaded into `ontd` as that object) or bind thresholds into the manifests at build time. One of the references, `config.dataset_usage_high` (`habitat-context.yaml:321`), also uses the wrong section (`host.`) and reuses a dataset threshold for memory-fact growth.
+5. **Several sensors are not sensors under `ontd` §3.5.** A sensor observes one type and evaluates a predicate over the observed object's properties, holding only the last state per object. `BackendRefusal` (`:424`) observes `Backend` but triggers on `Session` changes and reports per session; `SuspiciousContent` (`:432`) observes `"*"`; `HeadcountRate`, `IdleResident`, `HeadcountTransition`, and `MigrationRegret` need history that a predicate over current properties does not have. Either widen §3.5 (allow a wildcard `observes`, a bounded history window, and a trigger object distinct from the observed object) or restate these as steps that write derived properties which ordinary sensors then observe. The second keeps §3.5 honest.
+6. **`SubAgentJob` contract depends on config** (`:248`) and `Cosign.consumed` is a scalar where the spec means a boolean; `Resident.groups` duplicates `Group.members` (two writable representations of one fact, which the ontology rules in `DESIGN.md` warn against).
+
+### 7.4 Verdict on draft 2
+
+The four blocking findings are closed and the design now matches the current API on every point the first review raised. What remains is smaller and mostly mechanical: two message-placement rules the API enforces (7.2 items 1 and 2), the tool-search dependency (item 3), a dropped file (item 5), and a seed file that has not caught up with the specs (7.3). Items 7.2.1, 7.2.3, and 7.3.1 through 7.3.5 should be fixed before the seed is loaded, because each one is a build failure or a rejected request on first run.

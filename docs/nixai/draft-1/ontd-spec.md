@@ -81,9 +81,8 @@ Sensors, steps, actions, and workflows are all modules. A module is an executabl
 ```
 Manifest {
   id: "<context>/<name>"
-  kind: sensor | step | action | workflow | hook
+  kind: sensor | step | action | workflow
   owner: uid
-  description: string              # model-facing; required; states what, when to use, when not to
   inputs:  [ {name, type: TypeId | scalar} ]
   outputs: [ {name, type: TypeId | scalar} ]
   effects: [ActionId]              # actions only; empty for sensors and steps
@@ -146,7 +145,7 @@ Observation {
 Action extends Manifest {
   verb: string                       # e.g. "RestartService"
   targets: TypeId
-  args: [ {name, type, description, enum?} ]   # per-argument descriptions are model-facing and required
+  args: [ {name, type} ]
   preconditions: [Predicate]         # over target and args, checked by ontd before dispatch
   implementation: StepId | executable
   result_type: TypeId                # the object the action produces or updates
@@ -194,12 +193,11 @@ A yield is a typed question raised by a workflow step when determinism is insuff
 Yield {
   id, workflow: ModuleId, step: string, yield_point: string
   question_type: TypeId              # the schema of the answer
-  reason: string                     # why the workflow could not decide; model-facing; required
   context: [ObjectId]                # neighborhood, computed before the agent wakes
   options: [Object]                  # enumerated when possible
   routed_to: uid
   answer: Object | null
-  rule_recorded: Predicate | null    # the agent's stated rule, parsed against the CEL environment at resolve time; unparseable is ResolveInvalid
+  rule_recorded: Predicate | null    # the agent's stated rule, input to crystallization
 }
 ```
 
@@ -285,8 +283,7 @@ Run on `define_type`, `define_module`, `migrate`. All deterministic. Any failure
 8. Replay: for a changed step or action, re-run against every journaled input; every output diff is returned as a finding and raised to the author as a yield of type `ReplayDivergence`.
 9. Contract chaining: in a workflow, each step's preconditions must be implied by the prior step's postconditions or by the trigger's observation type.
 10. Near-duplicate check: a new type, sensor, or step whose property set or manifest is structurally similar to an existing one above a threshold is rejected with a pointer to the existing one. Merge or justify via a `DuplicateOverride` object with a stated reason.
-11. Sandbox derivation succeeds: the module's closure builds and its network allowlist is unambiguous.
-12. Descriptions present: `Manifest.description`, every action argument's `description`, and every workflow yield point's `reason` are non-empty and name the use and non-use conditions.
+11. Sandbox derivation succeeds: Landlock ruleset, network allowlist, and mount set can be generated from the manifest without ambiguity.
 
 ## 7. Migrations
 
@@ -347,7 +344,6 @@ Snapshots of the store are taken with the same filesystem snapshot mechanism age
 - `CharterBreadth` on `Agent`: owned types above threshold.
 - `HeadcountThreshold`, `HeadcountRate` on `Headcount`.
 - `IdleResident` on `Agent` and `Human`: no yields resolved or actions invoked in N days.
-- `SuspiciousContent` on any object: a string property containing directive-shaped text destined for model input. Left inert; routed to the object's owner.
 - `MigrationRegret` on `Type`: in the window after a migration, yield rate or contract violation rate across modules referencing the type rises above its pre-migration baseline. Routed to the migration's author.
 
 These are ordinary sensors with manifests, fixtures, and precision scores. They are how the habitat notices its own bugs.
@@ -365,6 +361,6 @@ These are ordinary sensors with manifests, fixtures, and precision scores. They 
 ## 13. Decisions
 
 1. **Predicate language: CEL.** Contracts, sensor predicates, and action preconditions are CEL expressions evaluated against the typed object. No side effects, no clock, no I/O in expressions; the CEL environment exposes only the object, its links, and injected timestamps. Decided.
-2. **Neighborhood depth: fixed at 2.** A spec constant, not configuration. `neighborhood()` is always depth 2 for working context. A yield that needs more than two hops does not get a deeper query; the workflow computes the additional context as an explicit step whose output is added to the yield's `context` list. This keeps the context step uniform and forces "what else does this decision need" to be declared in code. Decided.
+2. **Neighborhood depth: fixed at 2.** `neighborhood()` is always depth 2 for working context. A yield that needs more than two hops does not get a deeper query; the workflow computes the additional context as an explicit step whose output is added to the yield's `context` list. This keeps the context step uniform and forces "what else does this decision need" to be declared in code. Decided.
 3. Near-duplicate threshold and similarity measure for check §6.10. Needs data; start strict. Open.
 4. Whether `search_text` may return approximate matches. Not yet decided. Until decided, `ontd` returns exact matches only and approximate retrieval lives in the private-memory retrieval step. Open.

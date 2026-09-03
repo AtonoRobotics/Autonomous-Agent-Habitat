@@ -1,0 +1,484 @@
+# habitat context — seed definition
+# Loaded into ontd at first boot. The habitat's model of itself.
+# Every type here has at least one sensor or action; that is the build rule.
+
+context: habitat
+owner: operator
+
+# ---------------------------------------------------------------------------
+# types
+# ---------------------------------------------------------------------------
+
+types:
+
+  Resident:
+    abstract: true
+    properties:
+      uid:       {kind: scalar, required: true, immutable: true}
+      gid:       {kind: scalar, required: true, immutable: true}
+      name:      {kind: scalar, required: true, immutable: true}
+      kind:      {kind: enum, values: [agent, human], required: true}
+      state:     {kind: enum, values: [creating, active, draining, retired, archived], required: true}
+      home:      {kind: scalar, required: true}
+      host:      {kind: ref, target: habitat/Host, required: true}
+      archive:   {kind: scalar}
+    links:
+      charter:   {target: habitat/Charter, cardinality: one, required_when: "state == 'active'"}
+      lineage:   {target: habitat/Resident, cardinality: one}
+      successor: {target: habitat/Resident, cardinality: one, required_when: "state in ['retired','archived']"}
+      groups:    {target: habitat/Group, cardinality: many}
+      budget:    {target: habitat/CognitionBudget, cardinality: one, required: true}
+    contracts:
+      - {expr: "state != 'active' || has(charter)", message: "active residents have a charter"}
+      - {expr: "state != 'retired' || has(archive)", message: "retired residents are archived"}
+
+  Agent:
+    extends: habitat/Resident
+    properties:
+      subuid_start: {kind: scalar, required: true}
+      subuid_count: {kind: scalar, required: true}
+      memory_facts: {kind: scalar}            # current private memory size
+      memory_cap:   {kind: scalar, required: true}
+
+  Human:
+    extends: habitat/Resident
+    properties:
+      auth_binding: {kind: scalar, required: true}   # SSO subject or local credential ref
+
+  Host:
+    properties:
+      name:  {kind: scalar, required: true}
+      state: {kind: enum, values: [up, degraded, down], required: true}
+
+  Group:
+    properties:
+      gid:   {kind: scalar, required: true, immutable: true}
+      name:  {kind: scalar, required: true, immutable: true}
+    links:
+      owner:     {target: habitat/Resident, cardinality: one, required: true}
+      delegates: {target: habitat/Resident, cardinality: many}
+      members:   {target: habitat/Resident, cardinality: many}
+
+  PolicyRule:
+    properties:
+      action:  {kind: scalar, required: true}         # ActionId or pattern
+      target:  {kind: scalar}                         # TypeId, pattern, or CEL filter
+      effect:  {kind: enum, values: [allow, deny], required: true}
+      cosign_count: {kind: scalar}
+    links:
+      owner:    {target: habitat/Resident, cardinality: one, required: true}
+      requires: {target: habitat/Group, cardinality: many}
+      cosign_group: {target: habitat/Group, cardinality: one}
+
+  Cosign:
+    properties:
+      args_hash: {kind: scalar, required: true}
+      expires:   {kind: timestamp, required: true}
+      consumed:  {kind: scalar, required: true}
+    links:
+      rule:      {target: habitat/PolicyRule, cardinality: one, required: true}
+      target:    {target: "*", cardinality: one, required: true}
+      signer:    {target: habitat/Resident, cardinality: one, required: true}
+      requester: {target: habitat/Resident, cardinality: one, required: true}
+
+  Charter:
+    properties:
+      contexts: {kind: scalar, required: true}        # list of context names
+    links:
+      owner:      {target: habitat/Resident, cardinality: one, required: true}
+      owns_types: {target: habitat/Type, cardinality: many}
+      wakes_on:   {target: habitat/Module, cardinality: many}   # sensors
+      invokes:    {target: habitat/Module, cardinality: many}   # actions
+      hooks:      {target: habitat/Module, cardinality: many}
+    contracts:
+      - {expr: "owns_types.all(t, t.owner == this)", message: "type ownership is exclusive"}
+
+  CognitionBudget:
+    properties:
+      units_per_day:       {kind: scalar, required: true}   # backend-priced units
+      gpu_seconds_per_day: {kind: scalar, required: true}
+      used_today_units:    {kind: scalar}
+      used_today_gpu:      {kind: scalar}
+    links:
+      source: {target: habitat/Resident, cardinality: one}   # null = unallocated pool
+
+  Headcount:
+    singleton: true
+    properties:
+      max_agents:         {kind: scalar, required: true}
+      max_humans:         {kind: scalar, required: true}
+      agents_in_use:      {kind: scalar, required: true}
+      humans_in_use:      {kind: scalar, required: true}
+      budget_total_units: {kind: scalar, required: true}
+      budget_allocated_units: {kind: scalar, required: true}
+      pending_retirements:{kind: scalar, required: true}
+    contracts:
+      - {expr: "agents_in_use <= max_agents", message: "agent slots conserved"}
+      - {expr: "humans_in_use <= max_humans", message: "human slots conserved"}
+      - {expr: "budget_allocated_units <= budget_total_units", message: "budget conserved"}
+
+  Type:                                   # the ontology describes its own types
+    properties:
+      id:        {kind: scalar, required: true, immutable: true}
+      context:   {kind: scalar, required: true}
+      version:   {kind: scalar, required: true}
+      instances: {kind: scalar}
+      referenced_by: {kind: scalar}
+    links:
+      owner:   {target: habitat/Charter, cardinality: one}
+
+  Module:
+    properties:
+      id:      {kind: scalar, required: true, immutable: true}
+      kind:    {kind: enum, values: [sensor, step, action, workflow, hook], required: true}
+      version: {kind: scalar, required: true}
+      live:    {kind: scalar, required: true}
+      source_path: {kind: scalar, required: true}
+      # reliability, computed
+      precision:        {kind: scalar}
+      replay_agreement: {kind: scalar}
+      fixture_coverage: {kind: scalar}
+      violation_rate:   {kind: scalar}
+      usage:            {kind: scalar}
+    links:
+      owner: {target: habitat/Resident, cardinality: one, required: true}
+
+  Workflow:
+    extends: habitat/Module
+    properties:
+      yield_points: {kind: scalar}          # list of stable ids
+    links:
+      runs: {target: habitat/WorkflowRun, cardinality: many}
+
+  WorkflowRun:
+    properties:
+      state:   {kind: enum, values: [running, suspended, completed, aborted, failed], required: true}
+      started: {kind: timestamp, required: true}
+      ended:   {kind: timestamp}
+    links:
+      workflow:   {target: habitat/Workflow, cardinality: one, required: true}
+      trigger:    {target: habitat/Observation, cardinality: one}
+      open_yield: {target: habitat/Yield, cardinality: one, required_when: "state == 'suspended'"}
+
+  Execution:
+    properties:
+      exit:     {kind: enum, values: [ok, failed, timeout, violation], required: true}
+      started:  {kind: timestamp, required: true}
+      ended:    {kind: timestamp}
+      inputs_hash:  {kind: scalar, required: true}
+      outputs_hash: {kind: scalar}
+      injected_timestamp: {kind: timestamp, required: true}
+      injected_seed: {kind: scalar}
+      sandbox_hash: {kind: scalar, required: true}
+    links:
+      module: {target: habitat/Module, cardinality: one, required: true}
+      run:    {target: habitat/WorkflowRun, cardinality: one}
+      owner:  {target: habitat/Resident, cardinality: one, required: true}
+
+  Observation:
+    properties:
+      from_state: {kind: scalar, required: true}
+      to_state:   {kind: scalar, required: true}
+      at:         {kind: timestamp, required: true}
+      outcome:    {kind: enum, values: [pending, acted, dismissed, crystallized], required: true}
+    links:
+      sensor:    {target: habitat/Module, cardinality: one, required: true}
+      object:    {target: "*", cardinality: one, required: true}
+      routed_to: {target: habitat/Resident, cardinality: one}
+
+  Yield:
+    properties:
+      yield_point:   {kind: scalar, required: true}
+      question_type: {kind: scalar, required: true}
+      opened:        {kind: timestamp, required: true}
+      resolved:      {kind: timestamp}
+      rule:          {kind: scalar}          # CEL stated by the resolver, optional
+    links:
+      workflow:  {target: habitat/Workflow, cardinality: one, required: true}
+      run:       {target: habitat/WorkflowRun, cardinality: one, required: true}
+      context:   {target: "*", cardinality: many}
+      routed_to: {target: habitat/Resident, cardinality: one, required: true}
+      answer:    {target: "*", cardinality: one}
+
+  Gap:
+    properties:
+      what:   {kind: enum, values: [type, sensor, workflow], required: true}
+      opened: {kind: timestamp, required: true}
+      closed: {kind: timestamp}
+    links:
+      item:      {target: "*", cardinality: one, required: true}
+      held_by:   {target: habitat/Resident, cardinality: one}
+      closed_by: {target: habitat/Resident, cardinality: one}
+
+  Session:
+    properties:
+      started: {kind: timestamp, required: true}
+      ended:   {kind: timestamp}
+      kind:    {kind: enum, values: [wake, subagent, shell, attach, visitor], required: true}
+      visitor_identity: {kind: scalar}
+      tokens_used: {kind: scalar}
+    links:
+      resident: {target: habitat/Resident, cardinality: one}
+      parent:   {target: habitat/Session, cardinality: one}      # compression lineage
+      host:     {target: habitat/Host, cardinality: one, required: true}
+      backend:  {target: habitat/Backend, cardinality: one}
+
+  Summary:
+    properties:
+      version: {kind: scalar, required: true}
+      facts:   {kind: scalar, required: true}          # typed statements, not prose
+      open_threads: {kind: scalar}
+    links:
+      session: {target: habitat/Session, cardinality: one, required: true}
+      previous: {target: habitat/Summary, cardinality: one}
+
+  SubAgentJob:
+    properties:
+      subuid: {kind: scalar, required: true}
+      depth:  {kind: scalar, required: true}
+      result_schema: {kind: scalar, required: true}
+      ttl_seconds: {kind: scalar, required: true}
+      state:  {kind: enum, values: [running, returned, expired, killed], required: true}
+      started: {kind: timestamp, required: true}
+      ended:   {kind: timestamp}
+    links:
+      parent: {target: habitat/Agent, cardinality: one, required: true}
+      result: {target: "*", cardinality: one}
+    contracts:
+      - {expr: "depth <= config.agents.subagent_max_depth", message: "sub-agent depth limit"}
+
+  ActionAttempt:
+    properties:
+      state:   {kind: enum, values: [pending, observed, unconfirmed, reconciled_rerun, ambiguous], required: true}
+      idempotency_key: {kind: scalar, required: true, immutable: true}
+      started: {kind: timestamp, required: true}
+      ended:   {kind: timestamp}
+    links:
+      action:  {target: habitat/Module, cardinality: one, required: true}
+      target:  {target: "*", cardinality: one, required: true}
+      invoker: {target: habitat/Resident, cardinality: one, required: true}
+      result:  {target: "*", cardinality: one}
+
+  WakeSummary:                            # the done() result for ordinary wakes
+    properties:
+      disposition: {kind: enum, values: [acted, resolved, deferred, nothing_to_do], required: true}
+      facts:       {kind: scalar}          # typed statements worth remembering
+      crystallization_candidates: {kind: scalar}
+
+  Backend:
+    properties:
+      name: {kind: scalar, required: true}
+      window_tokens: {kind: scalar, required: true}
+      supports_tools: {kind: scalar, required: true}
+      supports_cache: {kind: scalar, required: true}
+      parse_failure_rate: {kind: scalar}
+      latency_p50_ms: {kind: scalar}
+      refusal_rate: {kind: scalar}
+      partial_turn_rate: {kind: scalar}
+      effort_levels: {kind: scalar}
+      price_input: {kind: scalar}
+      price_cache_write: {kind: scalar}
+      price_cache_read: {kind: scalar}
+      price_output: {kind: scalar}
+
+# ---------------------------------------------------------------------------
+# sensors  (module manifests; source under /srv/modules/habitat/<name>/)
+# ---------------------------------------------------------------------------
+
+sensors:
+
+  YieldRecurrence:
+    observes: habitat/Workflow
+    reads: [yield_points]
+    trigger: {timer: 1h}
+    states: [ok, recurring]
+    predicate: >
+      any yield_point with >= config.ontd.yield_recurrence_min resolutions in config.ontd.yield_recurrence_window and answer entropy < config.ontd.yield_recurrence_entropy
+      -> recurring
+    routes_to: owner of the workflow
+
+  SensorPrecisionLow:
+    observes: habitat/Module
+    reads: [kind, precision, usage]
+    trigger: {timer: 6h}
+    states: [ok, low]
+    predicate: "kind == 'sensor' && usage >= config.ontd.sensor_precision_min_usage && precision < config.ontd.sensor_precision_low ? 'low' : 'ok'"
+    routes_to: owner
+
+  TypeOrphaned:
+    observes: habitat/Type
+    reads: [instances, referenced_by]
+    trigger: {timer: 24h}
+    states: [ok, orphaned]
+    predicate: "instances == 0 && referenced_by == 0 && age > config.ontd.type_orphan_grace ? 'orphaned' : 'ok'"
+    routes_to: owner
+
+  PrivateMemoryGrowth:
+    observes: habitat/Agent
+    reads: [memory_facts, memory_cap]
+    trigger: {bus_subject: "ont.habitat.object.Agent.changed"}
+    states: [ok, high, full]
+    predicate: "memory_facts >= memory_cap ? 'full' : memory_facts > memory_cap * config.dataset_usage_high ? 'high' : 'ok'"
+    routes_to: the agent itself
+
+  CharterBreadth:
+    observes: habitat/Agent
+    reads: [charter.owns_types]
+    trigger: {timer: 24h}
+    states: [ok, broad]
+    predicate: "size(charter.owns_types) > config.agents.charter_breadth_max_types ? 'broad' : 'ok'"
+    routes_to: staffing
+
+  HeadcountThreshold:
+    observes: habitat/Headcount
+    reads: [max_agents, agents_in_use]
+    trigger: {bus_subject: "ont.habitat.object.Headcount.changed"}
+    states: [ok, quarter, tenth, none]
+    predicate: >
+      available = max_agents - agents_in_use;
+      available == 0 ? 'none' : available <= max_agents*config.headcount_sensors.threshold_tenth ? 'tenth' : available <= max_agents*config.headcount_sensors.threshold_quarter ? 'quarter' : 'ok'
+    routes_to: operator
+
+  HeadcountRate:
+    observes: habitat/Headcount
+    reads: [agents_in_use]
+    trigger: {timer: 1h}
+    states: [ok, fast]
+    predicate: ">= config.headcount_sensors.rate_max_per_24h CreateAgent in 24h -> fast"
+    routes_to: operator
+
+  HeadcountTransition:
+    observes: habitat/Headcount
+    reads: [agents_in_use, humans_in_use]
+    trigger: {bus_subject: "ont.habitat.object.Headcount.changed"}
+    states: [same, changed]
+    predicate: "value changed since last -> changed"
+    routes_to: operator log only
+
+  IdleResident:
+    observes: habitat/Resident
+    reads: [state]
+    trigger: {timer: 24h}
+    states: [ok, idle]
+    predicate: "state == 'active' && no Yield resolved and no action invoked in config.agents.idle_resident_days -> idle"
+    routes_to: staffing
+
+  CreatingStale:
+    observes: habitat/Resident
+    reads: [state]
+    trigger: {timer: 5m}
+    states: [ok, stale]
+    predicate: "state == 'creating' && age > config.agents.creating_timeout -> stale"
+    routes_to: registryd rollback (action habitat/RollbackCreate)
+
+  DrainingStale:
+    observes: habitat/Resident
+    reads: [state]
+    trigger: {timer: 1h}
+    states: [ok, stale]
+    predicate: "state == 'draining' && age > config.agents.drain_timeout -> stale"
+    routes_to: staffing
+
+  YieldStale:
+    observes: habitat/WorkflowRun
+    reads: [state, open_yield]
+    trigger: {timer: 1h}
+    states: [ok, stale]
+    predicate: "state == 'suspended' && open_yield.age > config.ontd.yield_stale -> stale"
+    routes_to: workflow owner
+
+  GapOpen:
+    observes: habitat/Gap
+    reads: [opened, closed]
+    trigger: {timer: 6h}
+    states: [ok, aging]
+    predicate: "closed == null && age > config.ontd.gap_aging -> aging"
+    routes_to: staffing
+
+  MigrationRegret:
+    observes: habitat/Type
+    reads: [version]
+    trigger: {timer: 6h}
+    states: [ok, regret]
+    predicate: >
+      version changed within config.ontd.migration_regret_window and (yield rate or violation rate across referencing modules)
+      > config.ontd.migration_regret_factor x the pre-migration baseline -> regret
+    routes_to: migration author
+
+  BudgetExhausted:
+    observes: habitat/CognitionBudget
+    reads: [units_per_day, used_today_units]
+    trigger: {bus_subject: "ont.habitat.object.CognitionBudget.changed"}
+    states: [ok, exhausted]
+    predicate: "used_today_units >= units_per_day ? 'exhausted' : 'ok'"
+    routes_to: budget owner
+
+  InterfaceGap:
+    observes: habitat/Execution
+    reads: [module]
+    trigger: {bus_subject: "ont.habitat.object.Execution.changed"}
+    states: [none, used]
+    predicate: "module.id startsWith 'interface/' -> used"
+    routes_to: execution owner
+
+  BackendRefusal:
+    observes: habitat/Backend
+    reads: [refusal_rate]
+    trigger: {bus_subject: "ont.habitat.object.Session.changed"}
+    states: [ok, refused]
+    predicate: "a session ended with stop_reason refusal -> refused (per session; carries the refusal category)"
+    routes_to: session resident
+
+  SuspiciousContent:
+    observes: "*"
+    reads: [string properties]
+    trigger: {bus_subject: "ont.*.object.*.changed"}
+    states: [clean, suspicious]
+    predicate: "any string property matches directive-shaped patterns destined for model input -> suspicious"
+    routes_to: object owner
+
+  ActionAttemptStale:
+    observes: habitat/ActionAttempt
+    reads: [state, started]
+    trigger: {timer: 1m}
+    states: [ok, stale]
+    predicate: "state == 'pending' && age > config.wfd.action_confirmation_window -> stale"
+    routes_to: wfd reconciliation
+
+  HostState:
+    observes: habitat/Host
+    reads: [state]
+    trigger: {timer: 1m}
+    states: [up, degraded, down]
+    predicate: "as reported by host heartbeat"
+    routes_to: operator
+
+# ---------------------------------------------------------------------------
+# actions  (verbs; implementations in registryd, ontd, cortexd, wfd)
+# ---------------------------------------------------------------------------
+
+actions:
+
+  CreateAgent:      {targets: habitat/Headcount, args: [name, charter, budget, gap], implementation: registryd, result: habitat/Agent}
+  RetireAgent:      {targets: habitat/Agent,     args: [successor],                  implementation: registryd, result: habitat/Agent}
+  RestoreAgent:     {targets: habitat/Agent,     args: [charter, budget],            implementation: registryd, result: habitat/Agent}
+  CreateHuman:      {targets: habitat/Headcount, args: [name, charter, budget, auth_binding], implementation: registryd, result: habitat/Human}
+  RetireHuman:      {targets: habitat/Human,     args: [successor],                  implementation: registryd, result: habitat/Human}
+  UpdateCharter:    {targets: habitat/Resident,  args: [charter],                    implementation: registryd, result: habitat/Charter}
+  SpawnSubAgent:    {targets: habitat/Agent,     args: [result_schema, ttl, context, task], implementation: registryd, result: habitat/SubAgentJob}
+  MigrateResident:  {targets: habitat/Resident,  args: [to_host],                    implementation: registryd, result: habitat/Resident}
+  RollbackCreate:   {targets: habitat/Resident,  args: [],                           implementation: registryd, result: habitat/Resident}
+  SetHeadcount:     {targets: habitat/Headcount, args: [max_agents, max_humans],     implementation: registryd, result: habitat/Headcount}
+  SetBudget:        {targets: habitat/Headcount, args: [budget_total_units],        implementation: registryd, result: habitat/Headcount}
+  UpdateGroup:      {targets: habitat/Group,     args: [members, delegates],         implementation: registryd, result: habitat/Group}
+
+  DefineType:       {targets: habitat/Type,      args: [definition],                 implementation: ontd, result: habitat/Type}
+  DefineModule:     {targets: habitat/Module,    args: [manifest, source],           implementation: wfd,  result: habitat/Module}
+  Migrate:          {targets: habitat/Type,      args: [plan],                       implementation: ontd, result: habitat/Type}
+  DefinePolicyRule: {targets: habitat/PolicyRule,args: [rule],                       implementation: ontd, result: habitat/PolicyRule}
+  Resolve:          {targets: habitat/Yield,     args: [answer, rule],               implementation: ontd, result: habitat/Yield}
+  ClaimGap:         {targets: habitat/Gap,       args: [],                           implementation: ontd, result: habitat/Gap}
+  Sign:             {targets: "*",               args: [rule, args_hash],            implementation: ontd, result: habitat/Cosign}
+
+  Attach:           {targets: habitat/Agent,     args: [],                           implementation: cortexd, result: habitat/Session}
+  ReadJournal:      {targets: habitat/Session,   args: [range],                      implementation: cortexd, result: scalar}

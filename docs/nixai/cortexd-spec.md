@@ -1,9 +1,8 @@
 # cortexd — Cognition Runtime Specification
 
-Status: draft 1.
+Status: draft 2. Incorporates the 2026-09-03 review against current Anthropic agent guidance.
 
 > Read `DESIGN.md` first. This spec is a contract: the **Guarantees** are what other services and tests depend on and must hold exactly. Mechanisms described under them are the reference approach; a builder may choose differently if every guarantee and test still holds. Thresholds and defaults are in `habitat.config` and referenced by name here; never hard-code them.
-
 
 ## 1. Purpose
 
@@ -17,202 +16,207 @@ Humans do not use `cortexd`. A human's runtime is their body and the shell.
 
 Why: cognition is expensive and must not be wasted or hidden. Context is assembled by code before the model is called, all model calls go through the front door, and nothing about pressure is ever visible to the model.
 
-1. An agent sees exactly three things: ontology reads, typed observations and yields, and typed actions. No raw filesystem, process, or network access from cognition. Everything else is behind a module.
+1. An agent's cognition reaches exactly three kinds of things: ontology reads, typed observations and yields, and typed actions. The tool surface in §3 is those three kinds plus the wake's own lifecycle (`spawn`, `remember`, `recall`, `done`). No raw filesystem, process, or network access from cognition.
 2. Working context is assembled to completion before the model is called. No wake proceeds on partial context.
-3. Nothing about context pressure, budget pressure, or compression is ever visible to the model.
-4. Compression rebuilds context from the ontology and journal. The rolling summary is one input, never the sole carrier of task state.
-5. Every hook is a module with a manifest, sandbox, and fixtures. A hook that needs judgment obtains it by spawning a sub-agent with a result schema; it never calls a backend directly. All cognition is a wake or a sub-agent job: attributed, budgeted, journaled, and limited to the agent interface.
+3. No per-wake or per-turn signal derived from budget, context size, or compression state ever appears in model input. The static charter frame may state, once and identically every wake, that compression is automatic and invisible and that the agent must never stop early on account of it.
+4. Compression rebuilds context from the ontology and journal. The rolling summary is one input, never the sole carrier of task state, and is typed facts, not prose.
+5. Every hook is a module with a manifest, sandbox, and fixtures. A hook that needs judgment about something other than the agent's own decision obtains it by spawning a sub-agent with a result schema; it never calls a backend directly. All cognition is a wake or a sub-agent job: attributed, budgeted, journaled, and limited to the tool surface.
 6. Every model call is attributed to a uid and charged to a budget. Sub-agent cognition is charged to the root ancestor.
-7. The model backend is replaceable with zero change to any agent, charter, hook, or session record.
-8. Model output is never executed. It is parsed into typed calls against `ontd` or discarded with a journaled parse failure.
+7. Within a session, the system frame, the tool definitions, and every previously sent message are byte-frozen. New information is only ever appended. A session's backend is fixed for its lifetime; backend selection changes only at a session boundary (compression child, re-wake, sub-agent spawn).
+8. Model output is never executed. It is parsed into typed tool calls with schema-valid arguments, or it is journaled as `ParseFailure`. Every tool is strict; a call that reaches the harness has valid arguments by construction.
+9. Operator-authored text and world-derived text never share a channel. The charter frame and mid-session operator instructions are system content; everything derived from the world (observation snapshots, read results, interface output, human attach turns) enters as tool results or user turns and is labeled as data.
+10. The raw request and response of every model call are journaled byte-for-byte.
 
 ## 3. Agent interface
 
-The entire surface an agent's cognition can reach, exposed as a tool schema to the model and enforced by `cortexd`:
+The entire tool surface, exposed to the model as strict tools (`additionalProperties: false`, full `required`), each with a model-facing description generated from the manifest or type it wraps (§3.2):
 
 ```
-read(ObjectId | query)                      -> objects, links     # ontd read API, charter-scoped contexts
-context()                                   -> assembled context   # the current wake's working context, re-readable
-act(verb, target, args)                     -> ActionInvocationId  # ontd.act; policy evaluated there
-resolve(YieldId, answer, rule?)             -> ok                   # ontd.resolve
-spawn(result_schema, ttl, context, task)    -> SubAgentJobId        # registryd.SpawnSubAgent
-remember(fact: TypedStatement)              -> ok                   # write to private memory
-recall(query)                               -> facts                # private memory retrieval step
-done(summary: Object)                       -> ends the wake
+read(query)                                  -> objects, links      # ontd read; charter-scoped contexts
+context()                                    -> assembled context   # the current wake's working context, returned as a tool result
+<verb>(target, args)                         -> ActionInvocationId  # one strict tool per permitted verb; see §3.1
+resolve(answer, rule?)                       -> ok                  # schema generated per session from the yield's question_type
+spawn(result_schema, ttl, context, task, backend?, effort?) -> SubAgentJobId
+remember(fact: TypedStatement)               -> ok
+recall(query)                                -> facts
+done(result)                                 -> ends the wake        # schema generated per session: result_schema for sub-agents, habitat/WakeSummary otherwise
 ```
 
-`read` is scoped to the contexts in the agent's charter plus `habitat`. `act` presents only the verbs the charter declares and policy permits for the agent's groups, narrowed further for sub-agents to the verbs in their job. Anything not listed is not a tool and does not exist from the model's point of view.
+Forced tool choice is not used. The charter frame states the expectation ("end the wake with `done`"; "answer the yield with `resolve`"); strict schemas guarantee that any call made is valid. `tool_choice` is always automatic.
 
-There is no shell tool, file tool, or HTTP tool. Those are actions in the `os` and `interface` contexts, exposed only to agents whose charter and groups include them.
+Current models emit several tool calls per assistant turn. The loop executes all calls from one assistant turn (concurrently where safe: `read`, `context`, `recall` always; verbs per their manifest's idempotency), then returns every result in a single message. A failed or rejected call is returned as an error result in the same batch, never dropped.
+
+### 3.1 Verbs as tools
+
+Each action the charter declares and policy permits is exposed as its own strict tool, namespaced by context (`billing_RestartService`), with its argument schema and description drawn from the action manifest. For sub-agents the set is the intersection with the job's declared verbs. Where a charter permits more verbs than the backend's tool budget comfortably carries, verbs are registered with deferred loading and a `find_verb` tool searches them; the build records which charters cross that threshold.
+
+Rationale for per-verb tools over one `act(verb, target, args)`: each verb gets its own description, the shell renders each call typed, and strictness applies per verb rather than through a discriminated union.
+
+### 3.2 Descriptions
+
+Model-facing descriptions are part of the manifest (`Manifest.description`, per-argument descriptions; see `ontd` §3.4) and are required. The build rejects a description that does not state what the module does, when to use it, and when not to. Yields carry `Yield.reason`: why the workflow could not decide. Descriptions and schemas are byte-identical across wakes for a given charter version, which is what makes the tool block cacheable.
 
 ## 4. Wake lifecycle
 
 A wake is triggered by a routed observation, a routed yield, a sub-agent job assignment, or a human attaching a conversation. Each wake is a `Session` object.
 
 ```
-1. trigger arrives on ont.habitat.yield.<uid> or ont.<ctx>.observation.<Type> (dispatcher-routed)
-2. pre-wake hooks run (working-context assembly and any charter-declared hooks)
-3. session created; parent link set if this is a compression child
+1. trigger arrives (dispatcher-routed)
+2. pre-wake hooks run: AssembleContext and any charter-declared hooks
+3. session created; backend and effort fixed for the session; parent link set if this is a compression child
 4. loop:
-     model call with system frame + context + tool schema
-     parse output into typed calls
-     for each act(): pre-act hooks -> ontd.act -> post-result hooks
-     append turn to session
-     if compression threshold reached: on-compress hook (§7), continue in child session
-5. done() or budget exhaustion or idle timeout
+     request = system frame + tools + messages (all prior turns verbatim, including thinking blocks)
+     stream the model call; collect the final message
+     branch on stop_reason:
+       tool_use   -> run pre-act hooks per call; dispatch; collect results; append one result message
+       end_turn   -> if done() was not called, append a system message restating the expectation, once; then end
+       max_tokens -> append a system message asking for a continuation; retry once; then end as PartialTurn
+       refusal    -> emit BackendRefusal; end the wake; trigger re-routes
+       pause_turn -> continue
+     if soft compression threshold reached and no tool round is pending: on-compress (§7), continue in child session
+     if hard threshold reached: complete the pending tool round, accept no further calls, compress
+5. done() or budget exhaustion or idle timeout (§9, §14)
 6. post-wake hooks run (journal, memory sync, outcome recording)
 7. session closed; observation/yield outcome written
 ```
 
-An agent that is not woken is not running. Idle agents cost nothing. `cortexd` keeps no warm state for them beyond the NSS projection.
+Hook additions during a wake are appended, never merged into already-sent content: a pre-act or post-result hook's additions travel inside the tool result of the call that produced them; operator instructions mid-session are appended as system messages.
+
+An agent that is not woken is not running. Idle agents cost nothing.
 
 ## 5. Working context
 
-Assembled by the `habitat/AssembleContext` step, run in the sandbox before the model call. Deterministic; same inputs produce the same context. Contents, in order:
+Assembled by the `habitat/AssembleContext` step before the model call. Deterministic; same inputs produce the same bytes. Sections, in order, with their channel:
 
-1. **Charter frame.** The agent's contexts, owned types, available verbs. Static per charter version; cached and prompt-cache-stable.
-2. **Trigger.** The observation or yield, with its `question_type` and enumerated options if any.
-3. **Neighborhood.** `ontd.neighborhood(target, cortexd.neighborhood_depth)`. Fixed depth. Additional context beyond two hops arrives only via explicit steps in the workflow that raised the yield.
-4. **Reliability annotations.** For every sensor and module in the neighborhood, its precision or reliability score. The agent is told how much to trust what it's looking at.
-5. **Private memory.** Output of the retrieval step (§8) for the trigger, exact matches first, then approximate if the step is configured for it, each marked with trust and match kind.
-6. **Rolling summary.** If this is a compression child, the summary object from the parent session.
-7. **Open items.** The agent's other unresolved yields and running sub-agent jobs, as references.
+| # | section | channel | authored by |
+|---|---------|---------|-------------|
+| 1 | Charter frame: contexts, owned types, available verbs, the crystallization obligation stated as intent, the static compression sentence (Guarantee 3) | system | operator (via charter) |
+| 2 | Trigger: the observation or yield, its `question_type`, its `reason`, enumerated options | first user turn, as data | world |
+| 3 | Neighborhood: `ontd.neighborhood(target, depth)` at the fixed depth in `ontd` Decision 2 | first user turn, as data | world |
+| 4 | Reliability annotations for every sensor and module in the neighborhood | first user turn, as data | computed |
+| 5 | Private memory: output of the retrieval step (§8); empty for sub-agents | first user turn, as data | agent |
+| 6 | Rolling summary, if this is a compression child | first user turn, as data | prior session |
+| 7 | Open items: unresolved yields and running sub-agent jobs; empty for sub-agents | first user turn, as data | computed |
 
-The frame is built so that stable content precedes volatile content, for prompt caching. Section 1 changes only with charter version; section 2 onward is per wake.
+Section 1 changes only with charter version and is the cache prefix along with the tool definitions. Sections 2 through 7 are per wake and are labeled as world-derived data; nothing in them is treated as an instruction. Directive-shaped text inside world-derived data is recorded as a `SuspiciousContent` observation on the source object and left inert.
 
-Context size is bounded by `cortexd.context_max_tokens`. If the assembled context exceeds the bound, the step fails the wake with `ContextOverflow`, emitted as an observation on the workflow that raised the trigger. That is a bug in the workflow's yield design, not something to truncate around.
+Context size is bounded by `cortexd.context_max_tokens`. If the assembled context exceeds it, the wake fails with `ContextOverflow` on the workflow that raised the trigger. That is a bug in the workflow's yield design, not something to truncate around.
 
 ## 6. Hooks
 
-Triggers start wakes; hooks run inside them at lifecycle points. A hook is deterministic code. Where a hook needs judgment about something *other than the decision the agent just made* (summarizing a session, extracting facts from a long result), it calls `spawn()` with a result schema and continues on the typed result. The model is reached only through that path, so hook cognition is charged, journaled, and tool-limited like any other.
+Triggers start wakes; hooks run inside them at lifecycle points. A hook is deterministic code. Where it needs judgment about something *other than the decision the agent just made*, it calls `spawn()` and continues on the typed result. A hook never re-evaluates the agent's own decision; pre-act hooks are deterministic checks only, and a failed check returns to the agent as an error tool result in the same batch. An agent that thinks twice about one action is a wake whose context was incomplete; the fix is the context, not a checker.
 
-A hook never re-evaluates the agent's own decision. Pre-act hooks are deterministic checks only: contracts on arguments, version match on the target, facts unchanged since context assembly. A failed check returns to the agent as a typed result in the same wake; the agent then decides with new information, which is a different decision, not the same one twice. An agent that thinks twice about one action is a wake whose context was incomplete, and the fix is the context, not a checker.
+| point               | inputs                     | outputs                        | channel for outputs                         |
+|---------------------|----------------------------|--------------------------------|---------------------------------------------|
+| pre-wake            | trigger                    | context additions              | appended to the first user turn             |
+| pre-act             | pending call, context      | allow / reject with reason     | rejection as an error tool result           |
+| post-result         | action result              | context additions, memory writes | inside that call's tool result            |
+| on-yield-resolved   | yield, answer, rule        | crystallization candidates     | journal                                     |
+| on-compress         | session, summary so far    | new `Summary` object           | next session's section 6                    |
+| on-budget-threshold | remaining budget           | effort change, scope for future appends | request parameter; never model-visible |
+| post-wake           | session                    | journal entries, memory sync   | journal                                     |
 
-Hook points, each a list of module ids declared in the charter, run in order, each in its own sandbox with declared inputs only:
-
-| point              | inputs                             | outputs                      | when                                   |
-|--------------------|------------------------------------|------------------------------|----------------------------------------|
-| pre-wake           | trigger                            | context additions            | before model call, after AssembleContext |
-| pre-act            | pending action, context            | allow / reject with reason   | before ontd.act; deterministic only    |
-| post-result        | action result                      | context additions, memory writes | after result returns              |
-| on-yield-resolved  | yield, answer, rule                | crystallization candidates   | after resolve                          |
-| on-compress        | session, summary so far            | new summary object           | at compression threshold               |
-| on-budget-threshold| remaining budget                   | scope adjustments            | silent; never surfaces to the model    |
-| post-wake          | session                            | journal entries, memory sync | after done()                           |
-
-Seed hooks, always present and not removable by charter:
-
-- `habitat/AssembleContext` (pre-wake)
-- `habitat/RecordOutcome` (post-wake): writes observation and yield outcomes, feeding precision scores
-- `habitat/CaptureRule` (on-yield-resolved): stores the stated rule against the yield point for `YieldRecurrence`
-- `habitat/SyncMemory` (post-wake): writes `remember()` calls to private memory, enforcing the cap (§8)
-
-A hook that fails rejects the wake step it guards and emits `HookFailed` on the hook's module object. Hooks are modules and so have reliability scores; a hook whose failure rate rises wakes its owner.
+Seed hooks, always present: `AssembleContext`, `RecordOutcome`, `CaptureRule` (parses the stated rule against the CEL environment; an unparseable rule is `ResolveInvalid`, not a stored string), `SyncMemory`.
 
 ## 7. Sessions and compression
 
-Sessions are lineage, not a rewritten transcript. When the session's token count reaches the `cortexd.compression_soft` of the backend's window:
+Sessions are lineage, not a rewritten transcript. At `cortexd.compression_soft` of the backend window or `cortexd.compression_soft_tokens`, whichever first, and only between tool rounds:
 
-1. The `on-compress` hook spawns a sub-agent with result schema `habitat/Summary`, passing the prior summary and the turns since; the child returns an updated summary, never one rebuilt from scratch. The job is charged to the agent and journaled like any other.
-2. The current session is closed with `ended` and the summary linked.
-3. A child session is created with `parent` set.
-4. `AssembleContext` runs again from `ontd` and the journal, with the summary as section 6. The child's context is rebuilt from the world, not inherited from the parent's transcript.
+1. The on-compress hook spawns a sub-agent with result schema `habitat/Summary`, passing the prior summary and the turns since; the child returns an updated summary of typed facts.
+2. The current session closes with `ended` and the summary linked.
+3. A child session is created with `parent` set. It may select a different backend or effort.
+4. `AssembleContext` runs again from `ontd` and the journal, with the summary as section 6.
 5. The loop continues in the child.
 
-A hard safety net at `cortexd.compression_hard` forces compression regardless of turn boundaries.
+At `cortexd.compression_hard`, the pending tool round completes, no further calls are accepted, and compression proceeds. Compaction never separates a tool call from its result.
 
-The model is never told compression happened, is happening, or is near. There are no pressure warnings.
+Where a backend declares server-side compaction or tool-result clearing, the on-compress hook may prefer tool-result clearing for sessions that are long because of large results rather than many decisions; Guarantee 4 remains the default and the client-side path is always available.
 
-Raw turns are retained in the journal for every session and are recoverable by session id; nothing is lost, only removed from the active window.
+Raw turns, including thinking blocks, are retained in the journal for every session.
 
 ## 8. Private memory
 
 Each agent's private memory is a typed fact store in its home, written only through `remember()` (via `SyncMemory`) and by post-result hooks that extract facts by rule. No model summarizes the journal into memory.
 
 ```
-Fact {
-  id, statement: TypedStatement       # subject: ObjectId, predicate: string, object: value | ObjectId
-  trust: float                         # computed: led to acted outcome / times retrieved
-  source: SessionId, at
-  superseded_by: FactId | null
-}
+Fact { id, statement: TypedStatement, trust: float, source: SessionId, at, superseded_by }
 ```
 
-**Cap.** Private memory has a hard size limit, `agents.private_memory_cap_facts`. `SyncMemory` refuses writes past the cap and emits `PrivateMemoryFull`, which routes to the agent as a standing work item: crystallize or supersede. Growth toward the cap is a sensor. The cap exists to force knowledge into the ontology where it can be shared and tested.
+Hard cap `agents.private_memory_cap_facts`; `SyncMemory` refuses writes past it and emits `PrivateMemoryFull`. Retrieval is the `habitat/RecallFacts` step: typed lookup first, full-text second, approximate third only if `cortexd.approximate_recall`. Trust is computed by `RecordOutcome`; facts below `agents.private_memory_trust_floor` are superseded and surfaced. Sub-agents have no private memory.
 
-**Retrieval** is the `habitat/RecallFacts` step: typed lookup by subject and predicate first, full-text second, approximate third if configured. Each returned fact is marked with its match kind and trust. This step is replaceable; an HRR-based store is an acceptable implementation.
+## 9. Budgets and effort
 
-**Trust** is computed by `RecordOutcome`: a fact that was in context when an action's outcome was `acted` gains; one present when the outcome was `dismissed` or a contract violation followed loses. Facts below `agents.private_memory_trust_floor` are superseded automatically and surfaced.
+`CognitionBudget` is enforced per uid. Usage counts every priced unit at the backend's declared weights (uncached input, cache write, cache read, output), converted to budget units by the backend object's price table, so a cache read costs what it costs. Sub-agent usage is charged to the root ancestor.
 
-Sub-agents have no private memory. They get working context and return a typed result.
+Effort is the first budget lever and is invisible to the model: `cortexd.effort_default` for ordinary wakes, `cortexd.effort_subagent`, `cortexd.effort_authoring` for module authoring and crystallization, `cortexd.effort_on_threshold_scope` after `budget.threshold_scope`. Charters may pin effort per wake class; backends declare supported levels. On `budget.threshold_warn` the hook lowers effort; only after that may it narrow what is appended from then on. It never edits sent content.
 
-## 9. Budgets
-
-`CognitionBudget` from `registryd` is enforced here as a per-uid rate limit on tokens and GPU-seconds per day. Sub-agent calls are charged to the root ancestor's uid.
-
-On crossing `budget.threshold_warn` and `budget.threshold_scope`, the `on-budget-threshold` hook runs and may narrow scope: reduce neighborhood annotations, skip approximate recall, decline new sub-agent spawns. The model is not told. On exhaustion, the wake ends with `done()` forced, the session is closed normally, and `BudgetExhausted` is emitted on the agent's object. Open yields remain open and re-route at the next budget window.
-
-An agent repeatedly exhausting budget on the same yield point is a `YieldRecurrence` signal by another name and is surfaced the same way.
+On exhaustion the wake ends with `done()` forced, `BudgetExhausted` is emitted, open yields remain open and re-route at the next window.
 
 ## 10. Backends
 
-The model is behind a backend interface:
-
 ```
 Backend {
-  name, window_tokens, supports_tools, supports_cache
-  complete(system, messages, tools, max_tokens) -> {content, tool_calls, usage}
+  name, model_id, max_input_tokens, max_output_tokens          # discovered from the provider, not config
+  capabilities: { tools, strict_tools, cache, thinking, effort_levels, streaming,
+                  server_compaction, tool_result_clearing, mid_session_system, forced_tool_choice }
+  prices: { input, cache_write, cache_read, output }           # per unit, for budget conversion
+  stream(request) -> events; final message assembled by the adapter
 }
+Request  { system: [blocks], tools: [strict defs], messages: [turns verbatim], max_tokens, effort, cache_breakpoints }
+Response { content: [blocks, including thinking], stop_reason, stop_details?, usage, fallback_events? }
 ```
 
-Reference backends: a local inference server on the habitat's GPU, and a remote API. Selection is per charter (an agent may be pinned to a backend) with a habitat default. Backends are ontology objects with reliability scores like modules: parse-failure rate, latency, refusal rate.
+Cache breakpoints: after the last charter-frame block and after the last block of the newest turn. The charter frame and tool definitions are byte-identical across wakes of a charter version.
 
-Backend swaps do not touch sessions, summaries, memory, or hooks. A session compressed under one backend continues under another; the context is rebuilt from the world anyway.
+Server-side model fallbacks are **off**. A fallback is a silent backend change inside one call, which contradicts Guarantee 6 and Guarantee 7 and hides a reliability signal. If a provider forces one, `fallback_events` is journaled as a backend switch and the session ends at the next turn boundary.
 
-Prompt caching, where the backend supports it, is applied to the charter frame and the most recent turns. Cache stability is why the charter frame is static and first.
+Backends are ontology objects with reliability: parse-failure rate, refusal rate, latency, `PartialTurn` rate. Selection is per charter with a habitat default; sub-agents may name a cheaper backend and lower effort at spawn.
 
 ## 11. Sub-agent runtime
 
-`spawn()` calls `registryd.SpawnSubAgent`, then `cortexd` runs the child as a wake with:
+`spawn()` calls `registryd.SpawnSubAgent`; `cortexd` runs the child as a wake in a disposable machine with: context limited to the passed object ids through `AssembleContext` (sections 5 and 7 empty); verbs intersected with the job's; no `remember`, `recall`, or `spawn` beyond depth; `done` whose schema is the job's `result_schema`. An invalid result is `ResultInvalid` to the parent. The parent may continue while children run, or `done()` and be re-woken by the child's return as an observation on the `SubAgentJob`.
 
-- context: only the object ids passed in the spawn, resolved through `AssembleContext` at depth 2
-- tools: the parent's verbs intersected with the job's declared verbs
-- no `remember()`, no `recall()`, no `spawn()` beyond max depth
-- `done()` must return an object valid against `result_schema`; anything else is a `ResultInvalid` failure returned to the parent
-
-The parent's wake may continue while children run, or `done()` and be re-woken by the child's return, which arrives as an observation on the `SubAgentJob`.
+Sub-agent tool calls are invoked on the root ancestor's behalf: policy and kernel see the root ancestor's uid; the journal records the subuid as requester. This is the decision on sub-agent identity referenced in `registryd` §7.2.
 
 ## 12. Human attach
 
-A human resident may attach a conversation to an agent through the shell. This is a wake triggered by the human's session, with the human's turns entering the loop as messages attributed to the human's uid. The agent's tools are unchanged; the human gets no tools through the agent. The session is journaled like any other and linked to the human's `Session`. Attach is policy-governed: the group that may attach to an agent is a rule, same as anything else.
+A human resident may attach a conversation to an agent. The human's turns enter as user turns labeled as such; they are not system content and carry no authority beyond a human's presence. Attach is the one shell capability with no agent equivalent; the shell parity guarantee states the exception.
 
 ## 13. Journal
 
-Every session, turn, tool call, result, hook execution, and compression is written to the agent's journald namespace with structured fields: session id, parent session, uid, trigger, backend, usage. The journal is the replay source for `ontd`'s build checks and the evidence base for every reliability score. It is append-only and retained by policy.
+Every session, request and response body, turn, tool call, result, hook execution, compression, effort change, and backend event is written to the agent's journald namespace with structured fields. The journal is the replay source for `ontd`'s build checks, the evidence base for reliability scores, and the fixture source for offline evaluation (§15).
 
 ## 14. Failure behavior
 
-- `AssembleContext` fails or overflows: wake does not start; `ContextOverflow` or `HookFailed` emitted on the responsible module; trigger remains open.
-- Backend unavailable: wake is queued; retried with backoff; trigger remains open. Never a partial wake.
-- Model output unparseable: turn is journaled as `ParseFailure`, model is re-prompted `cortexd.parse_retry` times with the parse error, then the wake ends and the trigger re-routes. Never executed, never guessed.
-- `ontd` unavailable mid-wake: the wake pauses at the next tool call; resumes when available; if past a timeout, the session closes and the trigger remains open.
-- Hook failure: the guarded step is rejected; the wake continues if the hook is not seed-required, ends otherwise.
-- Budget exhausted: §9.
-- Sub-agent TTL: job killed, `expired`, parent notified by observation.
+- `AssembleContext` fails or overflows: wake does not start; `ContextOverflow` or `HookFailed`; trigger remains open.
+- Backend unavailable: wake queued, retried with backoff; never a partial wake.
+- `stop_reason: refusal`: `BackendRefusal` observation on the backend object with the refusal category; wake ends; trigger re-routes. A trigger refused `cortexd.refusal_reroute_max` times is routed to the owner as a yield of type `RefusedTrigger`.
+- `stop_reason: max_tokens`: continuation requested once by appended system message; then `PartialTurn` and the wake ends.
+- Parse failure (arguments invalid despite strict schemas, or a non-tool final turn where a tool was expected): the failed assistant turn is kept verbatim; the error is appended as an error tool result or user turn; retried `cortexd.parse_retry` times; then the wake ends.
+- `ontd` unavailable mid-wake: pause at the next tool round; resume; past `cortexd.wake_idle_timeout` the session closes and the trigger remains open.
+- Idle: no streamed event for `cortexd.wake_idle_timeout`, measured on the stream, not on completed turns.
+- Budget exhausted: §9. Sub-agent TTL: job killed, `expired`, parent notified.
 
 ## 15. Test obligations
 
 - Determinism: `AssembleContext` with identical ontology state and trigger yields byte-identical context.
-- Isolation: cognition cannot reach the filesystem, network, or process table except through listed tools; verified by attempting each from a test backend that emits adversarial tool calls.
-- Compression: a session compressed N times retains every fact needed by a fixture task; verified by replaying recorded sessions across thresholds.
-- Silence: no string derived from budget or context state appears in any model input, verified by scanning inputs in test.
-- Backend swap: a session begun on backend A and continued on backend B completes the fixture task.
-- Cap: private memory refuses the write past the cap and emits the observation.
-- Attribution: every model call in a test run has a uid and is charged to the correct root budget, including nested sub-agents.
-- Parse safety: adversarial model outputs never result in any call other than the listed tools with valid arguments.
+- Isolation: cognition cannot reach the filesystem, network, or process table except through listed tools; verified with a test backend emitting adversarial calls.
+- Append-only: for every consecutive pair of requests in a session, the earlier request body is a byte-prefix of the later one up to the newly appended turns. Run in CI against a backend that rejects prefix mismatches.
+- Strictness: every tool definition sent has `additionalProperties: false` and a full `required` list; a fuzzer cannot produce a call that reaches the harness with invalid arguments.
+- Batching: an assistant turn with N tool calls produces exactly one result message with N results; a rejected call is an error result in that message.
+- Compression: a session compressed N times retains every fact needed by a fixture task; the compression child's backend may differ from the parent's.
+- Silence: no string derived from budget, context size, or compression state appears in any model input except the constant charter-frame sentence.
+- Attribution: every model call in a test run has a uid and is charged at the backend's weights to the correct root budget, including nested sub-agents.
+- Refusal: a refused request produces `BackendRefusal`, ends the wake, and leaves the trigger open.
+- Offline evaluation: a fixture set of recorded wakes (context, trigger, expected disposition) replayed against a backend; a change to the charter frame, tool descriptions, effort defaults, or backend must not regress the pass rate below `cortexd.eval_min_pass`.
 
 ## 16. Decisions
 
-1. **Compression thresholds, memory cap, trust floor, idle timeout, context bound, approximate recall** are `habitat.config` values. Decided that they are configuration.
+1. **Thresholds, caps, timeouts, effort defaults, and context bounds** are `habitat.config` values.
 2. **Approximate recall is off** until the `ontd` search decision is made. Open.
-5. **Hooks obtain cognition only by spawning a sub-agent.** No hook calls a backend directly. The on-compress summary is a sub-agent job with result schema `habitat/Summary`. Decided.
+3. **Hooks obtain cognition only by spawning a sub-agent.** Decided.
+4. **Per-verb strict tools, deferred loading past the tool budget.** Decided.
+5. **No forced tool choice; expectations stated in the charter frame.** Decided.
+6. **Backend fixed per session; server-side fallbacks off.** Decided.
+7. **Sub-agent calls are policy- and kernel-evaluated as the root ancestor; the subuid is the recorded requester.** Decided.
+8. **Effort before scope as the budget lever.** Decided.

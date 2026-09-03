@@ -78,7 +78,7 @@ Exactly one instance. Owned by the operator's charter. Config load fails if `bud
 
 ```
 CognitionBudget {
-  units_per_day: int             # backend-priced units; see registryd Decision 2
+  tokens_per_day: int
   gpu_seconds_per_day: int
   source: unallocated | link -> Resident      # who this was carved from
 }
@@ -128,7 +128,7 @@ Args: `name`, `charter: Charter`, `budget: CognitionBudget`, `justification: lin
 
 Preconditions, in order; all must hold, all deterministic:
 
-1. Policy permits the caller to invoke `CreateAgent`.
+1. Caller's charter includes `CreateAgent`.
 2. `Headcount.agents_available > 0`.
 3. `justification` links to a `Gap` object (§6): an ontology type, sensor, or workflow with no owner. The charter must claim at least one of the gap's items.
 4. Charter passes the `ontd` build: no type ownership overlap, all referenced modules live.
@@ -151,7 +151,7 @@ Args: `target: Agent`, `successor: Agent`.
 
 Preconditions:
 
-1. Policy permits the caller to invoke `RetireAgent`.
+1. Caller's charter includes `RetireAgent`.
 2. Caller has standing: `target` is in the caller's lineage subtree, or the caller holds the staffing charter.
 3. `successor` is active and its charter can absorb the target's owned types without overlap. The merged charter must pass the `ontd` build.
 4. `target` is not the last owner of a context with live sensors unless the successor takes the context.
@@ -228,7 +228,7 @@ Triage resolves a gap by claiming it, delegating it via `UpdateCharter` on anoth
 
 ### 7.2 Subordinate ranges
 
-The global subuid pool is a `registryd` config value. Each agent gets a contiguous range on creation, sized by `agents.subuid_range_size`. Sub-agents are allocated from the root ancestor's range so that lineage is recoverable from the uid alone. A subuid holds no group memberships; a sub-agent's action invocations are evaluated by policy and the kernel as the root ancestor, with the subuid recorded as requester (`cortexd` Decision 7). Ranges are written to the NSS projection, not to `/etc/subuid`.
+The global subuid pool is a `registryd` config value. Each agent gets a contiguous range on creation, sized by `agents.subuid_range_size`. Sub-agents are allocated from the root ancestor's range so that lineage is recoverable from the uid alone. Ranges are written to the NSS projection, not to `/etc/subuid`.
 
 ### 7.3 Groups
 
@@ -264,6 +264,4 @@ A visitor is a human session with no `Resident` object. Authentication is extern
 ## 11. Decisions
 
 1. **Sub-agent max depth, subuid range size, drain timeout, creating timeout** are `habitat.config` values. Decided that they are configuration.
-2. **Budget is measured in units converted from each backend's price table** (uncached input, cache write, cache read, output at their own weights), not raw tokens; `habitat.config` states totals in units. Decided.
-3. **Sub-agent identity for policy: the root ancestor.** Decided.
 4. **Authorization is policy, not identity kind.** `RetireHuman`, `RetireAgent`, `CreateAgent`, and every other action are governed by group membership and policy rules (`ontd` §3.8). Agents and humans are subject to identical rules. Decided.

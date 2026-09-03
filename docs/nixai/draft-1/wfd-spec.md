@@ -52,7 +52,7 @@ Anything that needs a whole machine runs in a disposable microVM booted from the
 
 The `Execution` record for a machine job carries the image generation's store path as `sandbox_hash`, so replay boots the same image. A machine that exceeds the job's TTL is discarded by the `MachineStale` sensor. Nothing survives a job except what was written to the attached dataset and the journal.
 
-Sub-agent jobs are machine jobs booted from the root ancestor's image with no dataset attached. Their action invocations are evaluated and run as the root ancestor (`cortexd` Decision 7).
+Sub-agent jobs are machine jobs booted from the root ancestor's image with no dataset attached.
 
 ### 3.2 Execution record
 
@@ -148,8 +148,6 @@ Runs are ontology objects, so the shell can show every in-flight workflow and wh
 
 Actions invoked by a workflow step and actions invoked by an agent through `cortexd` follow the identical path. There is no privileged route.
 
-Every invocation carries an idempotency key (invocation id) that the implementation passes to the world where the world supports it. Before an action with declared external effects runs, `wfd` writes an `ActionAttempt` object (`pending`); after, it writes the result and marks the attempt `observed` only when a sensor on the target confirms the expected state, or `unconfirmed` if none does within the action's declared confirmation window. An attempt left `pending` across a crash is reconciled on restart: `wfd` queries the target's sensors; if the effect is visible, the attempt is `observed` and not re-run; if not visible and the action is idempotent, it is re-run; if not visible and not idempotent, a yield of type `AmbiguousEffect` goes to the invoker with the attempt record. This is the reconciliation story for actions whose effect is ambiguous after a failure.
-
 An action's implementation runs under the invoking resident's uid, not the module owner's. Kernel permissions then apply to the invoker. Policy in `ontd` says whether the invoker may call the verb; the kernel says whether the invoker may touch what the verb touches. Both must agree.
 
 ## 7. Build environment
@@ -187,7 +185,7 @@ and publishes execution and run state changes on `ont.habitat.run.<WorkflowId>`.
 - Module timeout: execution `timeout`, treated as step failure.
 - `ontd` unavailable: runs pause at the next step boundary; sensors keep evaluating and buffer transitions locally; buffered observations are written in order when `ontd` returns.
 - Bus message missed: runs and sensors reconcile from `ontd` state on reconnect; the log is the truth.
-- Host restart: suspended runs are rehydrated from `ontd`; running steps are re-executed (safe by determinism); pending `ActionAttempt`s are reconciled per §6 before any action re-runs.
+- Host restart: suspended runs are rehydrated from `ontd`; running steps are re-executed (safe by determinism; actions with external effects are re-checked against their result objects first and not re-run if a result exists).
 
 ## 11. Test obligations
 
@@ -198,8 +196,7 @@ and publishes execution and run state changes on `ont.habitat.run.<WorkflowId>`.
 - Action identity: an action invoked by uid A runs as uid A; a target A cannot write is not written.
 - Sensor mediation: a sensor returning the same state twice produces one observation; returning an undeclared state produces `SensorMisbehavior`.
 - Build immutability: a live module is a store path; a new version is a new derivation.
-- Machine jobs: a job that writes outside its tmpfs and undeclared dataset leaves no trace after `Discard`; replay of a machine job boots the identical image generation. The image test asserts boot under one second; `wfd.machine_boot_timeout` is the runtime cutoff.
-- Reconciliation: crash injection between attempt `pending` and result for idempotent and non-idempotent actions yields, respectively, exactly one effect and an `AmbiguousEffect` yield.
+- Machine jobs: a job that writes outside its tmpfs and undeclared dataset leaves no trace after `Discard`; replay of a machine job boots the identical image generation.
 - Restart: a habitat with suspended and running workflows restarts with every run in a consistent state and no duplicated external effects.
 
 ## 12. Decisions

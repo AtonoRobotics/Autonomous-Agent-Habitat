@@ -20,7 +20,7 @@ Why: humans operate the habitat; they do not have a privileged path into it. The
 1. Everything shown is an ontology object, a journal entry, or a live bus message. The shell holds no state of its own beyond session and view preferences.
 2. Every write goes through `ontd.act()` as the human's uid. The shell never calls `wfd`, `registryd`, or `cortexd` directly.
 3. What a human can see is what their groups and charter permit. Two humans looking at the same view may see different graphs.
-4. Anything a human can do in the shell, an agent with the same groups can do through `cortexd`, with one stated exception: Attach, which is a human's presence and has no agent equivalent. The shell adds presentation, not capability.
+4. Anything a human can do in the shell, an agent with the same groups can do through `cortexd`. The shell adds presentation, not capability.
 5. Policy is readable top to bottom as a file. The shell renders and edits that file; it does not hide policy in forms.
 
 ## 3. Identity and sessions
@@ -77,7 +77,7 @@ For anyone with permission to look at or work with a specific agent.
 
 Shared by both surfaces; the resident's own yields.
 
-Each yield renders with its `question_type`, enumerated options as controls where they exist, and the assembled context from `AssembleContext` in the same form an agent would get. Resolving submits `ontd.resolve()` with the answer and an optional stated rule, which feeds `CaptureRule` and crystallization the same as an agent's resolution. Yields routed to a human by policy (co-sign requests are yields whose resolution creates a `Cosign`) appear here alongside domain yields.
+Each yield renders with its `question_type`, enumerated options as controls where they exist, and the assembled context from `AssembleContext` in the same form an agent would get. Resolving submits `ontd.resolve()` with the answer and an optional stated rule, which feeds `CaptureRule` and crystallization the same as an agent's resolution. Yields routed to a human by policy (group-required actions, co-sign requests, `ApprovalRequest`-class questions) appear here alongside domain yields.
 
 A human resolving many yields per day is a visible number on their Residents row. It is the signal that a workflow needs a step, not that the human is busy.
 

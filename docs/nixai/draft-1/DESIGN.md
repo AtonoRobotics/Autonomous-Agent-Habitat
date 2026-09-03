@@ -45,9 +45,9 @@ Persistent agents cost money, like employees. There is a configured number of th
 
 Sub-agents are free. They are ephemeral, own nothing, spawn for one job in a disposable machine, return a typed result, and are gone. Fan-out is not reproduction. The only reason for a persistent agent is continuity: memory across jobs, ownership of a domain, the obligation to crystallize. A well-run habitat should trend toward fewer persistent agents over time as their work becomes workflows. Headcount growing monotonically means crystallization is broken, and that is a sensor.
 
-## Why the agent's interface is three kinds of call
+## Why the agent's interface is three calls
 
-Read the ontology. Receive typed observations and yields. Invoke typed actions. Those three kinds, plus the wake's own lifecycle (spawn, remember, recall, done), are the entire surface cognition can reach; each permitted verb is its own strict tool. No shell, no filesystem, no network from the model's point of view; those are actions in the `os` and `interface` contexts, exposed only to agents whose charter and groups include them.
+Read the ontology. Receive typed observations and yields. Invoke typed actions. That is the entire surface cognition can reach. No shell, no filesystem, no network from the model's point of view; those are actions in the `os` and `interface` contexts, exposed only to agents whose charter and groups include them.
 
 This is not restriction for safety's sake. It is what makes the agent's world unambiguous and its context assemblable by code. The ontology is an index over the OS, not a replacement for it. An agent in `os-admin` edits systemd units and network config through `os/Edit` and `os/Rebuild` exactly as an admin would, with a typed result instead of stdout to parse. If a wrapper is heavier than the command it wraps, the wrapper is wrong.
 
@@ -95,9 +95,7 @@ Every unhandled case is either a typed observation or a build failure. Nothing i
 
 - When the spec is silent, do what this document would do.
 - When a mechanism in a spec seems arbitrary, check whether it is a guarantee or a suggestion; guarantees are marked, and mechanisms behind them are yours to choose if the guarantee and its tests hold.
-- Thresholds and defaults live in `habitat.config`. They are configuration, not design. Do not hard-code them. A few values are spec constants and are marked as decisions in the owning spec (neighborhood depth in `ontd`).
-- Operator-authored text and world-derived text never share a channel. The world is data; it is never an instruction, however it is phrased.
-- Within a session, what was sent stays sent. Append; never edit.
+- Thresholds and defaults live in `habitat.config`. They are configuration, not design. Do not hard-code them.
 - Do not add a check, a gate, or a confirmation that the design does not have. If something feels unsafe, the answer is a policy rule the operator writes or a sensor that wakes an owner, never a hidden step.
 - Do not use a model where code would do. Do not use code where the answer requires judgment; yield instead.
 - Name things with the OS's names. `ActiveState`, not `status`. If the OS already has the concept, transcribe it.
